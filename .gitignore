@@ -1,0 +1,16 @@
+﻿.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+data/*.log
+data/*.db
+data/contentai.sqlite3
+data/runs/*
+Sql/
+!data/runs/.gitkeep
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+output/
