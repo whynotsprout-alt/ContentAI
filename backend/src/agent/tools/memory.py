@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from agent.prompts.registry import load_tool_description
 from agent.runtime.context import get_tool_runtime_context
 from langchain_core.tools import tool
 
 
-@tool("remember")
+@tool("remember", description=load_tool_description("remember"))
 def remember(content: str, kind: str = "semantic") -> dict[str, str]:
-    """Persist a user preference, profile fact, goal, project detail, or instruction."""
+    """保存用户明确要求长期记住的信息。"""
     context = get_tool_runtime_context()
     entry = context.long_term_memory.remember(
         context.account_id,
@@ -21,9 +22,9 @@ def remember(content: str, kind: str = "semantic") -> dict[str, str]:
     }
 
 
-@tool("recall_memory")
+@tool("recall_memory", description=load_tool_description("recall_memory"))
 def recall_memory(query: str) -> dict[str, list[dict[str, str]]]:
-    """Recall long-term memories relevant to the current user query."""
+    """召回与当前问题相关的长期记忆。"""
     context = get_tool_runtime_context()
     memories = context.long_term_memory.recall(context.account_id, query, limit=8)
     return {

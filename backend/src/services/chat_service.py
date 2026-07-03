@@ -3,7 +3,7 @@ from __future__ import annotations
 from agent.memory import LongTermMemory, MemoryRepository, ShortTermMemory
 from agent.runtime.executor import agent_executor
 from models.account import Account
-from models.base import json_dumps, json_loads
+from models.base import json_dumps, json_loads, utcnow
 from models.chat import AgentRun, AgentRunEvent, ChatMessage, ChatSession
 from models.enums import MessageRole, MessageType, RunStatus
 from models.schemas import (
@@ -18,6 +18,8 @@ from models.schemas import (
     RunResponse,
 )
 from services.errors import AccountNotFoundError
+from sqlalchemy import and_, func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 BUSY_RUN_STATUSES = {RunStatus.queued, RunStatus.running}
@@ -50,8 +52,54 @@ class ChatService:
         return CreateSessionResponse(session_id=chat.id, title=chat.title)
 
     def list_sessions(self, session: Session) -> list[ChatSessionSummary]:
-        chats = session.exec(select(ChatSession).order_by(ChatSession.updated_at.desc())).all()
-        return [self._to_session_summary(chat, session) for chat in chats]
+        latest_runs = (
+            select(
+                AgentRun.session_id.label("session_id"),
+                AgentRun.id.label("run_id"),
+                AgentRun.status.label("status"),
+                func.row_number()
+                .over(
+                    partition_by=AgentRun.session_id,
+                    order_by=AgentRun.updated_at.desc(),
+                )
+                .label("rank"),
+            )
+            .subquery()
+        )
+        message_counts = (
+            select(
+                ChatMessage.session_id.label("session_id"),
+                func.count(ChatMessage.id).label("message_count"),
+            )
+            .group_by(ChatMessage.session_id)
+            .subquery()
+        )
+        rows = session.exec(
+            select(
+                ChatSession,
+                latest_runs.c.run_id,
+                latest_runs.c.status,
+                func.coalesce(message_counts.c.message_count, 0),
+            )
+            .outerjoin(
+                latest_runs,
+                and_(latest_runs.c.session_id == ChatSession.id, latest_runs.c.rank == 1),
+            )
+            .outerjoin(message_counts, message_counts.c.session_id == ChatSession.id)
+            .order_by(ChatSession.updated_at.desc())
+        ).all()
+        return [
+            ChatSessionSummary(
+                session_id=chat.id,
+                title=chat.title,
+                created_at=chat.created_at,
+                updated_at=chat.updated_at,
+                latest_run_id=latest_run_id,
+                latest_status=latest_status,
+                message_count=int(message_count or 0),
+            )
+            for chat, latest_run_id, latest_status, message_count in rows
+        ]
 
     def get_session(self, session: Session, session_id: str) -> ChatSessionDetail:
         chat = self._get_chat(session, session_id)
@@ -90,12 +138,14 @@ class ChatService:
             account_id=payload.account_id,
             content=payload.message,
         )
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            raise ActiveRunExistsError("Chat session already has an active run") from exc
         session.refresh(message)
         session.refresh(run)
 
-        agent_executor.run(session, run_id=run.id)
-        session.refresh(run)
         memory = self._conversation_memory(
             session,
             session_id=chat.id,
@@ -121,6 +171,10 @@ class ChatService:
             user_message=run.user_message,
             status=run.status,
             error=run.error,
+            attempt_count=run.attempt_count,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            cancel_requested_at=run.cancel_requested_at,
             messages=[self._message_response(item) for item in messages],
             memory=self._conversation_memory(
                 session,
@@ -128,6 +182,24 @@ class ChatService:
                 account_id=run.account_id,
             ),
         )
+
+    def cancel_run(self, session: Session, run_id: str) -> RunResponse:
+        run = self._get_run(session, run_id)
+        if run.status in TERMINAL_RUN_STATUSES:
+            return self.get_run(session, run_id)
+
+        now = utcnow()
+        run.cancel_requested_at = run.cancel_requested_at or now
+        if run.status == RunStatus.queued:
+            run.status = RunStatus.cancelled
+            run.finished_at = now
+            run.lease_owner = None
+            run.lease_expires_at = None
+        run.touch_updated_at(now)
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return self.get_run(session, run_id)
 
     def event_rows_for_run(
         self,

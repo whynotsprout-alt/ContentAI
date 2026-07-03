@@ -2,6 +2,7 @@ from datetime import datetime
 
 from models.base import json_dumps, new_id, utcnow
 from models.enums import MessageRole, MessageType, RunStatus
+from sqlalchemy import Index, text
 from sqlmodel import Field, SQLModel
 
 
@@ -19,6 +20,15 @@ class ChatSession(SQLModel, table=True):
 
 class AgentRun(SQLModel, table=True):
     __tablename__ = "agentrun"
+    __table_args__ = (
+        Index(
+            "ux_agentrun_active_session_account",
+            "session_id",
+            "account_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
 
     id: str = Field(default_factory=lambda: new_id("run"), primary_key=True)
     session_id: str = Field(index=True, foreign_key="chatsession.id")
@@ -27,6 +37,13 @@ class AgentRun(SQLModel, table=True):
     user_message: str
     status: RunStatus = Field(default=RunStatus.queued, index=True)
     error: str = ""
+    lease_owner: str | None = Field(default=None, index=True)
+    lease_expires_at: datetime | None = Field(default=None, index=True)
+    attempt_count: int = Field(default=0)
+    started_at: datetime | None = None
+    last_heartbeat_at: datetime | None = Field(default=None, index=True)
+    finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

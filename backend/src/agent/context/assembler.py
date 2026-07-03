@@ -6,6 +6,7 @@ from agent.context.window import trim_context_window
 from agent.memory.retriever import render_memories
 from agent.memory.types import MemoryEntry
 from agent.prompts.registry import build_system_prompt
+from core.hotspot_sources import render_hotspot_sources
 from langchain_core.messages import BaseMessage
 from models.account import Account
 
@@ -30,9 +31,12 @@ class ContextAssembler:
     ) -> AgentContext:
         window = trim_context_window(messages)
         system_prompt = build_system_prompt(
+            account_id=account.id,
             account_name=account.name,
-            account_description=account.description,
-            account_instructions=account.instructions,
+            account_positioning=account.positioning,
+            topic_scoring_prompt=account.topic_scoring_prompt,
+            content_creation_prompt=account.content_creation_prompt,
+            allowed_hotspot_sources=render_hotspot_sources(account.hotspot_sources),
             short_term_summary=short_term_summary,
             long_term_memory=render_memories(long_term_memories),
             tool_names=tool_names,

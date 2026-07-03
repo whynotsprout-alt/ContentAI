@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+*.log
+*.err
 data/*.log
 data/*.db
 data/contentai.sqlite3
@@ -13,4 +15,7 @@ Sql/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
 output/

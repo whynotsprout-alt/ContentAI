@@ -50,7 +50,10 @@ def get_session(session_id: str, session: SessionDep) -> ChatSessionDetail:
 
 
 @router.post("/chat/runs", response_model=ChatUserMessageResponse)
-def create_run(payload: RunCreateRequest, session: SessionDep) -> ChatUserMessageResponse:
+def create_run(
+    payload: RunCreateRequest,
+    session: SessionDep,
+) -> ChatUserMessageResponse:
     try:
         return chat_service.create_run(session, payload)
     except AccountNotFoundError as exc:
@@ -84,6 +87,14 @@ def create_session_message(
 def get_run(run_id: str, session: SessionDep) -> RunResponse:
     try:
         return chat_service.get_run(session, run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+
+
+@router.post("/chat/runs/{run_id}/cancel", response_model=RunResponse)
+def cancel_run(run_id: str, session: SessionDep) -> RunResponse:
+    try:
+        return chat_service.cancel_run(session, run_id)
     except RunNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
 

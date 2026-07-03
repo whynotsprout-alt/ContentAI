@@ -27,4 +27,6 @@ Runtime-only objects such as DB sessions, event writers and memory managers are 
 
 - `remember`: persist long-term memory.
 - `recall_memory`: recall long-term memory.
+- `fetch_hotspots`: retrieve latest trend/heat candidates (with account hotspot source controls).
+- `search_topic_sources`: collect evidentiary references and background materials for confirmed topics.
 - `current_datetime`: return current date/time for date-sensitive replies.

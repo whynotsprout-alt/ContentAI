@@ -1,7 +1,9 @@
+import asyncio
 import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
+from agent.runtime.worker import run_worker
 from api.router import router
 from core.config import Env, Settings, get_settings
 from db.session import close_db, init_db
@@ -34,6 +36,7 @@ def _normalize_origins(frontend_origins: str | Iterable[str] | None) -> list[str
 
 def _register_services(app: FastAPI) -> None:
     app.state.catalog_service = CatalogService()
+    app.state.run_worker_task = None
 
 
 def _startup(app: FastAPI) -> None:
@@ -44,6 +47,7 @@ def _startup(app: FastAPI) -> None:
 
 def _shutdown(app: FastAPI) -> None:
     app.state.ready = False
+    run_worker.stop()
     for closer in (
         getattr(app.state.catalog_service, "close", None),
         close_db,
@@ -61,6 +65,8 @@ async def lifespan(app: FastAPI):
 
     try:
         _startup(app)
+        if get_settings().run_worker_enabled:
+            app.state.run_worker_task = asyncio.create_task(run_worker.serve())
     except Exception:
         logger.exception("Application startup failed.")
         app.state.ready = False
@@ -69,6 +75,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        task = getattr(app.state, "run_worker_task", None)
+        if task is not None:
+            run_worker.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         _shutdown(app)
 
 

@@ -17,7 +17,7 @@ def now_utc() -> datetime:
 class AgentEventWriter:
     def __init__(self, run_id: str, session: Session) -> None:
         self.run_id = run_id
-        self.session = session
+        self.bind = session.get_bind()
 
     def emit(self, event: str, data: dict[str, Any]) -> None:
         if not isinstance(event, str) or not event.strip():
@@ -25,14 +25,15 @@ class AgentEventWriter:
         if not isinstance(data, dict):
             raise TypeError("event data must be a JSON object")
 
-        self.session.add(
-            AgentRunEvent(
-                run_id=self.run_id,
-                event=event.strip(),
-                payload=json_dumps(data),
+        with Session(self.bind) as session:
+            session.add(
+                AgentRunEvent(
+                    run_id=self.run_id,
+                    event=event.strip(),
+                    payload=json_dumps(data),
+                )
             )
-        )
-        self.session.commit()
+            session.commit()
 
 
 _event_writer: ContextVar[AgentEventWriter | None] = ContextVar(

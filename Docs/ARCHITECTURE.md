@@ -38,10 +38,13 @@ Infrastructure does not call graph, graph does not perform HTTP or database work
 user message
   -> api/chat.py
   -> services/chat_service.py
+  -> PostgreSQL queued AgentRun
+  -> agent/runtime/worker.py claims run with a lease
   -> agent/runtime/executor.py
   -> context assembler + memory recall
   -> LangGraph: agent -> tools -> agent -> end
   -> persist new messages/events
+  -> validate assistant output format via runtime schema
   -> refresh short-term summary and long-term memory
 ```
 
@@ -51,7 +54,7 @@ Short-term memory follows LangGraph's thread-level pattern:
 
 - graph compiled with a checkpointer
 - each chat session uses `thread_id=session_id`
-- DB chat history is used to rehydrate when the in-memory checkpointer is empty
+- PostgreSQL-backed LangGraph checkpoint state survives restarts and multi-worker runs
 - summaries are stored under a session namespace
 
 Long-term memory follows LangGraph store semantics:
@@ -59,6 +62,6 @@ Long-term memory follows LangGraph store semantics:
 - graph compiled with a store
 - memories are JSON documents under namespace `("accounts", account_id, "long_term")`
 - `remember` and `recall_memory` tools write/read long-term memory
-- records are persisted in `MemoryRecord` and mirrored to `InMemoryStore`
+- records are persisted in `MemoryRecord` and mirrored to the PostgreSQL LangGraph store
 
-The code currently uses `InMemorySaver` and `InMemoryStore` because those packages are already installed. A database-backed LangGraph checkpointer/store can replace them in `agent/runtime/checkpoint.py` without changing graph or API contracts.
+The runtime is PostgreSQL-only: application tables are managed by Alembic migrations, and LangGraph checkpoint/store tables are initialized by `agent/runtime/checkpoint.py`.

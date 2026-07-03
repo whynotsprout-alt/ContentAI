@@ -17,6 +17,8 @@ import {
   Trash2,
   X
 } from '@lucide/vue';
+import DOMPurify from 'dompurify';
+import MarkdownIt from 'markdown-it';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   api,
@@ -40,42 +42,63 @@ const accountSaving = ref(false);
 const accountFormMode = ref<'create' | 'edit'>('edit');
 const accountMessage = ref('');
 const accountSearchTerm = ref('');
+const accountEditingId = ref('');
 const accountForm = ref({
-  id: '',
   name: '',
-  description: '',
-  instructions: ''
+  positioning: '',
+  topic_scoring_prompt: '',
+  content_creation_prompt: '',
+  hotspot_sources: [] as string[]
 });
 const accountNameInput = ref<HTMLInputElement | null>(null);
+const markdownRenderer = new MarkdownIt({
+  breaks: true,
+  html: false,
+  linkify: true
+});
+
+const HOTSPOT_SOURCE_OPTIONS = [
+  { id: '36kr', label: '36Kr' },
+  { id: 'huxiu', label: '虎嗅' },
+  { id: 'ifanr', label: '爱范儿' },
+  { id: 'douyin', label: '抖音' },
+  { id: 'bilibili', label: 'Bilibili' },
+  { id: 'xiaohongshu', label: '小红书' },
+  { id: 'weibo', label: '微博' },
+  { id: 'aihot', label: 'AI HOT' }
+];
 
 const DEFAULT_ACCOUNT_FORM: {
-  id: string;
   name: string;
-  description: string;
-  instructions: string;
+  positioning: string;
+  topic_scoring_prompt: string;
+  content_creation_prompt: string;
+  hotspot_sources: string[];
 } = {
-  id: '',
   name: '',
-  description: '',
-  instructions: ''
+  positioning: '',
+  topic_scoring_prompt: '',
+  content_creation_prompt: '',
+  hotspot_sources: HOTSPOT_SOURCE_OPTIONS.map((source) => source.id)
 };
 
 const filteredAccounts = computed(() => {
   const term = accountSearchTerm.value.trim().toLowerCase();
   if (!term) return store.accounts;
   return store.accounts.filter((account) => {
-    const haystack = `${account.id} ${account.name} ${account.description || ''} ${account.instructions || ''}`.toLowerCase();
+    const haystack = `${account.name} ${account.positioning} ${account.topic_scoring_prompt} ${account.content_creation_prompt}`.toLowerCase();
     return haystack.includes(term);
   });
 });
-const accountIdConflict = computed(() => {
-    const payload = accountPayload();
-  if (!payload.id || accountFormMode.value === 'edit') return false;
-  return store.accounts.some((account) => account.id === payload.id);
-});
 const canSaveAccount = computed(() => {
   const payload = accountPayload();
-  return Boolean(payload.id && payload.name) && !accountIdConflict.value;
+  return Boolean(
+    payload.name &&
+      payload.positioning &&
+      payload.topic_scoring_prompt &&
+      payload.content_creation_prompt &&
+      payload.hotspot_sources.length
+  );
 });
 
 const selectedAccountName = computed(() => {
@@ -114,6 +137,13 @@ onBeforeUnmount(() => {
 function submit() {
   const rawMessage = prompt.value.trim();
   const message = rawMessage || defaultPrompt;
+  if (!store.accountId) {
+    window.alert('请先创建或选择一个账号后再发送。');
+    return;
+  }
+  if (!store.canSubmit) {
+    return;
+  }
   store.submit(message);
   prompt.value = '';
   nextTick(() => {
@@ -122,25 +152,41 @@ function submit() {
 }
 
 function resetAccountForm() {
-  accountForm.value = { ...DEFAULT_ACCOUNT_FORM };
+  accountEditingId.value = '';
+  accountForm.value = {
+    ...DEFAULT_ACCOUNT_FORM,
+    hotspot_sources: [...DEFAULT_ACCOUNT_FORM.hotspot_sources]
+  };
 }
 
 function hydrateAccountForm(account: AccountDetail) {
+  accountEditingId.value = account.id;
   accountForm.value = {
-    id: account.id,
     name: account.name,
-    description: account.description || '',
-    instructions: account.instructions || ''
+    positioning: account.positioning,
+    topic_scoring_prompt: account.topic_scoring_prompt,
+    content_creation_prompt: account.content_creation_prompt,
+    hotspot_sources: [...account.hotspot_sources]
   };
 }
 
 function accountPayload(): AccountPayload {
   return {
-    id: accountForm.value.id.trim(),
     name: accountForm.value.name.trim(),
-    description: accountForm.value.description.trim(),
-    instructions: accountForm.value.instructions.trim()
+    positioning: accountForm.value.positioning.trim(),
+    topic_scoring_prompt: accountForm.value.topic_scoring_prompt.trim(),
+    content_creation_prompt: accountForm.value.content_creation_prompt.trim(),
+    hotspot_sources: accountForm.value.hotspot_sources
   };
+}
+
+function toggleHotspotSource(sourceId: string) {
+  const selected = accountForm.value.hotspot_sources;
+  if (selected.includes(sourceId)) {
+    accountForm.value.hotspot_sources = selected.filter((item) => item !== sourceId);
+    return;
+  }
+  accountForm.value.hotspot_sources = [...selected, sourceId];
 }
 
 
@@ -190,7 +236,7 @@ function closeAccountManager() {
 async function saveAccount() {
   const payload = accountPayload();
   if (!canSaveAccount.value) {
-    accountMessage.value = '账号 ID 和账号名称不能为空。';
+    accountMessage.value = '账号名称、定位、选题评分提示词、内容创作提示词和热点来源不能为空。';
     return;
   }
   accountSaving.value = true;
@@ -199,10 +245,12 @@ async function saveAccount() {
     const account =
       accountFormMode.value === 'create'
         ? await store.createAccount(payload)
-        : await store.updateAccount(payload.id, {
+        : await store.updateAccount(accountEditingId.value, {
             name: payload.name,
-            description: payload.description,
-            instructions: payload.instructions
+            positioning: payload.positioning,
+            topic_scoring_prompt: payload.topic_scoring_prompt,
+            content_creation_prompt: payload.content_creation_prompt,
+            hotspot_sources: payload.hotspot_sources
           });
     accountMessage.value = '账号配置保存成功。';
     accountFormMode.value = 'edit';
@@ -216,8 +264,8 @@ async function saveAccount() {
 }
 
 async function deleteCurrentAccount() {
-  if (accountFormMode.value !== 'edit' || !accountForm.value.id) return;
-  const accountLabel = accountForm.value.name || accountForm.value.id;
+  if (accountFormMode.value !== 'edit' || !accountEditingId.value) return;
+  const accountLabel = accountForm.value.name || '当前账号';
   const confirmedOnce = window.confirm(`确认删除账号【${accountLabel}】吗？此操作将执行账号移除。`);
   if (!confirmedOnce) return;
   const confirmedTwice = window.confirm(`请再次确认：确认彻底删除账号【${accountLabel}】吗？删除后不可恢复。`);
@@ -225,7 +273,7 @@ async function deleteCurrentAccount() {
   accountSaving.value = true;
   accountMessage.value = '';
   try {
-    const deletedId = accountForm.value.id;
+    const deletedId = accountEditingId.value;
     await store.deleteAccount(deletedId);
     accountMessage.value = '账号已成功删除。';
     if (store.accountId) {
@@ -311,6 +359,16 @@ function sessionMeta(messageCount: number, status: string | null) {
   return `${countText} · ${sessionStatusLabel(status)}`;
 }
 
+function renderMessageContent(message: { content: string; message_type: string }) {
+  const html =
+    message.message_type === 'markdown'
+      ? markdownRenderer.render(message.content)
+      : markdownRenderer.utils.escapeHtml(message.content).replace(/\n/g, '<br>');
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true }
+  });
+}
+
 watch(
   () => store.messages.length,
   () => {
@@ -334,10 +392,8 @@ watch(
           <div class="brand-mark"><Sparkles :size="16" /></div>
           <div>
             <strong>ContentAI</strong>
-            <span>Conversation Agent</span>
           </div>
         </div>
-        <span class="eyebrow">CONTENTAI / LANGGRAPH AGENT</span>
         <h1>持续对话工作台</h1>
       </div>
 
@@ -416,7 +472,6 @@ watch(
       <section class="chat-panel glass-surface">
         <header class="chat-header">
           <div class="chat-title-block">
-            <span class="eyebrow">CHAT FLOW</span>
             <h2>{{ selectedAccountName }}</h2>
           </div>
           <div class="chat-toolbar">
@@ -457,7 +512,7 @@ watch(
             :class="message.role"
           >
             <div class="avatar">{{ message.role === 'user' ? '你' : 'AI' }}</div>
-            <p>{{ message.content }}</p>
+            <div class="message-content" v-html="renderMessageContent(message)"></div>
           </article>
         </div>
 
@@ -509,7 +564,7 @@ watch(
                   v-model="accountSearchTerm"
                   type="search"
                   autocomplete="off"
-                   placeholder="输入账号名称或 ID 进行搜索"
+                   placeholder="输入账号名称进行搜索"
                    aria-label="搜索账号"
                 />
               </label>
@@ -524,15 +579,14 @@ watch(
                 v-for="account in filteredAccounts"
                 :key="account.id"
                 class="account-row"
-                :class="{ selected: account.id === accountForm.id && accountFormMode === 'edit' }"
+                :class="{ selected: account.id === accountEditingId && accountFormMode === 'edit' }"
                 type="button"
                 @click="editAccount(account.id)"
               >
                 <span class="account-row-main">
                   <strong>{{ account.name }}</strong>
-                  <small>{{ account.id }}</small>
                 </span>
-                <span class="account-row-desc">{{ account.description || account.instructions || "未填写账号描述" }}</span>
+                <span class="account-row-desc">{{ account.positioning || "未填写账号定位" }}</span>
                 <span v-if="account.id === store.accountId" class="account-row-badge">当前使用</span>
               </button>
             </div>
@@ -544,48 +598,60 @@ watch(
               <header class="form-head">
                 <div>
                   <span class="form-badge">{{ accountFormMode === "edit" ? "编辑账号" : "新增账号" }}</span>
-                  <h3>{{ accountForm.id || "请选择账号" }}</h3>
+                  <h3>{{ accountFormMode === "edit" ? "编辑账号" : "新增账号" }}</h3>
                 </div>
               </header>
 
               <section class="form-section strategy-section">
                 <div class="section-title">
-                  <h4>Agent 画像配置</h4>
-                  <span>这些字段会注入持续对话 Agent 的系统上下文</span>
+                  <h4>内容账号配置</h4>
+                  <span>这些字段会注入每轮对话，驱动选题筛选和内容创作</span>
                 </div>
+                <fieldset class="hotspot-source-field">
+                  <legend>热点来源</legend>
+                  <div class="hotspot-source-grid">
+                    <button
+                      v-for="source in HOTSPOT_SOURCE_OPTIONS"
+                      :key="source.id"
+                      class="hotspot-source-option"
+                      :class="{ selected: accountForm.hotspot_sources.includes(source.id) }"
+                      type="button"
+                      :aria-pressed="accountForm.hotspot_sources.includes(source.id)"
+                      @click="toggleHotspotSource(source.id)"
+                    >
+                      <Check v-if="accountForm.hotspot_sources.includes(source.id)" :size="14" />
+                      <span>{{ source.label }}</span>
+                    </button>
+                  </div>
+                </fieldset>
                 <div class="form-grid">
-                <label>
-                  <span>账号 ID</span>
-                  <input
-                    ref="accountNameInput"
-                    v-model="accountForm.id"
-                    :disabled="accountFormMode === 'edit'"
-                    autocomplete="off"
-                    placeholder="finance-insight"
-                  />
-                  <p class="form-hint" :class="{ error: accountIdConflict }">
-                  {{ accountIdConflict ? '账号 ID 已存在，请填写新的 ID。' : '建议使用小写英文，例如 finance-insight' }}
-                  </p>
-                </label>
                   <label>
                     <span>账号名称</span>
-                    <input v-model="accountForm.name" autocomplete="off" placeholder="例如：财经洞察账号" />
+                    <input ref="accountNameInput" v-model="accountForm.name" autocomplete="off" placeholder="例如：财经洞察账号" />
                   </label>
                 </div>
                 <label>
-                  <span>账号描述</span>
+                  <span>账号定位</span>
                   <textarea
-                    v-model="accountForm.description"
+                    v-model="accountForm.positioning"
                     rows="6"
-                    placeholder="描述这个账号/Agent 的使用场景、服务对象或常见任务。"
+                    placeholder="描述账号人设、目标受众、内容边界、核心差异化和不适合覆盖的方向。"
                   />
                 </label>
                 <label>
-                  <span>长期行为指令</span>
+                  <span>选题过滤评分提示词</span>
                   <textarea
-                    v-model="accountForm.instructions"
-                    rows="12"
-                    placeholder="定义这个 Agent 的长期工作原则、口吻、边界和偏好。"
+                    v-model="accountForm.topic_scoring_prompt"
+                    rows="8"
+                    placeholder="定义候选选题的筛选、评分、排序标准，例如匹配度、传播潜力、风险、商业价值等。"
+                  />
+                </label>
+                <label>
+                  <span>内容创作提示词</span>
+                  <textarea
+                    v-model="accountForm.content_creation_prompt"
+                    rows="8"
+                    placeholder="定义标题、正文、脚本、口吻、结构、表达禁忌和输出格式偏好。"
                   />
                 </label>
               </section>

@@ -13,3 +13,7 @@ class AccountAlreadyExistsError(AccountError):
 
 class AccountValidationError(AccountError):
     pass
+
+
+class AccountInUseError(AccountError):
+    pass

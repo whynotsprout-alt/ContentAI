@@ -6,8 +6,9 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 from core.config import get_settings
@@ -17,6 +18,10 @@ AIHOT_BASE_URL = "https://aihot.virxact.com/api/public"
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 10
 DEFAULT_TIMEOUT_SECONDS = 20
+HTTP_RETRY_ATTEMPTS = 2
+CIRCUIT_OPEN_SECONDS = 30
+CIRCUIT_FAILURE_THRESHOLD = 3
+_CIRCUIT_STATE: dict[str, dict[str, float | int]] = {}
 
 RSS_SOURCES: dict[str, dict[str, Any]] = {
     "36kr": {"label": "36Kr", "url": "https://36kr.com/feed"},
@@ -92,10 +97,10 @@ def fetch_hotspot_sources(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     tikhub_api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Fetch and normalize current hotspot sources.
+    """获取并标准化当前热点来源。
 
-    External API calls live here; LangChain tools should wrap this function
-    instead of reaching directly into RSS, TikHub, or AI HOT endpoints.
+    外部 API 调用集中在这里；LangChain 工具应封装此函数，
+    不直接访问 RSS、TikHub 或 AI HOT 端点。
     """
     capped_limit = _cap_limit(limit)
     selected_sources = _select(sources, ["rss", "tikhub", "aihot"])
@@ -162,9 +167,27 @@ def _request_bytes(
     params: dict[str, Any] | None = None,
     timeout: int,
 ) -> tuple[int, bytes, str]:
-    with httpx.Client(follow_redirects=True, timeout=timeout) as client:
-        response = client.get(url, headers=headers, params=params)
-        return response.status_code, response.content, response.headers.get("content-type", "")
+    _raise_if_circuit_open(url)
+    last_error: Exception | None = None
+    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+        try:
+            with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+                response = client.get(url, headers=headers, params=params)
+                if response.status_code >= 500:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                _record_success(url)
+                return (
+                    response.status_code,
+                    response.content,
+                    response.headers.get("content-type", ""),
+                )
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= HTTP_RETRY_ATTEMPTS:
+                _record_failure(url)
+                break
+            time.sleep(0.2 * (2**attempt))
+    raise RuntimeError(str(last_error) if last_error else "request failed")
 
 
 def _request_json(
@@ -187,6 +210,32 @@ def _request_json(
         raise RuntimeError("response was not JSON: " + text[:500]) from exc
 
 
+def _circuit_key(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.netloc or url
+
+
+def _raise_if_circuit_open(url: str) -> None:
+    state = _CIRCUIT_STATE.get(_circuit_key(url))
+    if not state:
+        return
+    opened_until = float(state.get("opened_until", 0))
+    if opened_until > time.time():
+        raise RuntimeError("circuit breaker is open")
+
+
+def _record_success(url: str) -> None:
+    _CIRCUIT_STATE.pop(_circuit_key(url), None)
+
+
+def _record_failure(url: str) -> None:
+    key = _circuit_key(url)
+    state = _CIRCUIT_STATE.setdefault(key, {"failures": 0, "opened_until": 0.0})
+    state["failures"] = int(state.get("failures", 0)) + 1
+    if int(state["failures"]) >= CIRCUIT_FAILURE_THRESHOLD:
+        state["opened_until"] = time.time() + CIRCUIT_OPEN_SECONDS
+
+
 def _fetch_rss(sources: Sequence[str], limit: int, timeout: int) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": True, "feeds": {}, "items": [], "errors": []}
     headers = {
@@ -194,59 +243,74 @@ def _fetch_rss(sources: Sequence[str], limit: int, timeout: int) -> dict[str, An
         "User-Agent": "ContentAI/0.1 hotspot-fetcher",
     }
 
-    for source in sources:
-        spec = RSS_SOURCES[source]
-        started = time.time()
-        try:
-            status_code, raw, content_type = _request_bytes(
-                spec["url"],
-                headers=headers,
-                timeout=timeout,
-            )
-            raw_items = _parse_feed_items(raw)
-            items = [
-                _normalize_rss_item(source, item, idx + 1)
-                for idx, item in enumerate(raw_items[:limit])
-            ]
-        except Exception as exc:
-            block = {
-                "ok": False,
-                "platform": source,
-                "platform_label": spec["label"],
-                "url": spec["url"],
-                "elapsed_ms": _elapsed_ms(started),
-                "items": [],
-                "error": str(exc),
-            }
+    with ThreadPoolExecutor(max_workers=max(1, min(len(sources), 8))) as executor:
+        futures = {
+            executor.submit(_fetch_one_rss, source, limit, timeout, headers): source
+            for source in sources
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            block = future.result()
             result["feeds"][source] = block
-            result["errors"].append(
-                {"source": "rss", "platform": source, "url": spec["url"], "error": str(exc)}
-            )
-            result["ok"] = False
-            continue
+            result["items"].extend(block["items"])
+            if not block["ok"]:
+                result["errors"].append(
+                    {
+                        "source": "rss",
+                        "platform": source,
+                        "url": RSS_SOURCES[source]["url"],
+                        "error": block.get("error"),
+                    }
+                )
+                result["ok"] = False
 
-        block = {
-            "ok": status_code == 200,
+    return result
+
+
+def _fetch_one_rss(
+    source: str,
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    spec = RSS_SOURCES[source]
+    started = time.time()
+    try:
+        status_code, raw, content_type = _request_bytes(
+            spec["url"],
+            headers=headers,
+            timeout=timeout,
+        )
+        raw_items = _parse_feed_items(raw)
+        items = [
+            _normalize_rss_item(source, item, idx + 1)
+            for idx, item in enumerate(raw_items[:limit])
+        ]
+    except Exception as exc:
+        return {
+            "ok": False,
             "platform": source,
             "platform_label": spec["label"],
             "url": spec["url"],
-            "status_code": status_code,
-            "content_type": content_type,
             "elapsed_ms": _elapsed_ms(started),
-            "raw_count": len(raw_items),
-            "items": items,
+            "items": [],
+            "error": str(exc),
         }
-        if status_code != 200:
-            block["error"] = f"HTTP {status_code}"
-            result["errors"].append(
-                {"source": "rss", "platform": source, "url": spec["url"], "error": block["error"]}
-            )
-            result["ok"] = False
 
-        result["feeds"][source] = block
-        result["items"].extend(items)
-
-    return result
+    block = {
+        "ok": status_code == 200,
+        "platform": source,
+        "platform_label": spec["label"],
+        "url": spec["url"],
+        "status_code": status_code,
+        "content_type": content_type,
+        "elapsed_ms": _elapsed_ms(started),
+        "raw_count": len(raw_items),
+        "items": items,
+    }
+    if status_code != 200:
+        block["error"] = f"HTTP {status_code}"
+    return block
 
 
 def _fetch_tikhub(
@@ -267,78 +331,90 @@ def _fetch_tikhub(
         "User-Agent": "ContentAI/0.1 hotspot-fetcher",
     }
 
-    for platform in platforms:
-        spec = TIKHUB_PLATFORMS[platform]
-        params = dict(spec["params"])
-        if platform == "bilibili":
-            params["limit"] = limit
-        endpoint = TIKHUB_BASE_URL + spec["path"]
-        started = time.time()
-
-        try:
-            status_code, payload = _request_json(
-                endpoint,
-                headers=headers,
-                params=params,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            block = {
-                "ok": False,
-                "platform": platform,
-                "platform_label": spec["label"],
-                "endpoint": endpoint,
-                "params": params,
-                "status_code": None,
-                "elapsed_ms": _elapsed_ms(started),
-                "items": [],
-                "error": str(exc),
-            }
+    with ThreadPoolExecutor(max_workers=max(1, min(len(platforms), 8))) as executor:
+        futures = {
+            executor.submit(_fetch_one_tikhub_platform, platform, limit, timeout, headers): platform
+            for platform in platforms
+        }
+        for future in as_completed(futures):
+            platform = futures[future]
+            block = future.result()
             result["platforms"][platform] = block
-            result["errors"].append({"source": "tikhub", "platform": platform, "error": str(exc)})
-            result["ok"] = False
-            continue
+            result["items"].extend(block["items"])
+            if not block["ok"]:
+                result["ok"] = False
+                result["errors"].append(
+                    {
+                        "source": "tikhub",
+                        "platform": platform,
+                        "status_code": block.get("status_code"),
+                        "message_zh": block.get("message_zh"),
+                        "error": block.get("error"),
+                    }
+                )
 
-        block = {
+    return result
+
+
+def _fetch_one_tikhub_platform(
+    platform: str,
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    spec = TIKHUB_PLATFORMS[platform]
+    params = dict(spec["params"])
+    if platform == "bilibili":
+        params["limit"] = limit
+    endpoint = TIKHUB_BASE_URL + spec["path"]
+    started = time.time()
+
+    try:
+        status_code, payload = _request_json(
+            endpoint,
+            headers=headers,
+            params=params,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return {
             "ok": False,
             "platform": platform,
             "platform_label": spec["label"],
             "endpoint": endpoint,
             "params": params,
-            "status_code": status_code,
+            "status_code": None,
             "elapsed_ms": _elapsed_ms(started),
-            "tikhub_code": payload.get("code") if isinstance(payload, dict) else None,
-            "message_zh": payload.get("message_zh") if isinstance(payload, dict) else None,
             "items": [],
+            "error": str(exc),
         }
 
-        if status_code != 200 or block["tikhub_code"] not in (None, 200):
-            block["error"] = payload.get("detail") if isinstance(payload, dict) else payload
-            result["platforms"][platform] = block
-            result["errors"].append(
-                {
-                    "source": "tikhub",
-                    "platform": platform,
-                    "status_code": status_code,
-                    "message_zh": block["message_zh"],
-                    "error": block["error"],
-                }
-            )
-            result["ok"] = False
-            continue
+    block = {
+        "ok": False,
+        "platform": platform,
+        "platform_label": spec["label"],
+        "endpoint": endpoint,
+        "params": params,
+        "status_code": status_code,
+        "elapsed_ms": _elapsed_ms(started),
+        "tikhub_code": payload.get("code") if isinstance(payload, dict) else None,
+        "message_zh": payload.get("message_zh") if isinstance(payload, dict) else None,
+        "items": [],
+    }
 
-        raw_items = _extract_items(payload, spec["list_paths"])
-        items = [
-            _normalize_tikhub_item(platform, item, idx + 1)
-            for idx, item in enumerate(raw_items[:limit])
-        ]
-        block["ok"] = True
-        block["raw_count"] = len(raw_items)
-        block["items"] = items
-        result["platforms"][platform] = block
-        result["items"].extend(items)
+    if status_code != 200 or block["tikhub_code"] not in (None, 200):
+        block["error"] = payload.get("detail") if isinstance(payload, dict) else payload
+        return block
 
-    return result
+    raw_items = _extract_items(payload, spec["list_paths"])
+    items = [
+        _normalize_tikhub_item(platform, item, idx + 1)
+        for idx, item in enumerate(raw_items[:limit])
+    ]
+    block["ok"] = True
+    block["raw_count"] = len(raw_items)
+    block["items"] = items
+    return block
 
 
 def _fetch_aihot(limit: int, timeout: int) -> dict[str, Any]:

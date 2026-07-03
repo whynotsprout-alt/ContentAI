@@ -1,5 +1,8 @@
+import pytest
+from core.config import Settings
 from fastapi.testclient import TestClient
 from main import _normalize_origins, app, create_app
+from pydantic import ValidationError
 
 
 def test_normalize_origins_splits_comma_separated_values_and_deduplicates():
@@ -28,4 +31,12 @@ def test_startup_registers_only_runtime_services():
         response = client.get("/api/ready")
 
     assert response.status_code == 200
-    assert list(created_app.state._state) == ["catalog_service", "ready"]
+    assert list(created_app.state._state) == ["catalog_service", "run_worker_task", "ready"]
+
+
+def test_settings_reject_sqlite_database_url():
+    with pytest.raises(ValidationError):
+        Settings(
+            CONTENTAI_ENV="development",
+            CONTENTAI_DATABASE_URL="sqlite:///./data/test.db",
+        )

@@ -1,12 +1,21 @@
+import time
 from collections.abc import Iterable
 from typing import Any
 
 from agent.graph.factory import build_agent_graph
-from agent.runtime.checkpoint import build_checkpointer, build_store
+from agent.runtime.checkpoint import (
+    build_checkpointer,
+    build_store,
+    close_runtime_persistence,
+)
 from agent.runtime.executor import agent_executor
+from db.session import engine
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from main import app
+from models.chat import AgentRun, ChatSession
+from models.enums import RunStatus
+from sqlmodel import Session
 
 
 class FakeModel:
@@ -20,6 +29,7 @@ class FakeModel:
 
 
 def install_fake_model(model: FakeModel) -> None:
+    close_runtime_persistence()
     agent_executor.model = model
     agent_executor.checkpointer = build_checkpointer()
     agent_executor.store = build_store()
@@ -31,34 +41,94 @@ def install_fake_model(model: FakeModel) -> None:
     )
 
 
+def wait_for_terminal_run(client: TestClient, run_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    payload: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/chat/runs/{run_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"completed", "failed", "cancelled", "interrupted"}:
+            return payload
+        time.sleep(0.1)
+    raise AssertionError(f"run did not finish in time: {payload}")
+
+
 def test_account_crud_contract():
     payload = {
-        "id": "test-agent",
-        "name": "测试 Agent",
-        "description": "用于测试账号配置。",
-        "instructions": "回复保持简洁。",
+        "name": "测试账号",
+        "positioning": "用于测试的 AI 内容账号。",
+        "topic_scoring_prompt": "给出可执行打分规则，输出 0-100。",
+        "content_creation_prompt": "输出标题和正文，限制口吻并符合账号定位。",
+        "hotspot_sources": ["douyin", "weibo"],
     }
 
     with TestClient(app) as client:
         created = client.post("/api/accounts", json=payload)
         assert created.status_code == 201
-        assert created.json()["instructions"] == payload["instructions"]
+        account_id = created.json()["id"]
+        assert created.json()["positioning"] == payload["positioning"]
+        assert created.json()["hotspot_sources"] == payload["hotspot_sources"]
 
         updated = client.put(
-            "/api/accounts/test-agent",
-            json={"name": "测试 Agent 2", "instructions": "回复更直接。"},
+            f"/api/accounts/{account_id}",
+            json={
+                "name": "测试账号 2",
+                "hotspot_sources": ["xiaohongshu"],
+            },
         )
         assert updated.status_code == 200
-        assert updated.json()["name"] == "测试 Agent 2"
-        assert updated.json()["instructions"] == "回复更直接。"
+        assert updated.json()["name"] == "测试账号 2"
+        assert updated.json()["hotspot_sources"] == ["xiaohongshu"]
 
-        deleted = client.delete("/api/accounts/test-agent")
+        deleted = client.delete(f"/api/accounts/{account_id}")
         assert deleted.status_code == 204
-        assert client.get("/api/accounts/test-agent").status_code == 404
+        assert client.get(f"/api/accounts/{account_id}").status_code == 404
+
+
+def test_account_delete_rejects_referenced_account():
+    with Session(engine) as session:
+        chat = ChatSession()
+        session.add(chat)
+        session.flush()
+        session.add(
+            AgentRun(
+                session_id=chat.id,
+                account_id="default-agent",
+                user_message="只创建引用",
+                status=RunStatus.completed,
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        deleted = client.delete("/api/accounts/default-agent")
+        assert deleted.status_code == 409
+
+
+def test_account_rejects_empty_or_unknown_hotspot_sources():
+    payload = {
+        "name": "错误账号",
+        "positioning": "用于回归的账号。",
+        "topic_scoring_prompt": "测试评分规则",
+        "content_creation_prompt": "测试生成规则",
+        "hotspot_sources": [],
+    }
+
+    with TestClient(app) as client:
+        empty_sources = client.post("/api/accounts", json=payload)
+        assert empty_sources.status_code == 422
+
+        unknown_sources = client.post(
+            "/api/accounts",
+            json={**payload, "hotspot_sources": ["unknown"]},
+        )
+        assert unknown_sources.status_code == 422
 
 
 def test_chat_run_completes_with_plain_reply():
-    install_fake_model(FakeModel([AIMessage(content="plain reply")]))
+    model = FakeModel([AIMessage(content="plain reply")])
+    install_fake_model(model)
 
     with TestClient(app) as client:
         session = client.post("/api/chat/sessions").json()
@@ -67,14 +137,15 @@ def test_chat_run_completes_with_plain_reply():
             json={
                 "session_id": session["session_id"],
                 "account_id": "default-agent",
-                "message": "你好",
+                "message": "测试消息",
             },
         )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
-        payload = client.get(f"/api/chat/runs/{run_id}").json()
+        payload = wait_for_terminal_run(client, run_id)
 
     assert payload["status"] == "completed"
+    assert payload["attempt_count"] >= 1
     assert [message["role"] for message in payload["messages"]] == ["user", "assistant"]
     assert payload["messages"][-1]["content"] == "plain reply"
 
@@ -89,12 +160,15 @@ def test_chat_run_can_call_memory_tool():
                         {
                             "id": "call_1",
                             "name": "remember",
-                            "args": {"content": "偏好：回答要短句", "kind": "preference"},
+                            "args": {
+                                "content": "用户偏好：希望回复简洁。",
+                                "kind": "preference",
+                            },
                             "type": "tool_call",
                         }
                     ],
                 ),
-                AIMessage(content="已记住。"),
+                AIMessage(content="处理完成"),
             ]
         )
     )
@@ -104,16 +178,31 @@ def test_chat_run_can_call_memory_tool():
             "/api/chat/runs",
             json={
                 "account_id": "default-agent",
-                "message": "请记住我偏好短句。",
+                "message": "请记住我的偏好。",
             },
         )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
-        payload = client.get(f"/api/chat/runs/{run_id}").json()
+        payload = wait_for_terminal_run(client, run_id)
 
     assert payload["status"] == "completed"
     assert any(message["role"] == "tool" for message in payload["messages"])
     assert any(
-        item["content"] == "偏好：回答要短句"
+        item["content"] == "用户偏好：希望回复简洁。"
         for item in payload["memory"]["long_term_memories"]
     )
+
+
+def test_queued_run_can_be_cancelled():
+    install_fake_model(FakeModel([AIMessage(content="will not run")]))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat/runs",
+            json={"account_id": "default-agent", "message": "取消这次运行"},
+        )
+        assert response.status_code == 200
+        cancelled = client.post(f"/api/chat/runs/{response.json()['run_id']}/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["cancel_requested_at"] is not None

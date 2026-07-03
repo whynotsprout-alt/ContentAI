@@ -70,5 +70,9 @@ class RunResponse(SchemaBase):
     user_message: constr(min_length=1, max_length=8000, strip_whitespace=True)
     status: RunStatus
     error: str = Field(default="", max_length=4000)
+    attempt_count: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
     messages: list[ChatMessageResponse] = Field(default_factory=list)
     memory: ConversationMemory = Field(default_factory=ConversationMemory)

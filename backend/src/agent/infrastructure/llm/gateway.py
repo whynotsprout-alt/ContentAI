@@ -29,5 +29,13 @@ class ModelGateway:
             tools=tools or [],
         )
 
+    def build_structured_output_model(self, schema: type[Any]) -> Any:
+        return self.client.build_structured_output_model(
+            model=self.settings.llm_model,
+            temperature=0,
+            max_tokens=self.settings.llm_max_tokens,
+            schema=schema,
+        )
+
 
 model_gateway = ModelGateway()

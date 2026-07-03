@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from agent.tools.hotspots import fetch_hotspots
 from agent.tools.registry import build_tool_set, tool_names
 from integrations import hotspots
 
@@ -81,4 +83,29 @@ def test_fetch_hotspots_tool_is_registered():
     assert "fetch_hotspots" in tool_names(tools)
     hotspot_tool = next(tool for tool in tools if getattr(tool, "name", "") == "fetch_hotspots")
     assert "tikhub_api_key" not in hotspot_tool.args
+    assert "rss_sources" in hotspot_tool.args
 
+
+def test_fetch_hotspots_tool_is_limited_by_account_sources(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_fetch_hotspot_sources(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"items": [], "sources": {}, "errors": []}
+
+    monkeypatch.setattr("agent.tools.hotspots.fetch_hotspot_sources", fake_fetch_hotspot_sources)
+    context = ToolRuntimeContext(
+        run_id="run_1",
+        session_id="session_1",
+        account_id="account_1",
+        allowed_hotspot_sources=["douyin", "weibo"],
+        long_term_memory=None,  # type: ignore[arg-type]
+    )
+
+    with tool_runtime_scope(context):
+        result = fetch_hotspots.invoke({"source": "all"})
+
+    assert captured["sources"] == ["tikhub"]
+    assert captured["rss_sources"] == []
+    assert captured["tikhub_platforms"] == ["douyin", "weibo"]
+    assert result["selected_hotspot_sources"] == ["douyin", "weibo"]

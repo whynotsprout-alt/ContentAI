@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +15,10 @@ ANSPIRE_ENDPOINT = "https://plugin.anspire.cn/api/ntsearch/search"
 DEFAULT_RESULT_SIZE = 10
 MAX_RESULT_SIZE = 10
 DEFAULT_TIMEOUT_SECONDS = 30
+HTTP_RETRY_ATTEMPTS = 2
+CIRCUIT_OPEN_SECONDS = 30
+CIRCUIT_FAILURE_THRESHOLD = 3
+_CIRCUIT_STATE: dict[str, dict[str, float | int]] = {}
 
 TITLE_KEYS = ("title", "name", "headline", "web_title", "page_title")
 URL_KEYS = ("url", "link", "href", "source_url", "sourceUrl", "web_url", "page_url")
@@ -29,11 +35,10 @@ def search_topic_sources(
     size: int = DEFAULT_RESULT_SIZE,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Search a confirmed topic through Metaso and Anspire.
+    """通过 Metaso 和 Anspire 检索已确认选题。
 
-    The integration layer owns external API calls and reads API keys from
-    environment-backed settings. The returned records are normalized for model
-    summarization in the agent layer.
+    集成层负责外部 API 调用，并从环境配置读取 API Key。
+    返回记录会被标准化，供 Agent 层整理和总结。
     """
     query = _norm_text(topic)
     if not query:
@@ -68,22 +73,31 @@ def search_topic_sources(
         "errors": [],
     }
 
-    metaso = _search_metaso(query, _metaso_api_key(settings), result_size, timeout)
-    result["results"]["metaso"] = metaso
-    result["items"].extend(metaso["items"])
-    if not metaso["ok"]:
-        result["errors"].append({"provider": "metaso", "error": metaso.get("error")})
-
-    anspire = _search_anspire(
-        query,
-        settings.anspire_api_key.get_secret_value().strip(),
-        result_size,
-        timeout,
-    )
-    result["results"]["anspire"] = anspire
-    result["items"].extend(anspire["items"])
-    if not anspire["ok"]:
-        result["errors"].append({"provider": "anspire", "error": anspire.get("error")})
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            "metaso": executor.submit(
+                _search_metaso,
+                query,
+                _metaso_api_key(settings),
+                result_size,
+                timeout,
+            ),
+            "anspire": executor.submit(
+                _search_anspire,
+                query,
+                settings.anspire_api_key.get_secret_value().strip(),
+                result_size,
+                timeout,
+            ),
+        }
+        for provider, future in futures.items():
+            provider_result = future.result()
+            result["results"][provider] = provider_result
+            result["items"].extend(provider_result["items"])
+            if not provider_result["ok"]:
+                result["errors"].append(
+                    {"provider": provider, "error": provider_result.get("error")}
+                )
 
     result["deduped_sources"] = _dedupe_sources(result["items"])
     return result
@@ -128,7 +142,7 @@ def _search_metaso(query: str, api_key: str, size: int, timeout: int) -> dict[st
     }
 
     try:
-        response = httpx.post(endpoint, json=payload, headers=headers, timeout=timeout)
+        response = _post_with_retry(endpoint, json=payload, headers=headers, timeout=timeout)
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
@@ -171,7 +185,7 @@ def _search_anspire(query: str, api_key: str, top_k: int, timeout: int) -> dict[
     }
 
     try:
-        response = httpx.get(endpoint, params=params, headers=headers, timeout=timeout)
+        response = _get_with_retry(endpoint, params=params, headers=headers, timeout=timeout)
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
@@ -193,6 +207,81 @@ def _search_anspire(query: str, api_key: str, top_k: int, timeout: int) -> dict[
         "raw_count": len(items),
         "items": items,
     }
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+) -> httpx.Response:
+    _raise_if_circuit_open(url)
+    last_error: Exception | None = None
+    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+        try:
+            response = httpx.post(url, json=json, headers=headers, timeout=timeout)
+            if getattr(response, "status_code", 200) >= 500:
+                raise RuntimeError(f"HTTP {response.status_code}")
+            _record_success(url)
+            return response
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= HTTP_RETRY_ATTEMPTS:
+                _record_failure(url)
+                break
+            time.sleep(0.2 * (2**attempt))
+    raise RuntimeError(str(last_error) if last_error else "request failed")
+
+
+def _get_with_retry(
+    url: str,
+    *,
+    params: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+) -> httpx.Response:
+    _raise_if_circuit_open(url)
+    last_error: Exception | None = None
+    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+        try:
+            response = httpx.get(url, params=params, headers=headers, timeout=timeout)
+            if getattr(response, "status_code", 200) >= 500:
+                raise RuntimeError(f"HTTP {response.status_code}")
+            _record_success(url)
+            return response
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= HTTP_RETRY_ATTEMPTS:
+                _record_failure(url)
+                break
+            time.sleep(0.2 * (2**attempt))
+    raise RuntimeError(str(last_error) if last_error else "request failed")
+
+
+def _circuit_key(url: str) -> str:
+    return urlparse(url).netloc or url
+
+
+def _raise_if_circuit_open(url: str) -> None:
+    state = _CIRCUIT_STATE.get(_circuit_key(url))
+    if not state:
+        return
+    opened_until = float(state.get("opened_until", 0))
+    if opened_until > time.time():
+        raise RuntimeError("circuit breaker is open")
+
+
+def _record_success(url: str) -> None:
+    _CIRCUIT_STATE.pop(_circuit_key(url), None)
+
+
+def _record_failure(url: str) -> None:
+    key = _circuit_key(url)
+    state = _CIRCUIT_STATE.setdefault(key, {"failures": 0, "opened_until": 0.0})
+    state["failures"] = int(state.get("failures", 0)) + 1
+    if int(state["failures"]) >= CIRCUIT_FAILURE_THRESHOLD:
+        state["opened_until"] = time.time() + CIRCUIT_OPEN_SECONDS
 
 
 def _extract_metaso_results(response: Any, query: str) -> list[dict[str, Any]]:
@@ -355,4 +444,3 @@ def _safe_metaso_request(payload: dict[str, Any]) -> dict[str, Any]:
         "conciseSnippet": payload["conciseSnippet"],
         "size": payload["size"],
     }
-

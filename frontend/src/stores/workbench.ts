@@ -19,6 +19,46 @@ type WorkbenchMessage = {
   message_type: 'text' | 'markdown' | 'json';
 };
 
+function normalizeErrorMessage(value: unknown) {
+  const message = value instanceof Error ? value.message : String(value || '');
+  const parsed = parseApiErrorDetail(message);
+  const normalized = parsed.trim().replace(/\s+/g, ' ');
+  if (!normalized) return '执行失败';
+  const lowered = normalized.toLowerCase();
+  if (lowered.includes('<html') || lowered.includes('<!doctype html')) {
+    if (lowered.includes('service suspended')) {
+      return '模型服务暂不可用：当前配置的模型网关服务已暂停，请检查模型服务配置。';
+    }
+    return '模型服务返回了异常页面，请检查模型服务配置。';
+  }
+  if (lowered.includes('service suspended')) {
+    return '模型服务暂不可用：当前配置的模型网关服务已暂停，请检查模型服务配置。';
+  }
+  if (lowered.includes('401') || lowered.includes('unauthorized') || lowered.includes('invalid api key')) {
+    return '模型服务认证失败：请检查 API Key 是否有效。';
+  }
+  if (lowered.includes('403') || lowered.includes('forbidden')) {
+    return '模型服务拒绝访问：请检查模型权限或 API Key 权限。';
+  }
+  if (lowered.includes('quota') || lowered.includes('billing') || lowered.includes('insufficient')) {
+    return '模型服务额度不足或计费异常：请检查模型服务账户额度。';
+  }
+  return normalized.slice(0, 800);
+}
+
+function parseApiErrorDetail(message: string) {
+  try {
+    const parsed = JSON.parse(message) as { detail?: unknown; error?: unknown; message?: unknown };
+    const detail = parsed.detail ?? parsed.error ?? parsed.message;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) return detail.map((item) => item?.msg || JSON.stringify(item)).join('；');
+    if (detail) return JSON.stringify(detail);
+  } catch {
+    // keep original message
+  }
+  return message;
+}
+
 export const useWorkbenchStore = defineStore('workbench', {
   state: () => ({
     accounts: [] as Account[],
@@ -41,9 +81,7 @@ export const useWorkbenchStore = defineStore('workbench', {
   }),
   getters: {
     canSubmit(state) {
-      return Boolean(
-        state.accountId && state.sessionId && !['running', 'queued'].includes(state.status)
-      );
+      return Boolean(state.sessionId && !['running', 'queued'].includes(state.status));
     },
     selectedAccount(state) {
       return state.accounts.find((item) => item.id === state.accountId);
@@ -144,6 +182,10 @@ export const useWorkbenchStore = defineStore('workbench', {
 
     async submit(message: string) {
       if (!this.canSubmit) return;
+      if (!this.accountId) {
+        this.error = '请先选择或创建一个账号后再发送消息。';
+        return;
+      }
       this.error = '';
       this.status = 'running';
       this._clearStreamingAssistantMessage();
@@ -161,7 +203,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         await this.refreshSessions().catch(() => undefined);
         this.listen(run.run_id);
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error);
+        this.error = normalizeErrorMessage(error);
         this.status = 'failed';
       }
     },
@@ -184,8 +226,13 @@ export const useWorkbenchStore = defineStore('workbench', {
           const data = JSON.parse((event as MessageEvent).data) as {
             chunk?: string;
             done?: boolean;
+            message_type?: WorkbenchMessage['message_type'];
           };
-          this._appendAssistantMessageDelta(data.chunk || '', Boolean(data.done));
+          this._appendAssistantMessageDelta(
+            data.chunk || '',
+            Boolean(data.done),
+            data.message_type || 'markdown'
+          );
         } catch {
           // ignore malformed SSE payload
         }
@@ -226,7 +273,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         this._stopSseRecoveryPoll();
         try {
           const data = JSON.parse((event as MessageEvent).data) as { error?: string };
-          this.error = data.error || '执行失败';
+          this.error = normalizeErrorMessage(data.error || '执行失败');
         } catch {
           this.error = '执行失败';
         }
@@ -311,7 +358,11 @@ export const useWorkbenchStore = defineStore('workbench', {
       this._clearStreamingAssistantMessage();
     },
 
-    _appendAssistantMessageDelta(chunk: string, done: boolean) {
+    _appendAssistantMessageDelta(
+      chunk: string,
+      done: boolean,
+      messageType: WorkbenchMessage['message_type'] = 'markdown'
+    ) {
       if (!chunk) {
         if (done) {
           this._clearStreamingAssistantMessage();
@@ -324,13 +375,14 @@ export const useWorkbenchStore = defineStore('workbench', {
         if (target && target.role === 'assistant') {
           this.assistantStreamingBuffer += chunk;
           target.content = this.assistantStreamingBuffer;
+          target.message_type = messageType;
         } else {
-          this.messages.push({ role: 'assistant', content: chunk, message_type: 'text' });
+          this.messages.push({ role: 'assistant', content: chunk, message_type: messageType });
           this.assistantStreamingBuffer = chunk;
           this.streamingAssistantMessageIndex = this.messages.length - 1;
         }
       } else {
-        this.messages.push({ role: 'assistant', content: chunk, message_type: 'text' });
+        this.messages.push({ role: 'assistant', content: chunk, message_type: messageType });
         this.assistantStreamingBuffer = chunk;
         this.streamingAssistantMessageIndex = this.messages.length - 1;
         this.isStreamingAssistantMessage = true;
@@ -352,7 +404,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       }
       this._stopSseRecoveryPoll();
       if (status === 'failed') {
-        this.error = this.runInfo?.error || '执行失败';
+        this.error = normalizeErrorMessage(this.runInfo?.error || '执行失败');
         return;
       }
       if (connectionError && !status) {

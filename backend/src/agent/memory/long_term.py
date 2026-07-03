@@ -6,7 +6,6 @@ from typing import Any
 from agent.memory.repository import MemoryRepository
 from agent.memory.retriever import extract_memory_candidates
 from agent.memory.types import MemoryEntry
-from langgraph.store.memory import InMemoryStore
 
 
 def long_term_namespace(account_id: str) -> tuple[str, ...]:
@@ -14,7 +13,7 @@ def long_term_namespace(account_id: str) -> tuple[str, ...]:
 
 
 class LongTermMemory:
-    def __init__(self, repository: MemoryRepository, store: InMemoryStore) -> None:
+    def __init__(self, repository: MemoryRepository, store: Any) -> None:
         self.repository = repository
         self.store = store
 

@@ -7,7 +7,7 @@ Use LangChain and LangGraph as first-class runtime primitives.
 - Tool execution uses LangChain `@tool` functions and LangGraph `ToolNode`.
 - Short-term memory uses a LangGraph checkpointer and `thread_id`.
 - Long-term memory uses a LangGraph store namespace/key model.
-- Prompts live only in `agent/prompts`.
+- Prompts and model-visible tool descriptions live only in `agent/prompts`.
 
 Do not add:
 

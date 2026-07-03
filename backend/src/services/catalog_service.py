@@ -1,12 +1,15 @@
 from db.session import engine
 from models.account import Account
+from models.base import json_dumps
+from models.chat import AgentRun
+from models.memory import MemoryRecord
 from models.schemas import AccountCreate, AccountDetail, AccountSummary, AccountUpdate
 from services.errors import (
-    AccountAlreadyExistsError,
+    AccountInUseError,
     AccountNotFoundError,
     AccountValidationError,
 )
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 
 class CatalogService:
@@ -24,15 +27,14 @@ class CatalogService:
 
     def create_account(self, payload: AccountCreate) -> AccountDetail:
         with Session(engine) as session:
-            if session.get(Account, payload.id) is not None:
-                raise AccountAlreadyExistsError(payload.id)
-            if not payload.id or not payload.name:
-                raise AccountValidationError("Account id and name are required")
+            if not payload.name:
+                raise AccountValidationError("Account name is required")
             account = Account(
-                id=payload.id,
                 name=payload.name,
-                description=payload.description,
-                instructions=payload.instructions,
+                positioning=payload.positioning,
+                topic_scoring_prompt=payload.topic_scoring_prompt,
+                content_creation_prompt=payload.content_creation_prompt,
+                hotspot_sources=payload.hotspot_sources,
             )
             session.add(account)
             session.commit()
@@ -50,10 +52,14 @@ class CatalogService:
                 if not updates["name"]:
                     raise AccountValidationError("Account name cannot be empty")
                 account.name = updates["name"]
-            if "description" in updates:
-                account.description = updates["description"] or ""
-            if "instructions" in updates:
-                account.instructions = updates["instructions"] or ""
+            if "positioning" in updates:
+                account.positioning = updates["positioning"]
+            if "topic_scoring_prompt" in updates:
+                account.topic_scoring_prompt = updates["topic_scoring_prompt"]
+            if "content_creation_prompt" in updates:
+                account.content_creation_prompt = updates["content_creation_prompt"]
+            if "hotspot_sources" in updates:
+                account.hotspot_sources = updates["hotspot_sources"]
 
             account.touch_updated_at()
             session.add(account)
@@ -66,16 +72,35 @@ class CatalogService:
             account = session.get(Account, account_id)
             if account is None:
                 raise AccountNotFoundError(account_id)
+            if self._account_has_references(session, account_id):
+                raise AccountInUseError(
+                    "Account has chat history or memories and cannot be deleted"
+                )
             session.delete(account)
             session.commit()
+
+    @staticmethod
+    def _account_has_references(session: Session, account_id: str) -> bool:
+        has_runs = session.exec(
+            select(AgentRun.id).where(AgentRun.account_id == account_id).limit(1)
+        ).first()
+        namespace_prefix = json_dumps(["accounts", account_id])
+        has_memories = session.exec(
+            select(MemoryRecord.id)
+            .where(col(MemoryRecord.namespace).startswith(namespace_prefix[:-1]))
+            .limit(1)
+        ).first()
+        return has_runs is not None or has_memories is not None
 
     @staticmethod
     def _account_to_summary(account: Account) -> AccountSummary:
         return AccountSummary(
             id=account.id,
             name=account.name,
-            description=account.description,
-            instructions=account.instructions,
+            positioning=account.positioning,
+            topic_scoring_prompt=account.topic_scoring_prompt,
+            content_creation_prompt=account.content_creation_prompt,
+            hotspot_sources=account.hotspot_sources,
         )
 
     def _account_to_detail(self, account: Account) -> AccountDetail:

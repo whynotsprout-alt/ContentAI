@@ -4,21 +4,26 @@ export const API_BASE = configuredApiBase.trim().replace(/\/$/, '');
 export interface Account {
   id: string;
   name: string;
-  description?: string;
-  instructions: string;
+  positioning: string;
+  topic_scoring_prompt: string;
+  content_creation_prompt: string;
+  hotspot_sources: string[];
 }
 
 export interface AccountPayload {
-  id: string;
   name: string;
-  description?: string;
-  instructions: string;
+  positioning: string;
+  topic_scoring_prompt: string;
+  content_creation_prompt: string;
+  hotspot_sources: string[];
 }
 
 export interface AccountUpdatePayload {
   name?: string;
-  description?: string;
-  instructions?: string;
+  positioning?: string;
+  topic_scoring_prompt?: string;
+  content_creation_prompt?: string;
+  hotspot_sources?: string[];
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';

@@ -4,7 +4,7 @@ from api.dependencies import CatalogServiceDep
 from fastapi import APIRouter, HTTPException, Path
 from models.schemas import AccountCreate, AccountDetail, AccountSummary, AccountUpdate
 from services.errors import (
-    AccountAlreadyExistsError,
+    AccountInUseError,
     AccountNotFoundError,
     AccountValidationError,
 )
@@ -34,8 +34,6 @@ def get_account(account_id: AccountIdPath, service: CatalogServiceDep) -> Accoun
 def create_account(payload: AccountCreate, service: CatalogServiceDep) -> AccountDetail:
     try:
         return service.create_account(payload)
-    except AccountAlreadyExistsError as exc:
-        raise HTTPException(status_code=409, detail="Account already exists") from exc
     except AccountValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -61,3 +59,5 @@ def delete_account(account_id: AccountIdPath, service: CatalogServiceDep) -> Non
         service.delete_account(account_id)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Account not found") from exc
+    except AccountInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

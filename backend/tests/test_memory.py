@@ -1,7 +1,7 @@
 from agent.memory import LongTermMemory, MemoryRepository
 from agent.memory.retriever import extract_memory_candidates
+from agent.runtime.checkpoint import build_store
 from db.session import engine
-from langgraph.store.memory import InMemoryStore
 from sqlmodel import Session
 
 
@@ -19,7 +19,7 @@ def test_extract_memory_candidates_recognizes_user_facts():
 
 def test_long_term_memory_persists_and_recalls():
     with Session(engine) as session:
-        memory = LongTermMemory(MemoryRepository(session), InMemoryStore())
+        memory = LongTermMemory(MemoryRepository(session), build_store())
         entry = memory.remember("memory-test-agent", "偏好：回答要短句", kind="preference")
         recalled = memory.recall("memory-test-agent", "短句", limit=3)
 

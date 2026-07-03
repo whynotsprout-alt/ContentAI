@@ -12,6 +12,7 @@ class ToolRuntimeContext:
     run_id: str
     session_id: str
     account_id: str
+    allowed_hotspot_sources: list[str]
     long_term_memory: LongTermMemory
 
 
