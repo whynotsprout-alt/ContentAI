@@ -9,8 +9,11 @@ from core.hotspot_sources import (
     normalize_hotspot_sources,
     split_hotspot_sources,
 )
-from integrations.hotspots import fetch_hotspot_sources
+from integrations.hotspot import hotspot_integration
 from langchain_core.tools import tool
+
+
+fetch_hotspot_sources = hotspot_integration.fetch_hotspots
 
 
 def _parse_csv(value: str | None) -> list[str] | None:
@@ -23,6 +26,8 @@ def _parse_csv(value: str | None) -> list[str] | None:
 def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str = "all") -> dict:
     """获取当前热点、热榜、热搜或趋势话题，结果会被当前账号允许的来源限制。"""
     runtime = get_tool_runtime_context()
+    if not runtime.can_use_tool("fetch_hotspots"):
+        return {"error": "Tool is not allowed for this run.", "tool": "fetch_hotspots"}
     allowed_sources = normalize_hotspot_sources(runtime.allowed_hotspot_sources)
     selected_sources = _select_requested_sources(
         allowed_sources=allowed_sources,
@@ -53,6 +58,7 @@ def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str
         rss_sources=selected_rss_sources,
         tikhub_platforms=selected_tikhub_platforms,
     )
+    
     result["allowed_hotspot_sources"] = allowed_sources
     result["selected_hotspot_sources"] = selected_sources
     return result

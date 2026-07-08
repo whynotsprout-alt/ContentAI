@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.context.window import trim_context_window
-from agent.memory.retriever import render_memories
-from agent.memory.types import MemoryEntry
+from memory.retriever import render_memories
+from memory.types import MemoryEntry
 from agent.prompts.registry import build_system_prompt
+from core.config import get_settings
 from core.hotspot_sources import render_hotspot_sources
 from langchain_core.messages import BaseMessage
 from models.account import Account
@@ -28,8 +29,15 @@ class ContextAssembler:
         short_term_summary: str,
         long_term_memories: list[MemoryEntry],
         tool_names: list[str],
+        focus_message: str | None = None,
     ) -> AgentContext:
-        window = trim_context_window(messages)
+        settings = get_settings()
+        window = trim_context_window(
+            messages,
+            limit=settings.agent.context_max_messages,
+            min_focused_retain=settings.agent.context_min_focused_messages,
+            focus_message=focus_message,
+        )
         system_prompt = build_system_prompt(
             account_id=account.id,
             account_name=account.name,

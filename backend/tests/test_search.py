@@ -4,7 +4,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from agent.tools.registry import build_tool_set, tool_names
-from integrations import search
+from integrations.search import search_integration
+import integrations.search.search as search
 from pydantic import SecretStr
 
 
@@ -25,10 +26,13 @@ def test_search_topic_sources_reads_keys_from_settings_and_caps_results(monkeypa
 
     def fake_settings() -> SimpleNamespace:
         return SimpleNamespace(
-            metaso_api_key=SecretStr("metaso-key"),
-            metaso_search_api_key=SecretStr(""),
-            metaso_key=SecretStr(""),
-            anspire_api_key=SecretStr("anspire-key"),
+            search=SimpleNamespace(
+                metaso_api_key=SecretStr("metaso-key"),
+                metaso_search_api_key=SecretStr(""),
+                metaso_key=SecretStr(""),
+                anspire_api_key=SecretStr("anspire-key"),
+                search_cache_ttl_seconds=300,
+            ),
         )
 
     def fake_post(
@@ -79,7 +83,7 @@ def test_search_topic_sources_reads_keys_from_settings_and_caps_results(monkeypa
     monkeypatch.setattr(search.httpx, "post", fake_post)
     monkeypatch.setattr(search.httpx, "get", fake_get)
 
-    result = search.search_topic_sources("测试选题", size=99)
+    result = search_integration.search_topic_sources("测试选题", size=99)
 
     assert captured_post["headers"]["Authorization"] == "Bearer metaso-key"
     assert captured_post["json"] == {
@@ -100,10 +104,13 @@ def test_search_topic_sources_reads_keys_from_settings_and_caps_results(monkeypa
 def test_search_topic_sources_keeps_partial_results_when_one_provider_has_no_key(monkeypatch):
     def fake_settings() -> SimpleNamespace:
         return SimpleNamespace(
-            metaso_api_key=SecretStr(""),
-            metaso_search_api_key=SecretStr(""),
-            metaso_key=SecretStr(""),
-            anspire_api_key=SecretStr("anspire-key"),
+            search=SimpleNamespace(
+                metaso_api_key=SecretStr(""),
+                metaso_search_api_key=SecretStr(""),
+                metaso_key=SecretStr(""),
+                anspire_api_key=SecretStr("anspire-key"),
+                search_cache_ttl_seconds=300,
+            ),
         )
 
     def fake_get(
@@ -118,7 +125,7 @@ def test_search_topic_sources_keeps_partial_results_when_one_provider_has_no_key
     monkeypatch.setattr(search, "get_settings", fake_settings)
     monkeypatch.setattr(search.httpx, "get", fake_get)
 
-    result = search.search_topic_sources("测试选题")
+    result = search_integration.search_topic_sources("测试选题")
 
     assert result["results"]["metaso"]["ok"] is False
     assert result["results"]["anspire"]["ok"] is True

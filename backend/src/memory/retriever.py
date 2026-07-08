@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from agent.memory.types import MemoryEntry
+from memory.types import MemoryEntry
 
 FACT_PATTERNS = (
     (re.compile(r"(?:我叫|我的名字是|姓名[:：]\s*)([^，。；;\n]+)"), "profile", "姓名"),

@@ -4,16 +4,22 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from agent.memory.long_term import LongTermMemory
+from memory import LongTermMemory
 
 
 @dataclass
 class ToolRuntimeContext:
-    run_id: str
+    execution_id: str
     session_id: str
     account_id: str
     allowed_hotspot_sources: list[str]
     long_term_memory: LongTermMemory
+    tenant_id: str = "local"
+    user_id: str = "local-user"
+    tool_permissions: tuple[str, ...] = ("*",)
+
+    def can_use_tool(self, tool_name: str) -> bool:
+        return "*" in self.tool_permissions or tool_name in self.tool_permissions
 
 
 _runtime_context: ContextVar[ToolRuntimeContext | None] = ContextVar(

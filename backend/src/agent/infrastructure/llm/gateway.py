@@ -19,21 +19,21 @@ class ModelGateway:
 
     @property
     def model_name(self) -> str:
-        return self.settings.llm_model
+        return self.settings.llm.chat_model
 
     def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
         return self.client.build_chat_model(
-            model=self.settings.llm_model,
-            temperature=self.settings.llm_temperature,
-            max_tokens=self.settings.llm_max_tokens,
+            model=self.settings.llm.chat_model,
+            temperature=self.settings.llm.temperature,
+            max_tokens=self.settings.llm.chat_max_tokens,
             tools=tools or [],
         )
 
     def build_structured_output_model(self, schema: type[Any]) -> Any:
         return self.client.build_structured_output_model(
-            model=self.settings.llm_model,
+            model=self.settings.llm.summary_model,
             temperature=0,
-            max_tokens=self.settings.llm_max_tokens,
+            max_tokens=self.settings.llm.structured_max_tokens,
             schema=schema,
         )
 

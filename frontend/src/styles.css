@@ -143,7 +143,7 @@ svg {
   min-width: 1180px;
   height: 100dvh;
   min-height: 760px;
-  gap: 10px;
+  gap: 8px;
   padding: clamp(12px, 1.4vw, 20px);
   overflow: hidden;
 }
@@ -162,6 +162,7 @@ svg {
 .account-menu,
 .message-content,
 .composer,
+.resume-panel,
 input,
 textarea,
 .form-section,
@@ -238,7 +239,8 @@ textarea,
 .danger-action,
 .icon-action,
 .new-account,
-.session-new-action {
+.session-new-action,
+.session-delete-action {
   position: relative;
   display: inline-flex;
   min-height: 42px;
@@ -265,7 +267,8 @@ textarea,
 .account-trigger[aria-expanded="true"],
 .icon-action:hover,
 .new-account:hover,
-.session-new-action:hover {
+.session-new-action:hover,
+.session-delete-action:hover {
   border-color: var(--line-bright);
   background: rgb(255 255 255 / 0.14);
   transform: translateY(-1px);
@@ -277,7 +280,8 @@ textarea,
 .primary-action:active:not(:disabled),
 .danger-action:active:not(:disabled),
 .icon-action:active,
-.new-account:active {
+.new-account:active,
+.session-delete-action:active {
   transform: translateY(0) scale(0.98);
 }
 
@@ -304,9 +308,9 @@ textarea,
   z-index: 20;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: clamp(18px, 2vw, 36px);
+  gap: clamp(12px, 1.4vw, 24px);
   align-items: center;
-  min-height: 96px;
+  min-height: 54px;
   padding: 0 clamp(4px, 1.8vw, 24px);
 }
 
@@ -340,7 +344,7 @@ textarea,
   position: relative;
   z-index: 30;
   display: grid;
-  grid-template-columns: minmax(210px, 280px) 178px;
+  grid-template-columns: auto minmax(210px, 280px) 42px;
   align-items: center;
   align-self: center;
   justify-self: end;
@@ -349,6 +353,10 @@ textarea,
   padding: 10px 12px;
   overflow: visible;
   width: max-content;
+}
+
+.control-nav {
+  justify-content: flex-end;
 }
 
 .control-head,
@@ -505,6 +513,22 @@ textarea,
   font-weight: 800;
 }
 
+.session-count-badge {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+  color: var(--accent);
+  padding: 0 7px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .session-list,
 .account-list-scroll,
 .chat-stream,
@@ -524,6 +548,8 @@ textarea,
 .session-row {
   display: grid;
   width: 100%;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: center;
   gap: 4px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -532,6 +558,7 @@ textarea,
   padding: 13px;
   text-align: left;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12);
+  cursor: pointer;
 }
 
 .session-row:hover,
@@ -552,6 +579,12 @@ textarea,
   white-space: nowrap;
 }
 
+.session-row-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
 .session-row strong {
   color: var(--ink);
   font-size: 13.5px;
@@ -562,6 +595,22 @@ textarea,
 .session-empty {
   color: var(--muted);
   font-size: 12px;
+}
+
+.session-delete-action {
+  width: 34px;
+  min-height: 34px;
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+  padding: 0;
+  opacity: 0.76;
+}
+
+.session-delete-action:hover {
+  border-color: rgb(255 155 123 / 0.4);
+  background: var(--danger-soft);
+  color: var(--danger);
+  opacity: 1;
 }
 
 .session-empty {
@@ -576,28 +625,7 @@ textarea,
   min-width: 0;
   min-height: 0;
   height: 100%;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-}
-
-.chat-header {
-  display: grid;
-  grid-template-columns: minmax(220px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 16px;
-  border-bottom: 1px solid var(--line);
-  padding: 10px 14px 10px 18px;
-}
-
-.chat-title-block {
-  min-width: 0;
-}
-
-.chat-header h2 {
-  margin: 6px 0 0;
-  font-size: clamp(24px, 3vw, 40px);
-  font-weight: 900;
-  line-height: 1;
-  letter-spacing: 0;
+  grid-template-rows: minmax(0, 1fr) auto auto;
 }
 
 .chat-toolbar {
@@ -650,8 +678,7 @@ textarea,
   white-space: nowrap;
 }
 
-.status-chip.running,
-.status-chip.queued {
+.status-chip.running {
   border-color: rgb(var(--accent-rgb) / 0.42);
   color: var(--accent-2);
 }
@@ -672,8 +699,29 @@ textarea,
   flex-direction: column;
   gap: 14px;
   overflow: auto;
-  padding: 26px 32px;
+  padding: 28px 34px;
   background: linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.025));
+}
+
+.status-notice {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  width: fit-content;
+  max-width: min(540px, 100%);
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+  color: var(--accent-2);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.status-notice .spin {
+  color: var(--accent);
 }
 
 .empty-chat {
@@ -711,14 +759,21 @@ textarea,
 
 .message {
   display: grid;
-  max-width: min(880px, 88%);
+  max-width: min(1040px, 92%);
   grid-template-columns: 38px minmax(0, 1fr);
   gap: 11px;
   align-items: start;
 }
 
+.message.assistant {
+  width: min(1360px, 96%);
+  max-width: 96%;
+  align-self: flex-start;
+}
+
 .message.user {
   align-self: flex-end;
+  max-width: min(780px, 76%);
   grid-template-columns: minmax(0, 1fr) 38px;
 }
 
@@ -760,6 +815,39 @@ textarea,
   overflow-wrap: anywhere;
 }
 
+.message.assistant .message-content {
+  width: 100%;
+}
+
+.assistant-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.assistant-progress-spinner {
+  color: var(--accent);
+}
+
+.assistant-pending .avatar,
+.assistant-streaming .avatar {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.assistant-pending .message-content,
+.assistant-streaming .message-content {
+  border-color: rgb(var(--accent-rgb) / 0.34);
+  background:
+    linear-gradient(180deg, rgb(var(--accent-rgb) / 0.19), rgb(var(--accent-rgb) / 0.07)),
+    rgb(var(--accent-rgb) / 0.06);
+}
+
 .message-content > :first-child {
   margin-top: 0;
 }
@@ -798,6 +886,20 @@ textarea,
   padding: 12px;
 }
 
+.message-content table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.message-content th,
+.message-content td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
 .message-content pre code {
   display: block;
   border: 0;
@@ -815,6 +917,40 @@ textarea,
   color: var(--accent);
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
+}
+
+.resume-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 20px 12px;
+  border-radius: 18px;
+  padding: 12px;
+}
+
+.resume-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.resume-copy strong {
+  font-size: 13px;
+}
+
+.resume-copy span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.resume-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 10px;
+}
+
+.resume-actions input {
+  min-width: 0;
+  min-height: 42px;
 }
 
 .composer {
@@ -1173,6 +1309,23 @@ textarea:focus {
   font-weight: 800;
 }
 
+.hotspot-source-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.hotspot-source-group {
+  display: grid;
+  gap: 8px;
+}
+
+.hotspot-source-group h5 {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .hotspot-source-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1258,6 +1411,149 @@ textarea:focus {
   opacity: 0.46;
 }
 
+.confirm-backdrop {
+  z-index: 120;
+  display: block;
+}
+
+.confirm-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: min(430px, calc(100vw - 48px));
+  gap: 18px;
+  border: 1px solid var(--line-bright);
+  border-radius: 24px;
+  background:
+    linear-gradient(145deg, rgb(255 255 255 / 0.2), rgb(255 255 255 / 0.075)),
+    var(--glass-deep);
+  box-shadow: var(--shadow), var(--inner-edge);
+  padding: 20px;
+  backdrop-filter: blur(30px) saturate(145%);
+  -webkit-backdrop-filter: blur(30px) saturate(145%);
+  transform: translate3d(-50%, -50%, 0);
+  transform-origin: center;
+  animation: confirm-dialog-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.confirm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.confirm-icon {
+  display: inline-flex;
+  width: 38px;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(255 155 123 / 0.28);
+  border-radius: 16px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.confirm-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.confirm-copy h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.confirm-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.confirm-copy strong {
+  color: var(--ink);
+}
+
+.confirm-ack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgb(255 255 255 / 0.055);
+  padding: 12px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.35;
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.confirm-ack input {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  accent-color: var(--danger);
+  box-shadow: none;
+  transform: none;
+  transition: none;
+}
+
+.confirm-ack input:hover,
+.confirm-ack input:focus {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.confirm-ack input:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 3px;
+}
+
+.confirm-ack span {
+  display: block;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.secondary-action {
+  border-color: var(--line);
+  background: rgb(255 255 255 / 0.06);
+  color: var(--ink-soft);
+}
+
+.secondary-action:hover:not(:disabled) {
+  border-color: rgb(var(--accent-rgb) / 0.36);
+  color: var(--ink);
+}
+
+.confirm-delete-action {
+  min-width: 132px;
+  justify-content: center;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -1281,6 +1577,17 @@ textarea:focus {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes confirm-dialog-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-50%, calc(-50% + 12px), 0) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
   }
 }
 

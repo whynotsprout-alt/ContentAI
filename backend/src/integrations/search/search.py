@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import html
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,11 +17,34 @@ METASO_ENDPOINT = "https://metaso.cn/api/v1/search"
 ANSPIRE_ENDPOINT = "https://plugin.anspire.cn/api/ntsearch/search"
 DEFAULT_RESULT_SIZE = 10
 MAX_RESULT_SIZE = 10
-DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_TIMEOUT_SECONDS = 12
 HTTP_RETRY_ATTEMPTS = 2
 CIRCUIT_OPEN_SECONDS = 30
 CIRCUIT_FAILURE_THRESHOLD = 3
 _CIRCUIT_STATE: dict[str, dict[str, float | int]] = {}
+FAILURE_CACHE_TTL_SECONDS = 30
+
+
+class SearchIntegration:
+    """Encapsulates search topic retrieval as a domain-facing capability."""
+
+    def search_topic_sources(self, topic: str, *, size: int = DEFAULT_RESULT_SIZE, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+        return search_topic_sources(topic, size=size, timeout=timeout)
+
+
+search_integration = SearchIntegration()
+
+
+@dataclass
+class _InflightCall:
+    event: threading.Event
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
+
+
+_CACHE_LOCK = threading.Lock()
+_RESULT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_INFLIGHT: dict[tuple[Any, ...], _InflightCall] = {}
 
 TITLE_KEYS = ("title", "name", "headline", "web_title", "page_title")
 URL_KEYS = ("url", "link", "href", "source_url", "sourceUrl", "web_url", "page_url")
@@ -45,74 +71,169 @@ def search_topic_sources(
         raise ValueError("topic cannot be empty")
 
     result_size = _cap_size(size)
+    effective_timeout = max(
+        1,
+        min(int(timeout or DEFAULT_TIMEOUT_SECONDS), DEFAULT_TIMEOUT_SECONDS),
+    )
     settings = get_settings()
-    provider_specs = {
-        "metaso": {
-            "endpoint": METASO_ENDPOINT,
-            "method": "POST",
-            "size": result_size,
-            "has_api_key": bool(_metaso_api_key(settings)),
-        },
-        "anspire": {
-            "endpoint": ANSPIRE_ENDPOINT,
-            "method": "GET",
-            "top_k": result_size,
-            "has_api_key": bool(settings.anspire_api_key.get_secret_value().strip()),
-        },
-    }
-    result: dict[str, Any] = {
-        "generated_at": dt.datetime.now(dt.UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z"),
-        "topic": query,
-        "result_size_per_provider": result_size,
-        "providers": provider_specs,
-        "results": {},
-        "items": [],
-        "errors": [],
-    }
+    metaso_api_key = _metaso_api_key(settings)
+    anspire_api_key = settings.search.anspire_api_key.get_secret_value().strip()
+    cache_key = (
+        "search_topic_sources",
+        query,
+        result_size,
+        effective_timeout,
+        bool(metaso_api_key),
+        bool(anspire_api_key),
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            "metaso": executor.submit(
-                _search_metaso,
-                query,
-                _metaso_api_key(settings),
-                result_size,
-                timeout,
-            ),
-            "anspire": executor.submit(
-                _search_anspire,
-                query,
-                settings.anspire_api_key.get_secret_value().strip(),
-                result_size,
-                timeout,
-            ),
+    inflight, is_owner = _inflight_acquire(cache_key)
+    if not is_owner:
+        return _wait_for_inflight(inflight, wait_seconds=effective_timeout + 5)
+
+    try:
+        provider_specs = {
+            "metaso": {
+                "endpoint": METASO_ENDPOINT,
+                "method": "POST",
+                "size": result_size,
+                "has_api_key": bool(metaso_api_key),
+            },
+            "anspire": {
+                "endpoint": ANSPIRE_ENDPOINT,
+                "method": "GET",
+                "top_k": result_size,
+                "has_api_key": bool(anspire_api_key),
+            },
         }
-        for provider, future in futures.items():
-            provider_result = future.result()
-            result["results"][provider] = provider_result
-            result["items"].extend(provider_result["items"])
-            if not provider_result["ok"]:
-                result["errors"].append(
-                    {"provider": provider, "error": provider_result.get("error")}
-                )
+        result: dict[str, Any] = {
+            "generated_at": dt.datetime.now(dt.UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "topic": query,
+            "result_size_per_provider": result_size,
+            "providers": provider_specs,
+            "results": {},
+            "items": [],
+            "errors": [],
+            "cache": {"hit": False},
+        }
 
-    result["deduped_sources"] = _dedupe_sources(result["items"])
-    return result
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                "metaso": executor.submit(
+                    _search_metaso,
+                    query,
+                    metaso_api_key,
+                    result_size,
+                    effective_timeout,
+                ),
+                "anspire": executor.submit(
+                    _search_anspire,
+                    query,
+                    anspire_api_key,
+                    result_size,
+                    effective_timeout,
+                ),
+            }
+            for provider, future in futures.items():
+                provider_result = future.result()
+                result["results"][provider] = provider_result
+                result["items"].extend(provider_result["items"])
+                if not provider_result["ok"]:
+                    result["errors"].append(
+                        {"provider": provider, "error": provider_result.get("error")}
+                    )
+
+        result["deduped_sources"] = _dedupe_sources(result["items"])
+        _cache_set(
+            cache_key,
+            result,
+            _cache_ttl_for_result(result, settings.search.search_cache_ttl_seconds),
+        )
+        inflight.result = copy.deepcopy(result)
+        return result
+    except BaseException as exc:
+        inflight.error = exc
+        raise
+    finally:
+        _inflight_release(cache_key, inflight)
 
 
 def _metaso_api_key(settings: Any) -> str:
+    search_settings = getattr(settings, "search", settings)
     for secret in (
-        settings.metaso_api_key,
-        settings.metaso_search_api_key,
-        settings.metaso_key,
+        search_settings.metaso_api_key,
+        search_settings.metaso_search_api_key,
+        search_settings.metaso_key,
     ):
         value = secret.get_secret_value().strip()
         if value:
             return value
     return ""
+
+
+def _cache_get(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _RESULT_CACHE.get(key)
+        if cached is None:
+            return None
+        expires_at, value = cached
+        if expires_at <= now:
+            _RESULT_CACHE.pop(key, None)
+            return None
+        result = copy.deepcopy(value)
+    result.setdefault("cache", {})
+    result["cache"]["hit"] = True
+    return result
+
+
+def _cache_set(key: tuple[Any, ...], value: dict[str, Any], ttl_seconds: int) -> None:
+    if ttl_seconds <= 0:
+        return
+    with _CACHE_LOCK:
+        _RESULT_CACHE[key] = (time.time() + ttl_seconds, copy.deepcopy(value))
+
+
+def _cache_ttl_for_result(result: dict[str, Any], success_ttl: int) -> int:
+    if result.get("items"):
+        return success_ttl
+    return min(max(success_ttl, 0), FAILURE_CACHE_TTL_SECONDS)
+
+
+def _inflight_acquire(key: tuple[Any, ...]) -> tuple[_InflightCall, bool]:
+    with _CACHE_LOCK:
+        existing = _INFLIGHT.get(key)
+        if existing is not None:
+            return existing, False
+        call = _InflightCall(event=threading.Event())
+        _INFLIGHT[key] = call
+        return call, True
+
+
+def _wait_for_inflight(call: _InflightCall, *, wait_seconds: int) -> dict[str, Any]:
+    if not call.event.wait(timeout=max(wait_seconds, 1)):
+        raise RuntimeError("search request is still in progress")
+    if call.error is not None:
+        raise call.error
+    if call.result is None:
+        raise RuntimeError("search request completed without a result")
+    result = copy.deepcopy(call.result)
+    result.setdefault("cache", {})
+    result["cache"]["hit"] = True
+    result["cache"]["shared_inflight"] = True
+    return result
+
+
+def _inflight_release(key: tuple[Any, ...], call: _InflightCall) -> None:
+    with _CACHE_LOCK:
+        _INFLIGHT.pop(key, None)
+        call.event.set()
 
 
 def _search_metaso(query: str, api_key: str, size: int, timeout: int) -> dict[str, Any]:

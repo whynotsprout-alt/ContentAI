@@ -19,3 +19,4 @@ frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js
 output/
+node_modules/

@@ -10,6 +10,9 @@ class MemoryItem(SchemaBase):
     kind: str = "semantic"
     content: str
     payload: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 1.0
+    importance_score: float = 0.0
+    source_type: str = ""
     updated_at: datetime | None = None
 
 

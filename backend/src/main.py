@@ -1,15 +1,17 @@
-import asyncio
 import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
-from agent.runtime.worker import run_worker
+from agent.runtime.checkpoint import close_runtime_persistence
+from agent.runtime.container import get_runtime_container, reset_runtime_container
 from api.router import router
 from core.config import Env, Settings, get_settings
-from db.session import close_db, init_db
+from core.paths import ensure_runtime_dirs
+from db.session import close_database, validate_database
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from services.catalog_service import CatalogService
+from services.conversation_service import ConversationService
 
 logger = logging.getLogger(__name__)
 
@@ -35,22 +37,31 @@ def _normalize_origins(frontend_origins: str | Iterable[str] | None) -> list[str
 
 
 def _register_services(app: FastAPI) -> None:
+    runtime = get_runtime_container(app.state.settings)
+    app.state.agent_runtime = runtime
     app.state.catalog_service = CatalogService()
-    app.state.run_worker_task = None
+    app.state.conversation_service = ConversationService(runtime)
 
 
 def _startup(app: FastAPI) -> None:
-    init_db()
+    ensure_runtime_dirs()
+    validate_database(app.state.settings)
+    _register_services(app)
     app.state.ready = True
     logger.info("Application startup completed.")
 
 
+def _shutdown_agent_runtime() -> None:
+    close_runtime_persistence()
+    reset_runtime_container()
+
+
 def _shutdown(app: FastAPI) -> None:
     app.state.ready = False
-    run_worker.stop()
     for closer in (
-        getattr(app.state.catalog_service, "close", None),
-        close_db,
+        getattr(getattr(app.state, "conversation_service", None), "close", None),
+        _shutdown_agent_runtime,
+        close_database,
     ):
         if callable(closer):
             try:
@@ -65,8 +76,6 @@ async def lifespan(app: FastAPI):
 
     try:
         _startup(app)
-        if get_settings().run_worker_enabled:
-            app.state.run_worker_task = asyncio.create_task(run_worker.serve())
     except Exception:
         logger.exception("Application startup failed.")
         app.state.ready = False
@@ -75,14 +84,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        task = getattr(app.state, "run_worker_task", None)
-        if task is not None:
-            run_worker.stop()
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
         _shutdown(app)
 
 
@@ -90,14 +91,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
     app = FastAPI(
-        title=settings.app_name,
+        title=settings.server.app_name,
         lifespan=lifespan,
     )
-    _register_services(app)
+    app.state.settings = settings
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_normalize_origins(settings.frontend_origins),
+        allow_origins=_normalize_origins(settings.server.frontend_origins),
         allow_origin_regex=(
             r"^https?://(localhost|127\.0\.0\.1):\d+$"
             if settings.env == Env.development

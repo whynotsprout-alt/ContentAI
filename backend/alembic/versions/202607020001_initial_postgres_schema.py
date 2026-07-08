@@ -116,7 +116,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("namespace", "memory_key", name="ux_memoryrecord_namespace_key"),
     )
-    op.create_index("ix_memoryrecord_content", "memoryrecord", ["content"])
     op.create_index("ix_memoryrecord_kind", "memoryrecord", ["kind"])
     op.create_index("ix_memoryrecord_memory_key", "memoryrecord", ["memory_key"])
     op.create_index("ix_memoryrecord_namespace", "memoryrecord", ["namespace"])
@@ -126,7 +125,6 @@ def downgrade() -> None:
     op.drop_index("ix_memoryrecord_namespace", table_name="memoryrecord")
     op.drop_index("ix_memoryrecord_memory_key", table_name="memoryrecord")
     op.drop_index("ix_memoryrecord_kind", table_name="memoryrecord")
-    op.drop_index("ix_memoryrecord_content", table_name="memoryrecord")
     op.drop_table("memoryrecord")
     op.drop_index("ix_agentrunevent_run_id", table_name="agentrunevent")
     op.drop_table("agentrunevent")

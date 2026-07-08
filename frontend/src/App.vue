@@ -24,12 +24,14 @@ import {
   api,
   type AccountDetail,
   type AccountPayload,
+  type ChatSessionSummary,
 } from './services/api';
 import { useWorkbenchStore } from './stores/workbench';
 
 const store = useWorkbenchStore();
 const defaultPrompt = '直接输入你想讨论或处理的问题';
 const prompt = ref('');
+const resumePrompt = ref('');
 const accountMenuOpen = ref(false);
 const accountPickerRoot = ref<HTMLElement | null>(null);
 const chatStream = ref<HTMLElement | null>(null);
@@ -51,22 +53,73 @@ const accountForm = ref({
   hotspot_sources: [] as string[]
 });
 const accountNameInput = ref<HTMLInputElement | null>(null);
+type DestructiveDeleteTarget = {
+  kind: 'session' | 'account';
+  id: string;
+  label: string;
+};
+const destructiveDeleteTarget = ref<DestructiveDeleteTarget | null>(null);
+const destructiveDeleteAcknowledged = ref(false);
+const destructiveDeleteBusy = ref(false);
 const markdownRenderer = new MarkdownIt({
   breaks: true,
   html: false,
   linkify: true
 });
 
-const HOTSPOT_SOURCE_OPTIONS = [
-  { id: '36kr', label: '36Kr' },
-  { id: 'huxiu', label: '虎嗅' },
-  { id: 'ifanr', label: '爱范儿' },
-  { id: 'douyin', label: '抖音' },
-  { id: 'bilibili', label: 'Bilibili' },
-  { id: 'xiaohongshu', label: '小红书' },
-  { id: 'weibo', label: '微博' },
-  { id: 'aihot', label: 'AI HOT' }
+type HotspotSourceOption = {
+  id: string;
+  label: string;
+  defaultEnabled?: boolean;
+};
+
+const HOTSPOT_SOURCE_GROUPS: { title: string; sources: HotspotSourceOption[] }[] = [
+  {
+    title: '已验证稳定',
+    sources: [
+      { id: '36kr', label: '36Kr', defaultEnabled: true },
+      { id: 'cls', label: '财联社', defaultEnabled: true },
+      { id: 'eeo', label: '经济观察报', defaultEnabled: true },
+      { id: 'yicai', label: '第一财经', defaultEnabled: true },
+      { id: 'huxiu', label: '虎嗅', defaultEnabled: true },
+      { id: 'jiemian', label: '界面', defaultEnabled: true },
+      { id: 'tmtpost', label: '钛媒体', defaultEnabled: true },
+      { id: 'latepost', label: '晚点', defaultEnabled: true },
+      { id: 'qbitai', label: '量子位', defaultEnabled: true },
+      { id: 'leiphone', label: '雷峰网', defaultEnabled: true },
+      { id: 'bloomberg', label: 'Bloomberg', defaultEnabled: true },
+      { id: 'ft', label: 'FT', defaultEnabled: true },
+      { id: 'wsj', label: 'WSJ', defaultEnabled: true },
+      { id: 'techcrunch', label: 'TechCrunch', defaultEnabled: true }
+    ]
+  },
+  {
+    title: '聚合与补充',
+    sources: [
+      { id: 'caixin', label: '财新' },
+      { id: 'vista', label: 'Vista 看天下' },
+      { id: 'theverge', label: 'The Verge' },
+      { id: 'ifanr', label: '爱范儿' }
+    ]
+  },
+  {
+    title: '待确认渠道',
+    sources: [
+      { id: 'stcn', label: '证券时报' }
+    ]
+  },
+  {
+    title: '社交热榜',
+    sources: [
+      { id: 'douyin', label: '抖音', defaultEnabled: true },
+      { id: 'bilibili', label: 'Bilibili', defaultEnabled: true },
+      { id: 'xiaohongshu', label: '小红书', defaultEnabled: true },
+      { id: 'weibo', label: '微博', defaultEnabled: true },
+      { id: 'aihot', label: 'AI HOT', defaultEnabled: true }
+    ]
+  }
 ];
+const HOTSPOT_SOURCE_OPTIONS = HOTSPOT_SOURCE_GROUPS.flatMap((group) => group.sources);
 
 const DEFAULT_ACCOUNT_FORM: {
   name: string;
@@ -79,7 +132,7 @@ const DEFAULT_ACCOUNT_FORM: {
   positioning: '',
   topic_scoring_prompt: '',
   content_creation_prompt: '',
-  hotspot_sources: HOTSPOT_SOURCE_OPTIONS.map((source) => source.id)
+  hotspot_sources: HOTSPOT_SOURCE_OPTIONS.filter((source) => source.defaultEnabled).map((source) => source.id)
 };
 
 const filteredAccounts = computed(() => {
@@ -106,6 +159,24 @@ const selectedAccountName = computed(() => {
 });
 
 const isDarkMode = computed(() => themeMode.value === 'dark');
+const destructiveDeleteTitle = computed(() => {
+  if (!destructiveDeleteTarget.value) return '';
+  return destructiveDeleteTarget.value.kind === 'session' ? '删除会话' : '删除账号';
+});
+const destructiveDeleteDescription = computed(() => {
+  if (!destructiveDeleteTarget.value) return '';
+  return destructiveDeleteTarget.value.kind === 'session'
+    ? '删除后会移除该会话的消息、运行记录和短期记忆。'
+    : '删除后会移除该账号配置，且无法继续用于新的对话。';
+});
+const interruptSummary = computed(() => {
+  const payload = store.interruptPayload;
+  const interrupts = Array.isArray(payload.interrupts) ? payload.interrupts : [];
+  const first = interrupts[0] as { value?: unknown } | undefined;
+  if (first?.value) return typeof first.value === 'string' ? first.value : JSON.stringify(first.value);
+  return 'Agent 需要你的确认或补充信息后继续。';
+});
+const isRunPending = computed(() => store.runLifecycle === 'running');
 
 function applyTheme(mode: 'light' | 'dark') {
   themeMode.value = mode;
@@ -146,6 +217,16 @@ function submit() {
   }
   store.submit(message);
   prompt.value = '';
+  nextTick(() => {
+    promptInput.value?.focus();
+  });
+}
+
+function resumeInterrupted() {
+  const message = resumePrompt.value.trim();
+  if (!message || !store.canResume) return;
+  store.resume(message);
+  resumePrompt.value = '';
   nextTick(() => {
     promptInput.value?.focus();
   });
@@ -263,18 +344,20 @@ async function saveAccount() {
   }
 }
 
-async function deleteCurrentAccount() {
+function requestDeleteCurrentAccount() {
   if (accountFormMode.value !== 'edit' || !accountEditingId.value) return;
-  const accountLabel = accountForm.value.name || '当前账号';
-  const confirmedOnce = window.confirm(`确认删除账号【${accountLabel}】吗？此操作将执行账号移除。`);
-  if (!confirmedOnce) return;
-  const confirmedTwice = window.confirm(`请再次确认：确认彻底删除账号【${accountLabel}】吗？删除后不可恢复。`);
-  if (!confirmedTwice) return;
+  openDestructiveDelete({
+    kind: 'account',
+    id: accountEditingId.value,
+    label: accountForm.value.name || '当前账号'
+  });
+}
+
+async function performAccountDelete(accountId: string) {
   accountSaving.value = true;
   accountMessage.value = '';
   try {
-    const deletedId = accountEditingId.value;
-    await store.deleteAccount(deletedId);
+    await store.deleteAccount(accountId);
     accountMessage.value = '账号已成功删除。';
     if (store.accountId) {
       await editAccount(store.accountId);
@@ -335,28 +418,58 @@ function handleDocumentPointerDown(event: PointerEvent) {
   }
 }
 
-function sessionStatusLabel(status: string | null) {
-  if (!status) return '未开始';
-  const labels: Record<string, string> = {
-    idle: '未开始',
-    queued: '排队中',
-    running: '运行中',
-    completed: '已完成',
-    cancelled: '已取消',
-    interrupted: '已中断',
-    failed: '执行失败'
-  };
-  return labels[status] ?? status;
-}
-
 function sessionDisplayTitle(title: string, messageCount: number) {
   if (title && title !== 'New Session') return title;
   return messageCount > 0 ? '未命名会话' : '新会话';
 }
 
-function sessionMeta(messageCount: number, status: string | null) {
-  const countText = messageCount > 0 ? `${messageCount} 条消息` : '暂无消息';
-  return `${countText} · ${sessionStatusLabel(status)}`;
+function sessionMeta(messageCount: number) {
+  return messageCount > 0 ? `${messageCount} 条消息` : '暂无消息';
+}
+
+function requestDeleteSession(session: ChatSessionSummary) {
+  const title = sessionDisplayTitle(session.title, session.message_count);
+  openDestructiveDelete({
+    kind: 'session',
+    id: session.session_id,
+    label: title
+  });
+}
+
+function openDestructiveDelete(target: DestructiveDeleteTarget) {
+  destructiveDeleteTarget.value = target;
+  destructiveDeleteAcknowledged.value = false;
+}
+
+function closeDestructiveDelete() {
+  if (destructiveDeleteBusy.value) return;
+  destructiveDeleteTarget.value = null;
+  destructiveDeleteAcknowledged.value = false;
+}
+
+async function confirmDestructiveDelete() {
+  if (!destructiveDeleteTarget.value || !destructiveDeleteAcknowledged.value) return;
+  const target = destructiveDeleteTarget.value;
+  destructiveDeleteBusy.value = true;
+  try {
+    if (target.kind === 'session') {
+      await store.deleteSession(target.id);
+    } else {
+      await performAccountDelete(target.id);
+    }
+    destructiveDeleteTarget.value = null;
+    destructiveDeleteAcknowledged.value = false;
+  } catch (error) {
+    if (target.kind === 'account') {
+      accountMessage.value = error instanceof Error ? error.message : String(error);
+    } else {
+      store.error = error instanceof Error ? error.message : String(error);
+    }
+    destructiveDeleteTarget.value = null;
+    destructiveDeleteAcknowledged.value = false;
+  } finally {
+    destructiveDeleteBusy.value = false;
+  }
 }
 
 function renderMessageContent(message: { content: string; message_type: string }) {
@@ -367,6 +480,12 @@ function renderMessageContent(message: { content: string; message_type: string }
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true }
   });
+}
+
+function assistantPlaceholderLabel(state?: string, content = '') {
+  if (state === 'pending') return 'AI 正在思考';
+  if (state === 'streaming') return content ? 'AI 正在生成' : 'AI 正在生成';
+  return '';
 }
 
 watch(
@@ -388,16 +507,25 @@ watch(
 
     <section class="hero-panel">
       <div class="hero-copy">
-        <div class="brand hero-brand">
+        <div class="brand hero-brand" aria-label="ContentAI">
           <div class="brand-mark"><Sparkles :size="16" /></div>
           <div>
             <strong>ContentAI</strong>
           </div>
         </div>
-        <h1>持续对话工作台</h1>
       </div>
 
       <aside class="control-card glass-surface">
+        <nav class="top-nav control-nav" aria-label="工作台导航">
+          <button class="nav-item active" type="button" aria-label="工作台">
+            <MessageSquareText :size="16" />
+            <span>工作台</span>
+          </button>
+          <button class="nav-item" type="button" aria-label="账号配置" @click="openAccountManager">
+            <Settings :size="16" />
+            <span>账号配置</span>
+          </button>
+        </nav>
         <div ref="accountPickerRoot" class="account-picker" @keydown.esc="closeAccountMenu">
           <button
             class="account-trigger"
@@ -429,16 +557,16 @@ watch(
             </button>
           </div>
         </div>
-        <div class="metric-row">
-          <div>
-            <span>Sessions</span>
-            <strong>{{ store.sessions.length }}</strong>
-          </div>
-          <div>
-            <span>Messages</span>
-            <strong>{{ store.messages.length }}</strong>
-          </div>
-        </div>
+        <button
+          class="icon-pill"
+          type="button"
+          :aria-label="isDarkMode ? '切换到浅色模式' : '切换到深色模式'"
+          :title="isDarkMode ? '浅色模式' : '深色模式'"
+          @click="toggleTheme"
+        >
+          <Sun v-if="isDarkMode" :size="17" />
+          <Moon v-else :size="17" />
+        </button>
       </aside>
     </section>
 
@@ -448,58 +576,48 @@ watch(
           <span>
             <History :size="16" />
             <strong>会话记录</strong>
+            <em class="session-count-badge">{{ store.sessions.length }}</em>
           </span>
           <button class="session-new-action" type="button" aria-label="新建会话" @click="store.startNewSession">
             <MessageCirclePlus :size="16" />
           </button>
         </div>
         <div class="session-list">
-          <button
+          <div
             v-for="session in store.sessions"
             :key="session.session_id"
             class="session-row"
             :class="{ active: session.session_id === store.sessionId }"
-            type="button"
+            role="button"
+            tabindex="0"
             @click="store.loadSession(session.session_id)"
+            @keydown.enter.prevent="store.loadSession(session.session_id)"
+            @keydown.space.prevent="store.loadSession(session.session_id)"
           >
-            <strong>{{ sessionDisplayTitle(session.title, session.message_count) }}</strong>
-            <small>{{ sessionMeta(session.message_count, session.latest_status) }}</small>
-          </button>
+            <span class="session-row-main">
+              <strong>{{ sessionDisplayTitle(session.title, session.message_count) }}</strong>
+              <small>{{ sessionMeta(session.message_count) }}</small>
+            </span>
+            <button
+              class="session-delete-action"
+              type="button"
+              aria-label="删除会话"
+              title="删除会话"
+              @click.stop="requestDeleteSession(session)"
+            >
+              <Trash2 :size="15" />
+            </button>
+          </div>
           <p v-if="!store.sessions.length" class="session-empty">暂无会话记录</p>
         </div>
       </aside>
 
       <section class="chat-panel glass-surface">
-        <header class="chat-header">
-          <div class="chat-title-block">
-            <h2>{{ selectedAccountName }}</h2>
-          </div>
-          <div class="chat-toolbar">
-            <nav class="top-nav chat-nav" aria-label="会话窗口导航">
-              <button class="nav-item active" type="button" aria-label="工作台">
-                <MessageSquareText :size="16" />
-                <span>工作台</span>
-              </button>
-              <button class="nav-item" type="button" aria-label="账号配置" @click="openAccountManager">
-                <Settings :size="16" />
-                <span>账号配置</span>
-              </button>
-            </nav>
-
-            <button
-              class="icon-pill"
-              type="button"
-              :aria-label="isDarkMode ? '切换到浅色模式' : '切换到深色模式'"
-              :title="isDarkMode ? '浅色模式' : '深色模式'"
-              @click="toggleTheme"
-            >
-              <Sun v-if="isDarkMode" :size="17" />
-              <Moon v-else :size="17" />
-            </button>
-          </div>
-        </header>
-
         <div ref="chatStream" class="chat-stream">
+          <p v-if="store.statusNotice" class="status-notice">
+            <LoaderCircle :size="15" class="spin" />
+            <span>{{ store.statusNotice }}</span>
+          </p>
           <section v-if="!store.messages.length" class="empty-chat">
             <span class="empty-icon"><MessageSquareText :size="24" /></span>
             <h3>新会话已准备好</h3>
@@ -509,11 +627,45 @@ watch(
             v-for="(message, index) in store.messages"
             :key="index"
             class="message"
-            :class="message.role"
+            :class="[
+              message.role,
+              message.assistant_state === 'pending' ? 'assistant-pending' : '',
+              message.assistant_state === 'streaming' ? 'assistant-streaming' : ''
+            ]"
           >
             <div class="avatar">{{ message.role === 'user' ? '你' : 'AI' }}</div>
-            <div class="message-content" v-html="renderMessageContent(message)"></div>
+            <div class="message-content">
+              <template v-if="message.role === 'assistant' && message.assistant_state && message.assistant_state !== 'normal'">
+                <div class="assistant-progress">
+                  <LoaderCircle :size="14" class="spin assistant-progress-spinner" />
+                  <span>{{ assistantPlaceholderLabel(message.assistant_state, message.content) }}</span>
+                </div>
+                <div v-if="message.content" v-html="renderMessageContent(message)"></div>
+              </template>
+              <div v-else v-html="renderMessageContent(message)"></div>
+            </div>
           </article>
+        </div>
+
+        <div v-if="store.canResume" class="resume-panel">
+          <div class="resume-copy">
+            <strong>等待确认</strong>
+            <span>{{ interruptSummary }}</span>
+          </div>
+          <div class="resume-actions">
+            <input
+              v-model="resumePrompt"
+              type="text"
+              autocomplete="off"
+              placeholder="输入确认或补充信息"
+              aria-label="恢复对话输入"
+              @keydown.enter.prevent="resumeInterrupted"
+            />
+            <button class="primary-action" type="button" :disabled="!resumePrompt.trim()" @click="resumeInterrupted">
+              <Play :size="17" />
+              <span>继续</span>
+            </button>
+          </div>
         </div>
 
         <div class="composer">
@@ -528,9 +680,9 @@ watch(
             @keydown.meta.enter.prevent="submit"
           />
           <button class="primary-action send-action" :disabled="!store.canSubmit" @click="submit">
-            <LoaderCircle v-if="store.status === 'running'" :size="17" class="spin" />
+            <LoaderCircle v-if="isRunPending" :size="17" class="spin" />
             <Play v-else :size="17" />
-            <span>{{ store.status === 'running' ? '处理中' : '发送' }}</span>
+            <span>{{ isRunPending ? '处理中' : '发送' }}</span>
           </button>
         </div>
       </section>
@@ -609,19 +761,24 @@ watch(
                 </div>
                 <fieldset class="hotspot-source-field">
                   <legend>热点来源</legend>
-                  <div class="hotspot-source-grid">
-                    <button
-                      v-for="source in HOTSPOT_SOURCE_OPTIONS"
-                      :key="source.id"
-                      class="hotspot-source-option"
-                      :class="{ selected: accountForm.hotspot_sources.includes(source.id) }"
-                      type="button"
-                      :aria-pressed="accountForm.hotspot_sources.includes(source.id)"
-                      @click="toggleHotspotSource(source.id)"
-                    >
-                      <Check v-if="accountForm.hotspot_sources.includes(source.id)" :size="14" />
-                      <span>{{ source.label }}</span>
-                    </button>
+                  <div class="hotspot-source-groups">
+                    <section v-for="group in HOTSPOT_SOURCE_GROUPS" :key="group.title" class="hotspot-source-group">
+                      <h5>{{ group.title }}</h5>
+                      <div class="hotspot-source-grid">
+                        <button
+                          v-for="source in group.sources"
+                          :key="source.id"
+                          class="hotspot-source-option"
+                          :class="{ selected: accountForm.hotspot_sources.includes(source.id) }"
+                          type="button"
+                          :aria-pressed="accountForm.hotspot_sources.includes(source.id)"
+                          @click="toggleHotspotSource(source.id)"
+                        >
+                          <Check v-if="accountForm.hotspot_sources.includes(source.id)" :size="14" />
+                          <span>{{ source.label }}</span>
+                        </button>
+                      </div>
+                    </section>
                   </div>
                 </fieldset>
                 <div class="form-grid">
@@ -662,7 +819,7 @@ watch(
                   class="danger-action"
                   type="button"
                   :disabled="accountFormMode !== 'edit' || accountSaving"
-                  @click="deleteCurrentAccount"
+                  @click="requestDeleteCurrentAccount"
                 >
                   <Trash2 :size="16" />
                   <span>删除当前账号</span>
@@ -676,6 +833,63 @@ watch(
             </template>
           </form>
         </div>
+      </section>
+    </div>
+
+    <div
+      v-if="destructiveDeleteTarget"
+      class="modal-backdrop confirm-backdrop"
+      @click.self="closeDestructiveDelete"
+    >
+      <section
+        class="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="destructive-confirm-title"
+      >
+        <header class="confirm-header">
+          <span class="confirm-icon"><Trash2 :size="18" /></span>
+          <button
+            class="icon-action"
+            type="button"
+            aria-label="关闭删除确认"
+            :disabled="destructiveDeleteBusy"
+            @click="closeDestructiveDelete"
+          >
+            <X :size="18" />
+          </button>
+        </header>
+        <div class="confirm-copy">
+          <h2 id="destructive-confirm-title">{{ destructiveDeleteTitle }}</h2>
+          <p>
+            <strong>{{ destructiveDeleteTarget.label }}</strong>
+          </p>
+          <p>{{ destructiveDeleteDescription }}此操作不可恢复。</p>
+        </div>
+        <label class="confirm-ack">
+          <input v-model="destructiveDeleteAcknowledged" type="checkbox" />
+          <span>我理解此操作不可恢复</span>
+        </label>
+        <footer class="confirm-actions">
+          <button
+            class="secondary-action"
+            type="button"
+            :disabled="destructiveDeleteBusy"
+            @click="closeDestructiveDelete"
+          >
+            取消
+          </button>
+          <button
+            class="danger-action confirm-delete-action"
+            type="button"
+            :disabled="!destructiveDeleteAcknowledged || destructiveDeleteBusy"
+            @click="confirmDestructiveDelete"
+          >
+            <LoaderCircle v-if="destructiveDeleteBusy" :size="16" class="spin" />
+            <Trash2 v-else :size="16" />
+            <span>{{ destructiveDeleteBusy ? "删除中..." : "确认删除" }}</span>
+          </button>
+        </footer>
       </section>
     </div>
   </main>

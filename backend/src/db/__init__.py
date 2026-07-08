@@ -1,10 +1,19 @@
-from db.session import check_db_connection, close_db, engine, get_session, init_db, make_engine
+from db.session import (
+    assert_database_at_alembic_head,
+    build_engine,
+    check_database_connection,
+    close_database,
+    get_engine,
+    get_session,
+    validate_database,
+)
 
 __all__ = [
-    "check_db_connection",
-    "close_db",
-    "engine",
+    "assert_database_at_alembic_head",
+    "build_engine",
+    "check_database_connection",
+    "close_database",
+    "get_engine",
     "get_session",
-    "init_db",
-    "make_engine",
+    "validate_database",
 ]

@@ -1,0 +1,1845 @@
+from __future__ import annotations
+
+import copy
+import datetime as dt
+import html
+import re
+import threading
+import time
+import xml.etree.ElementTree as ET
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from hashlib import md5, sha1
+from typing import Any
+from urllib.parse import quote_plus, urljoin, urlparse
+
+import httpx
+from agent.runtime.events import emit_event
+from core.config import get_settings
+
+
+TIKHUB_BASE_URL = "https://api.tikhub.io"
+AIHOT_BASE_URL = "https://aihot.virxact.com/api/public"
+RSSHUB_BASE_URL = "https://rsshub.rssforever.com"
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 20
+DEFAULT_TIMEOUT_SECONDS = 8
+HTTP_RETRY_ATTEMPTS = 1
+HTTP_RETRY_SLEEP_SECONDS = 0.1
+MAX_SOURCE_CONCURRENCY = 4
+CIRCUIT_OPEN_SECONDS = 30
+CIRCUIT_FAILURE_THRESHOLD = 3
+
+_CIRCUIT_STATE: dict[str, dict[str, float | int]] = {}
+FAILURE_CACHE_TTL_SECONDS = 30
+
+
+class HotspotIntegration:
+    """Encapsulates hotspot fetching as a domain-facing capability."""
+
+    def fetch_hotspots(
+        self,
+        *,
+        sources: list[str] | None = None,
+        rss_sources: list[str] | None = None,
+        tikhub_platforms: list[str] | None = None,
+        limit: int = DEFAULT_LIMIT,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        tikhub_api_key: str | None = None,
+        max_items: int | None = None,
+    ) -> dict[str, Any]:
+        return fetch_hotspot_sources(
+            sources=sources,
+            rss_sources=rss_sources,
+            tikhub_platforms=tikhub_platforms,
+            limit=limit,
+            timeout=timeout,
+            tikhub_api_key=tikhub_api_key,
+            max_items=max_items,
+        )
+
+
+hotspot_integration = HotspotIntegration()
+
+
+@dataclass
+class _InflightCall:
+    event: threading.Event
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
+
+
+_CACHE_LOCK = threading.Lock()
+_RESULT_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_INFLIGHT: dict[tuple[Any, ...], _InflightCall] = {}
+
+RSS_SOURCES: dict[str, dict[str, Any]] = {
+    "36kr": {
+        "label": "36Kr",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": f"{RSSHUB_BASE_URL}/36kr/hot-list/24",
+                "params": {"limit": DEFAULT_LIMIT},
+                "channel_type": "hotlist",
+                "is_official": False,
+            },
+            {
+                "kind": "rss",
+                "url": "https://36kr.com/feed",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+        ],
+    },
+    "cls": {
+        "label": "财联社",
+        "candidates": [
+            {
+                "kind": "cls_hot_json",
+                "url": "https://www.cls.cn/v2/article/hot/list",
+                "channel_type": "hotlist",
+                "is_official": True,
+            },
+            {
+                "kind": "rss",
+                "url": f"{RSSHUB_BASE_URL}/cls/hot",
+                "params": {"limit": DEFAULT_LIMIT},
+                "channel_type": "hotlist",
+                "is_official": False,
+            },
+        ],
+    },
+    "eeo": {
+        "label": "经济观察报",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "http://www.eeo.com.cn/sypd/rss.xml",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+            {
+                "kind": "rss",
+                "url": "http://www.eeo.com.cn/finance/rss.xml",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+        ],
+    },
+    "yicai": {
+        "label": "第一财经",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": f"{RSSHUB_BASE_URL}/yicai/brief",
+                "params": {"limit": DEFAULT_LIMIT},
+                "channel_type": "rss",
+                "is_official": False,
+            }
+        ],
+    },
+    "huxiu": {
+        "label": "虎嗅",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://rss.huxiu.com/",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "jiemian": {
+        "label": "界面",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://a.jiemian.com/index.php?m=article&a=rss",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "tmtpost": {
+        "label": "钛媒体",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.tmtpost.com/feed",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "latepost": {
+        "label": "晚点 LatePost",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": f"{RSSHUB_BASE_URL}/latepost",
+                "params": {"limit": DEFAULT_LIMIT},
+                "channel_type": "rss",
+                "is_official": False,
+            }
+        ],
+    },
+    "qbitai": {
+        "label": "量子位",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.qbitai.com/feed",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "leiphone": {
+        "label": "雷峰网",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.leiphone.com/feed",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "caixin": {
+        "label": "财新",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://plink.anyfeeder.com/weixin/caixinwang",
+                "channel_type": "aggregator",
+                "is_official": False,
+            }
+        ],
+    },
+    "vista": {
+        "label": "Vista 看天下",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://plink.anyfeeder.com/weixin/vistaweek",
+                "channel_type": "aggregator",
+                "is_official": False,
+            }
+        ],
+    },
+    "bloomberg": {
+        "label": "Bloomberg",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://feeds.bloomberg.com/business/news.rss",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+            {
+                "kind": "rss",
+                "url": "https://feeds.bloomberg.com/markets/news.rss",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+        ],
+    },
+    "ft": {
+        "label": "Financial Times",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.ft.com/news-feed",
+                "params": {"format": "rss"},
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "wsj": {
+        "label": "WSJ",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+            {
+                "kind": "rss",
+                "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+                "channel_type": "rss",
+                "is_official": True,
+            },
+        ],
+    },
+    "techcrunch": {
+        "label": "TechCrunch",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://techcrunch.com/feed/",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "theverge": {
+        "label": "The Verge",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.theverge.com/rss/index.xml",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "ifanr": {
+        "label": "爱范儿",
+        "candidates": [
+            {
+                "kind": "rss",
+                "url": "https://www.ifanr.com/feed",
+                "channel_type": "rss",
+                "is_official": True,
+            }
+        ],
+    },
+    "stcn": {
+        "label": "证券时报",
+        "candidates": [
+            {
+                "kind": "html_latest",
+                "url": "https://www.stcn.com/",
+                "channel_type": "html_latest",
+                "is_official": True,
+            }
+        ],
+    },
+}
+
+TIKHUB_PLATFORMS: dict[str, dict[str, Any]] = {
+    "douyin": {
+        "label": "Douyin",
+        "candidates": [
+            {
+                "path": "/api/v1/douyin/app/v3/fetch_hot_search_list",
+                "params": {"board_type": 0, "board_sub_type": ""},
+                "list_paths": [["data", "data", "word_list"]],
+            }
+        ],
+    },
+    "bilibili": {
+        "label": "Bilibili",
+        "candidates": [
+            {
+                "path": "/api/v1/bilibili/web/fetch_hot_search",
+                "params": {"limit": DEFAULT_LIMIT},
+                "list_paths": [["data", "data", "trending", "list"]],
+            }
+        ],
+    },
+    "xiaohongshu": {
+        "label": "Xiaohongshu",
+        "candidates": [
+            {
+                "path": "/api/v1/xiaohongshu/app_v2/get_creator_hot_inspiration_feed",
+                "params": {},
+                "list_paths": [
+                    ["data", "data", "items"],
+                    ["data", "items"],
+                    ["data", "data", "list"],
+                    ["data", "list"],
+                    ["data"],
+                    ["items"],
+                ],
+            },
+            {
+                "path": "/api/v1/xiaohongshu/web_v2/fetch_hot_list",
+                "params": {},
+                "list_paths": [
+                    ["data", "data", "items"],
+                    ["data", "items"],
+                    ["data", "data", "list"],
+                    ["data", "list"],
+                    ["data"],
+                ],
+            },
+        ],
+    },
+    "weibo": {
+        "label": "Weibo",
+        "candidates": [
+            {
+                "path": "/api/v1/weibo/app/fetch_hot_search",
+                "params": {},
+                "list_paths": [
+                    ["data", "items", "1", "items"],
+                    ["data", "data", "realtime"],
+                    ["data", "data", "hotgov"],
+                    ["data", "data", "hot"],
+                    ["data", "data", "list"],
+                    ["data", "realtime"],
+                    ["data", "list"],
+                    ["data"],
+                ],
+            },
+            {
+                "path": "/api/v1/weibo/web_v2/fetch_hot_search",
+                "params": {},
+                "list_paths": [
+                    ["data", "realtime"],
+                    ["data", "data", "realtime"],
+                    ["data", "hotgov"],
+                    ["data", "data", "hotgov"],
+                    ["data", "data", "list"],
+                    ["data", "list"],
+                    ["data"],
+                ],
+            },
+        ],
+    },
+}
+
+TITLE_KEYS = (
+    "title",
+    "word",
+    "keyword",
+    "show_name",
+    "note",
+    "desc",
+    "sentence",
+    "name",
+    "display_title",
+)
+HOT_KEYS = ("hot_value", "hot", "heat", "score", "num", "rank_score", "raw_hot", "discussion")
+URL_KEYS = ("url", "uri", "link", "scheme", "jump_url", "share_url", "mobile_url")
+INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def fetch_hotspot_sources(
+    *,
+    sources: list[str] | None = None,
+    rss_sources: list[str] | None = None,
+    tikhub_platforms: list[str] | None = None,
+    limit: int = DEFAULT_LIMIT,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    tikhub_api_key: str | None = None,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+    effective_timeout = max(
+        1,
+        min(int(timeout or DEFAULT_TIMEOUT_SECONDS), DEFAULT_TIMEOUT_SECONDS),
+    )
+    cache_key = _hotspot_cache_key(
+        sources=sources,
+        rss_sources=rss_sources,
+        tikhub_platforms=tikhub_platforms,
+        limit=limit,
+        timeout=effective_timeout,
+        tikhub_api_key=tikhub_api_key,
+        max_items=max_items,
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    inflight, is_owner = _inflight_acquire(cache_key)
+    if not is_owner:
+        return _wait_for_inflight(inflight, wait_seconds=effective_timeout + 5)
+
+    try:
+        result = _fetch_hotspot_sources_uncached(
+            sources=sources,
+            rss_sources=rss_sources,
+            tikhub_platforms=tikhub_platforms,
+            limit=limit,
+            timeout=effective_timeout,
+            tikhub_api_key=tikhub_api_key,
+            max_items=max_items,
+        )
+        settings = get_settings()
+        _cache_set(
+            cache_key,
+            result,
+            _cache_ttl_for_result(result, settings.search.hotspot_cache_ttl_seconds),
+        )
+        inflight.result = copy.deepcopy(result)
+        return result
+    except BaseException as exc:
+        inflight.error = exc
+        raise
+    finally:
+        _inflight_release(cache_key, inflight)
+
+
+def _fetch_hotspot_sources_uncached(
+    *,
+    sources: list[str] | None = None,
+    rss_sources: list[str] | None = None,
+    tikhub_platforms: list[str] | None = None,
+    limit: int = DEFAULT_LIMIT,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    tikhub_api_key: str | None = None,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+    capped_limit = _cap_limit(limit)
+    selected_source_groups = _select(sources, ["rss", "tikhub", "aihot"])
+    selected_rss_sources = _select(rss_sources, list(RSS_SOURCES))
+    selected_tikhub_platforms = _select(tikhub_platforms, list(TIKHUB_PLATFORMS))
+    selected_platform_count = 0
+    if "rss" in selected_source_groups:
+        selected_platform_count += len(selected_rss_sources)
+    if "tikhub" in selected_source_groups:
+        selected_platform_count += len(selected_tikhub_platforms)
+    if "aihot" in selected_source_groups:
+        selected_platform_count += 1
+    requested_limit = _cap_total_items(
+        max_items
+        if max_items is not None
+        else capped_limit * max(1, selected_platform_count)
+    )
+
+    result: dict[str, Any] = {
+        "generated_at": dt.datetime.now(dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "limit_per_platform": capped_limit,
+        "max_items": requested_limit,
+        "sources": {},
+        "items": [],
+        "errors": [],
+    }
+
+    started_at = time.perf_counter()
+    if not selected_source_groups:
+        result["errors"].append(
+            {
+                "source": "hotspot_fetch",
+                "error": "No enabled hotspot source groups were selected.",
+            }
+        )
+        _emit_fetch_metric(
+            "global_fetch_completed",
+            value_ms=0,
+            selected_sources=[],
+            selected_limit=capped_limit,
+            selected_max_items=requested_limit,
+            items_count=0,
+            error_count=len(result["errors"]),
+        )
+        return result
+
+    max_workers = min(len(selected_source_groups), MAX_SOURCE_CONCURRENCY)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures: list[tuple[str, Future[Any]]] = []
+        if "rss" in selected_source_groups:
+            futures.append(
+                (
+                    "rss",
+                    executor.submit(
+                        _timed("rss", _fetch_rss, selected_rss_sources, capped_limit, timeout),
+                    ),
+                )
+            )
+        if "tikhub" in selected_source_groups:
+            api_key = (
+                tikhub_api_key
+                if tikhub_api_key is not None
+                else _configured_tikhub_api_key()
+            )
+            futures.append(
+                (
+                    "tikhub",
+                    executor.submit(
+                        _timed(
+                            "tikhub",
+                            _fetch_tikhub,
+                            api_key,
+                            selected_tikhub_platforms,
+                            capped_limit,
+                            timeout,
+                        ),
+                    ),
+                )
+            )
+        if "aihot" in selected_source_groups:
+            futures.append(
+                (
+                    "aihot",
+                    executor.submit(_timed("aihot", _fetch_aihot, capped_limit, timeout)),
+                )
+            )
+
+        future_to_source = {future: source_name for source_name, future in futures}
+        source_results: list[tuple[str, dict[str, Any]]] = []
+        for future in as_completed(future_to_source):
+            source_name = future_to_source[future]
+            started = time.perf_counter()
+            block = _safe_future_result(future, source_name=source_name)
+            block["source"] = source_name
+            block["elapsed_ms"] = block.get(
+                "elapsed_ms",
+                int((time.perf_counter() - started) * 1000),
+            )
+
+            result["sources"][source_name] = block
+            result["items"].extend(block.get("items", []))
+            source_results.append((source_name, block))
+            for error in block.get("errors", []):
+                if isinstance(error, dict):
+                    result["errors"].append({"source": source_name, **error})
+                else:
+                    result["errors"].append({"source": source_name, "error": str(error)})
+
+            _emit_fetch_metric(
+                "source_fetch_completed",
+                source=source_name,
+                ok=bool(block.get("ok", False)),
+                selected_limit=capped_limit,
+                elapsed_ms=int(block.get("elapsed_ms", 0)),
+                items_count=int(len(block.get("items", []))),
+                raw_items=int(block.get("raw_count", 0)),
+                status_code=block.get("status_code"),
+                error_code=block.get("error_code"),
+                selected_source_groups=len(selected_source_groups),
+            )
+
+    successful_sources = sum(
+        1
+        for _, source_block in source_results
+        if bool(source_block.get("ok", False))
+    )
+    failed_sources = len(source_results) - successful_sources
+    result["items"] = _dedupe_and_trim_items(
+        result["items"],
+        max_items=requested_limit,
+    )
+    _emit_fetch_metric(
+        "global_fetch_completed",
+        value_ms=int((time.perf_counter() - started_at) * 1000),
+        selected_sources=selected_source_groups,
+        selected_limit=capped_limit,
+        selected_max_items=requested_limit,
+        items_count=len(result["items"]),
+        error_count=len(result["errors"]),
+        successful_sources=successful_sources,
+        failed_sources=failed_sources,
+    )
+    return result
+
+
+def _hotspot_cache_key(
+    *,
+    sources: list[str] | None,
+    rss_sources: list[str] | None,
+    tikhub_platforms: list[str] | None,
+    limit: int,
+    timeout: int,
+    tikhub_api_key: str | None,
+    max_items: int | None,
+) -> tuple[Any, ...]:
+    selected_groups = _select(sources, ["rss", "tikhub", "aihot"])
+    selected_rss = _select(rss_sources, list(RSS_SOURCES))
+    selected_tikhub = _select(tikhub_platforms, list(TIKHUB_PLATFORMS))
+    selected_count = 0
+    if "rss" in selected_groups:
+        selected_count += len(selected_rss)
+    if "tikhub" in selected_groups:
+        selected_count += len(selected_tikhub)
+    if "aihot" in selected_groups:
+        selected_count += 1
+    return (
+        "fetch_hotspot_sources",
+        tuple(sorted(_cache_values(sources))),
+        tuple(sorted(_cache_values(rss_sources))),
+        tuple(sorted(_cache_values(tikhub_platforms))),
+        _cap_limit(limit),
+        timeout,
+        bool(tikhub_api_key),
+        _cap_total_items(
+            max_items
+            if max_items is not None
+            else _cap_limit(limit) * max(1, selected_count)
+        ),
+    )
+
+
+def _cache_values(values: list[str] | None) -> list[str]:
+    if not values:
+        return ["all"]
+    return [str(value).strip().lower() for value in values if str(value).strip()] or ["all"]
+
+
+def _cache_get(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _RESULT_CACHE.get(key)
+        if cached is None:
+            return None
+        expires_at, value = cached
+        if expires_at <= now:
+            _RESULT_CACHE.pop(key, None)
+            return None
+        result = copy.deepcopy(value)
+    result.setdefault("cache", {})
+    result["cache"]["hit"] = True
+    return result
+
+
+def _cache_set(key: tuple[Any, ...], value: dict[str, Any], ttl_seconds: int) -> None:
+    if ttl_seconds <= 0:
+        return
+    with _CACHE_LOCK:
+        _RESULT_CACHE[key] = (time.time() + ttl_seconds, copy.deepcopy(value))
+
+
+def _cache_ttl_for_result(result: dict[str, Any], success_ttl: int) -> int:
+    if result.get("items"):
+        return success_ttl
+    return min(max(success_ttl, 0), FAILURE_CACHE_TTL_SECONDS)
+
+
+def _inflight_acquire(key: tuple[Any, ...]) -> tuple[_InflightCall, bool]:
+    with _CACHE_LOCK:
+        existing = _INFLIGHT.get(key)
+        if existing is not None:
+            return existing, False
+        call = _InflightCall(event=threading.Event())
+        _INFLIGHT[key] = call
+        return call, True
+
+
+def _wait_for_inflight(call: _InflightCall, *, wait_seconds: int) -> dict[str, Any]:
+    if not call.event.wait(timeout=max(wait_seconds, 1)):
+        raise RuntimeError("hotspot request is still in progress")
+    if call.error is not None:
+        raise call.error
+    if call.result is None:
+        raise RuntimeError("hotspot request completed without a result")
+    result = copy.deepcopy(call.result)
+    result.setdefault("cache", {})
+    result["cache"]["hit"] = True
+    result["cache"]["shared_inflight"] = True
+    return result
+
+
+def _inflight_release(key: tuple[Any, ...], call: _InflightCall) -> None:
+    with _CACHE_LOCK:
+        _INFLIGHT.pop(key, None)
+        call.event.set()
+
+
+def _timed(name: str, fn: Any, *args: Any) -> Any:
+    def wrapper() -> Any:
+        started = time.perf_counter()
+        try:
+            payload = fn(*args)
+        except Exception as exc:
+            if name == "rss":
+                return {
+                    "ok": False,
+                    "feeds": {},
+                    "items": [],
+                    "errors": [str(exc)],
+                    "status_code": None,
+                    "error_code": str(exc),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+            if name == "tikhub":
+                return {
+                    "ok": False,
+                    "platforms": {},
+                    "items": [],
+                    "errors": [str(exc)],
+                    "status_code": None,
+                    "error_code": str(exc),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+            return {
+                "ok": False,
+                "items": [],
+                "errors": [str(exc)],
+                "status_code": None,
+                "error_code": str(exc),
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            }
+        payload = dict(payload)
+        payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return payload
+
+    return wrapper
+
+
+def _safe_future_result(future: Any, *, source_name: str) -> dict[str, Any]:
+    try:
+        payload = future.result()
+        if isinstance(payload, dict):
+            payload.setdefault("ok", False)
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "source": source_name,
+            "items": [],
+            "errors": [str(exc)],
+            "status_code": None,
+            "error_code": str(exc),
+            "elapsed_ms": 0,
+        }
+    return {"ok": False, "source": source_name, "items": [], "errors": ["Malformed result"]}
+
+
+def _emit_fetch_metric(marker: str, **payload: Any) -> None:
+    emit_event("agent_runtime_marker", {"marker": marker, **payload})
+
+
+def _configured_tikhub_api_key() -> str:
+    return get_settings().search.tikhub_api_key.get_secret_value().strip()
+
+
+def _cap_limit(limit: int) -> int:
+    return max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
+
+
+def _cap_total_items(max_items: int | None) -> int:
+    return max(0, int(max_items or 0))
+
+
+def _select(values: list[str] | None, allowed: list[str]) -> list[str]:
+    if not values or "all" in values:
+        return allowed
+    selected: list[str] = []
+    for value in values:
+        normalized = value.strip().lower()
+        if normalized in allowed and normalized not in selected:
+            selected.append(normalized)
+    return selected or allowed
+
+
+def _select_sources(values: list[str] | None) -> list[str]:
+    return _select(values, ["rss", "tikhub", "aihot"])
+
+
+def _request_bytes(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+    timeout: int,
+) -> tuple[int, bytes]:
+    _raise_if_circuit_open(url)
+    last_error: Exception | None = None
+    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+        try:
+            with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+                response = client.get(url, headers=headers, params=params)
+                if response.status_code >= 500:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                _record_success(url)
+                return response.status_code, response.content
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= HTTP_RETRY_ATTEMPTS:
+                _record_failure(url)
+                break
+            time.sleep(HTTP_RETRY_SLEEP_SECONDS)
+    raise RuntimeError(str(last_error) if last_error else "request failed")
+
+
+def _request_json(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+    timeout: int,
+) -> tuple[int, Any]:
+    status_code, raw, *_ = _request_bytes(
+        url,
+        headers=headers,
+        params=params,
+        timeout=timeout,
+    )
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return status_code, httpx.Response(status_code, content=raw).json()
+    except ValueError as exc:
+        raise RuntimeError("response was not JSON: " + text[:500]) from exc
+
+
+def _circuit_key(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.netloc or url
+
+
+def _raise_if_circuit_open(url: str) -> None:
+    state = _CIRCUIT_STATE.get(_circuit_key(url))
+    if not state:
+        return
+    opened_until = float(state.get("opened_until", 0))
+    if opened_until > time.time():
+        raise RuntimeError("circuit breaker is open")
+
+
+def _record_success(url: str) -> None:
+    _CIRCUIT_STATE.pop(_circuit_key(url), None)
+
+
+def _record_failure(url: str) -> None:
+    key = _circuit_key(url)
+    state = _CIRCUIT_STATE.setdefault(key, {"failures": 0, "opened_until": 0.0})
+    state["failures"] = int(state.get("failures", 0)) + 1
+    if int(state["failures"]) >= CIRCUIT_FAILURE_THRESHOLD:
+        state["opened_until"] = time.time() + CIRCUIT_OPEN_SECONDS
+
+
+def _fetch_rss(sources: list[str], limit: int, timeout: int) -> dict[str, Any]:
+    if not sources:
+        return {"ok": True, "feeds": {}, "items": [], "errors": []}
+    result: dict[str, Any] = {
+        "ok": True,
+        "feeds": {},
+        "items": [],
+        "errors": [],
+        "platform_count": len(sources),
+    }
+    started_at = time.perf_counter()
+    headers = {
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        "User-Agent": "ContentAI/0.1 hotspot-fetcher",
+    }
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(sources), 6))) as executor:
+        futures = {
+            executor.submit(_fetch_one_rss, source, limit, timeout, headers): source
+            for source in sources
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            block = _safe_future_result(future, source_name=f"rss:{source}")
+            result["feeds"][source] = block
+            result["items"].extend(block.get("items", []))
+            if not block.get("ok", False):
+                result["ok"] = False
+                result["errors"].append(
+                    {
+                        "source": "rss",
+                        "platform": source,
+                        "platform_label": block.get("platform_label"),
+                        "url": block.get("url"),
+                        "error": block.get("error"),
+                        "error_code": block.get("error_code"),
+                    }
+                )
+            _emit_fetch_metric(
+                "rss_platform_completed",
+                source="rss",
+                platform=source,
+                selected_limit=limit,
+                ok=bool(block.get("ok", False)),
+                elapsed_ms=int(block.get("elapsed_ms", 0)),
+                items_count=len(block.get("items", [])),
+                raw_items=int(block.get("raw_count", 0)),
+                status_code=block.get("status_code"),
+                error_code=block.get("error_code"),
+            )
+
+    result["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
+    return result
+
+
+def _fetch_one_rss(
+    source: str,
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    spec = RSS_SOURCES[source]
+    started = time.perf_counter()
+    attempts: list[dict[str, Any]] = []
+    candidates = spec.get("candidates") or [
+        {
+            "kind": "rss",
+            "url": spec.get("url"),
+            "channel_type": "rss",
+            "is_official": True,
+        }
+    ]
+
+    for candidate in candidates:
+        candidate = _candidate_with_limit(candidate, limit)
+        try:
+            block = _fetch_candidate_source(
+                source=source,
+                candidate=candidate,
+                limit=limit,
+                timeout=timeout,
+                headers=headers,
+                started=started,
+            )
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(
+                {
+                    "kind": candidate.get("kind", "rss"),
+                    "url": candidate.get("url"),
+                    "status_code": None,
+                    "raw_count": 0,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        attempts.append(
+            {
+                "kind": candidate.get("kind", "rss"),
+                "url": candidate.get("url"),
+                "status_code": block.get("status_code"),
+                "raw_count": block.get("raw_count", 0),
+                "error": block.get("error"),
+            }
+        )
+        if block.get("ok") and block.get("items"):
+            block["attempts"] = attempts[:-1]
+            return block
+
+    last_attempt = attempts[-1] if attempts else {}
+    return {
+        "ok": False,
+        "platform": source,
+        "source_id": source,
+        "platform_label": spec["label"],
+        "url": last_attempt.get("url"),
+        "status_code": last_attempt.get("status_code"),
+        "raw_count": 0,
+        "requested_limit": limit,
+        "partial": True,
+        "items": [],
+        "error": last_attempt.get("error") or "No candidate returned items",
+        "error_code": last_attempt.get("error") or "NO_ITEMS",
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "attempts": attempts,
+    }
+
+
+def _candidate_with_limit(candidate: dict[str, Any], limit: int) -> dict[str, Any]:
+    selected = dict(candidate)
+    if "params" not in selected:
+        return selected
+    params = dict(selected.get("params") or {})
+    if "limit" in params:
+        params["limit"] = limit
+    selected["params"] = params
+    return selected
+
+
+def _fetch_candidate_source(
+    *,
+    source: str,
+    candidate: dict[str, Any],
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+    started: float,
+) -> dict[str, Any]:
+    kind = candidate.get("kind", "rss")
+    if kind == "cls_hot_json":
+        return _fetch_cls_hot_json(source, candidate, limit, timeout, started)
+    if kind == "html_latest":
+        return _fetch_html_latest(source, candidate, limit, timeout, headers, started)
+    return _fetch_feed_candidate(source, candidate, limit, timeout, headers, started)
+
+
+def _fetch_feed_candidate(
+    source: str,
+    candidate: dict[str, Any],
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+    started: float,
+) -> dict[str, Any]:
+    status_code, raw, *_ = _request_bytes(
+        str(candidate["url"]),
+        headers=headers,
+        params=candidate.get("params"),
+        timeout=timeout,
+    )
+    raw_items = _parse_feed_items(raw)
+    items = [
+        _normalize_rss_item(source, item, idx + 1, candidate)
+        for idx, item in enumerate(raw_items[:limit])
+    ]
+    return _candidate_block(
+        source=source,
+        candidate=candidate,
+        status_code=status_code,
+        raw_count=len(raw_items),
+        items=items,
+        limit=limit,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+def _fetch_cls_hot_json(
+    source: str,
+    candidate: dict[str, Any],
+    limit: int,
+    timeout: int,
+    started: float,
+) -> dict[str, Any]:
+    status_code, payload, *_ = _request_json(
+        str(candidate["url"]),
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "ContentAI/0.1 hotspot-fetcher",
+        },
+        params=_cls_search_params(),
+        timeout=timeout,
+    )
+    raw_items = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_items, list):
+        raw_items = []
+    items = [
+        _normalize_json_item(source, item, idx + 1, candidate)
+        for idx, item in enumerate(raw_items[:limit])
+        if isinstance(item, dict)
+    ]
+    return _candidate_block(
+        source=source,
+        candidate=candidate,
+        status_code=status_code,
+        raw_count=len(raw_items),
+        items=items,
+        limit=limit,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+def _fetch_html_latest(
+    source: str,
+    candidate: dict[str, Any],
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+    started: float,
+) -> dict[str, Any]:
+    status_code, raw, *_ = _request_bytes(
+        str(candidate["url"]),
+        headers={**headers, "Accept": "text/html, */*"},
+        timeout=timeout,
+    )
+    raw_items = _parse_html_links(raw, str(candidate["url"]))
+    items = [
+        _normalize_html_item(source, item, idx + 1, candidate)
+        for idx, item in enumerate(raw_items[:limit])
+    ]
+    return _candidate_block(
+        source=source,
+        candidate=candidate,
+        status_code=status_code,
+        raw_count=len(raw_items),
+        items=items,
+        limit=limit,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+def _candidate_block(
+    *,
+    source: str,
+    candidate: dict[str, Any],
+    status_code: int,
+    raw_count: int,
+    items: list[dict[str, Any]],
+    limit: int,
+    elapsed_ms: int,
+) -> dict[str, Any]:
+    ok = status_code == 200
+    return {
+        "ok": ok,
+        "platform": source,
+        "source_id": source,
+        "platform_label": RSS_SOURCES[source]["label"],
+        "channel_type": candidate.get("channel_type", "rss"),
+        "is_official": bool(candidate.get("is_official", False)),
+        "url": candidate.get("url"),
+        "params": candidate.get("params") or {},
+        "status_code": status_code,
+        "raw_count": raw_count,
+        "requested_limit": limit,
+        "partial": len(items) < limit,
+        "items": items,
+        "error_code": None if ok else f"HTTP_{status_code}",
+        "elapsed_ms": elapsed_ms,
+        "error": None if ok else f"HTTP {status_code}",
+    }
+
+
+def _cls_search_params() -> dict[str, str]:
+    params = {
+        "appName": "CailianpressWeb",
+        "os": "web",
+        "sv": "8.7.9",
+    }
+    query = "&".join(f"{key}={params[key]}" for key in sorted(params))
+    sign = md5(sha1(query.encode()).hexdigest().encode()).hexdigest()
+    return {**params, "sign": sign}
+
+
+def _fetch_tikhub(
+    api_key: str,
+    platforms: list[str],
+    limit: int,
+    timeout: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": True,
+        "platforms": {},
+        "items": [],
+        "errors": [],
+        "platform_count": len(platforms),
+    }
+    if not api_key:
+        result["ok"] = False
+        result["errors"].append({"source": "tikhub", "error": "Missing TIKHUB_API_KEY"})
+        return result
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": "ContentAI/0.1 hotspot-fetcher",
+    }
+    started_at = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max(1, min(len(platforms), 6))) as executor:
+        futures = {
+            executor.submit(_fetch_one_tikhub_platform, platform, limit, timeout, headers): platform
+            for platform in platforms
+        }
+        for future in as_completed(futures):
+            platform = futures[future]
+            block = _safe_future_result(future, source_name=f"tikhub:{platform}")
+            result["platforms"][platform] = block
+            result["items"].extend(block.get("items", []))
+            if not block.get("ok", False):
+                result["ok"] = False
+                result["errors"].append(
+                    {
+                        "platform": platform,
+                        "source": "tikhub",
+                        "status_code": block.get("status_code"),
+                        "message_zh": block.get("message_zh"),
+                        "error": block.get("error"),
+                        "error_code": block.get("error_code"),
+                    }
+                )
+            _emit_fetch_metric(
+                "tikhub_platform_completed",
+                source="tikhub",
+                platform=platform,
+                selected_limit=limit,
+                ok=bool(block.get("ok", False)),
+                elapsed_ms=int(block.get("elapsed_ms", 0)),
+                items_count=int(len(block.get("items", []))),
+                raw_items=int(block.get("raw_count", 0)),
+                status_code=block.get("status_code"),
+                error_code=block.get("error_code"),
+            )
+    result["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
+    return result
+
+
+def _fetch_one_tikhub_platform(
+    platform: str,
+    limit: int,
+    timeout: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    spec = TIKHUB_PLATFORMS[platform]
+    candidates = spec.get("candidates") or []
+    if not candidates:
+        return {
+            "ok": False,
+            "platform": platform,
+            "platform_label": spec["label"],
+            "endpoint": None,
+            "params": {},
+            "status_code": None,
+            "raw_count": 0,
+            "requested_limit": limit,
+            "partial": True,
+            "items": [],
+            "message_zh": None,
+            "error": "No API candidates configured for platform",
+            "error_code": "NO_CANDIDATE",
+            "elapsed_ms": 0,
+        }
+
+    started = time.perf_counter()
+    attempts: list[dict[str, Any]] = []
+    last_error: str | None = None
+
+    for candidate in candidates:
+        candidate_params = dict(candidate.get("params", {}))
+        if platform == "bilibili":
+            candidate_params["limit"] = limit
+
+        endpoint = TIKHUB_BASE_URL + candidate["path"]
+        try:
+            status_code, payload, *_ = _request_json(
+                endpoint,
+                headers=headers,
+                params=candidate_params,
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            attempts.append(
+                {
+                    "path": candidate["path"],
+                    "status_code": None,
+                    "error": last_error,
+                    "raw_count": 0,
+                }
+            )
+            continue
+
+        tikhub_code = payload.get("code") if isinstance(payload, dict) else None
+        if status_code != 200 or tikhub_code not in (None, 200):
+            candidate_error = (
+                payload.get("detail") if isinstance(payload, dict) else payload
+            )
+            last_error = (
+                str(candidate_error)
+                if candidate_error is not None
+                else f"HTTP_{status_code}"
+            )
+            attempts.append(
+                {
+                    "path": candidate["path"],
+                    "status_code": status_code,
+                    "error": last_error,
+                    "raw_count": 0,
+                }
+            )
+            continue
+
+        raw_items = _extract_items(payload, candidate["list_paths"])
+        if not raw_items and len(candidates) > 1 and candidate != candidates[-1]:
+            attempts.append(
+                {
+                    "path": candidate["path"],
+                    "status_code": status_code,
+                    "raw_count": 0,
+                    "error": "empty_payload_no_items",
+                }
+            )
+            continue
+
+        block = {
+            "ok": True,
+            "platform": platform,
+            "platform_label": spec["label"],
+            "endpoint": endpoint,
+            "attempted_endpoints": [attempt["path"] for attempt in attempts],
+            "params": candidate_params,
+            "status_code": status_code,
+            "raw_count": len(raw_items),
+            "requested_limit": limit,
+            "partial": min(len(raw_items), limit) < limit,
+            "items": [
+                _normalize_tikhub_item(platform, item, idx + 1)
+                for idx, item in enumerate(raw_items[:limit])
+            ],
+            "message_zh": payload.get("message_zh") if isinstance(payload, dict) else None,
+            "error": None,
+            "error_code": None,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "candidates": attempts,
+        }
+        return block
+
+    error_code = last_error or "NO_RESULT"
+    failed_endpoints = attempts or [{"path": "n/a", "error": error_code}]
+    return {
+        "ok": False,
+        "platform": platform,
+        "platform_label": spec["label"],
+        "endpoint": TIKHUB_BASE_URL + candidates[-1]["path"],
+        "attempted_endpoints": [attempt["path"] for attempt in failed_endpoints],
+        "params": dict(candidates[-1].get("params", {})),
+        "status_code": failed_endpoints[-1].get("status_code"),
+        "raw_count": 0,
+        "requested_limit": limit,
+        "partial": True,
+        "items": [],
+        "message_zh": None,
+        "error": last_error,
+        "error_code": error_code,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "candidates": failed_endpoints,
+    }
+
+
+def _fetch_aihot(limit: int, timeout: int) -> dict[str, Any]:
+    endpoint = f"{AIHOT_BASE_URL}/items"
+    started = time.perf_counter()
+    try:
+        status_code, payload, *_ = _request_json(
+            endpoint,
+            headers={"Accept": "application/json", "User-Agent": "ContentAI/0.1 hotspot-fetcher"},
+            params={"mode": "selected"},
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "source": "aihot",
+            "platform": "aihot",
+            "platform_label": "AI HOT",
+            "status_code": None,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "error": str(exc),
+            "error_code": str(exc),
+            "items": [],
+            "raw_count": 0,
+            "requested_limit": limit,
+            "partial": True,
+        }
+
+    if status_code != 200:
+        return {
+            "ok": False,
+            "source": "aihot",
+            "platform": "aihot",
+            "platform_label": "AI HOT",
+            "status_code": status_code,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "error": payload,
+            "error_code": f"HTTP_{status_code}",
+            "items": [],
+            "raw_count": 0,
+            "requested_limit": limit,
+            "partial": True,
+        }
+
+    if isinstance(payload, dict):
+        raw_items = payload.get("items", [])
+    else:
+        raw_items = payload if isinstance(payload, list) else []
+
+    items = [
+        _normalize_aihot_item(item, idx + 1)
+        for idx, item in enumerate(raw_items[:limit])
+        if isinstance(item, dict)
+    ]
+    return {
+        "ok": True,
+        "source": "aihot",
+        "platform": "aihot",
+        "platform_label": "AI HOT",
+        "status_code": status_code,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "raw_count": len(raw_items) if isinstance(raw_items, list) else 0,
+        "requested_limit": limit,
+        "partial": len(items) < limit,
+        "items": items,
+    }
+
+
+def _dedupe_and_trim_items(items: list[dict[str, Any]], max_items: int) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = _item_signature(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return _rerank_items(deduped[:max_items])
+
+
+def _item_signature(item: dict[str, Any]) -> str:
+    title = str(item.get("title", "")).strip().lower()
+    url = str(item.get("url", "")).strip().lower()
+    source = str(item.get("source", "")).strip().lower()
+    return sha1(f"{source}|{title}|{url}".encode()).hexdigest()
+
+
+def _rerank_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    reranked: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        item["rank"] = index + 1
+        reranked.append(item)
+    return reranked
+
+
+def _normalize_rss_item(
+    source: str,
+    item: ET.Element,
+    rank: int,
+    candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate = candidate or {"channel_type": "rss", "is_official": True}
+    title = _strip_html(_child_text(item, "title"))
+    summary = _truncate(
+        _strip_html(_child_text(item, "description", "summary", "content", "encoded")),
+        500,
+    )
+    return {
+        "rank": rank,
+        "source": "rss",
+        "source_id": source,
+        "platform": source,
+        "platform_label": RSS_SOURCES[source]["label"],
+        "channel_type": candidate.get("channel_type", "rss"),
+        "is_official": bool(candidate.get("is_official", False)),
+        "title": title,
+        "summary": summary,
+        "hot": None,
+        "url": _rss_item_link(item),
+        "published_at": _child_text(item, "pubDate", "published", "updated", "date"),
+        "author": _strip_html(_child_text(item, "author", "creator")),
+        "categories": _rss_item_categories(item),
+    }
+
+
+def _normalize_json_item(
+    source: str,
+    item: dict[str, Any],
+    rank: int,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    title = _first_value(item, TITLE_KEYS) or item.get("brief") or ""
+    summary = item.get("summary") or item.get("brief") or item.get("description") or ""
+    url = _first_value(item, URL_KEYS)
+    if not url and item.get("article_id"):
+        url = f"https://www.cls.cn/detail/{item['article_id']}"
+    return {
+        "rank": rank,
+        "source": "rss",
+        "source_id": source,
+        "platform": source,
+        "platform_label": RSS_SOURCES[source]["label"],
+        "channel_type": candidate.get("channel_type", "hotlist"),
+        "is_official": bool(candidate.get("is_official", False)),
+        "title": str(title or ""),
+        "summary": _truncate(_strip_html(str(summary or "")), 500),
+        "hot": _first_value(item, HOT_KEYS),
+        "url": str(url or ""),
+        "published_at": str(item.get("ctime") or item.get("time") or item.get("published_at") or ""),
+        "author": str(item.get("author") or ""),
+        "categories": [],
+    }
+
+
+def _normalize_html_item(
+    source: str,
+    item: dict[str, str],
+    rank: int,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "rank": rank,
+        "source": "rss",
+        "source_id": source,
+        "platform": source,
+        "platform_label": RSS_SOURCES[source]["label"],
+        "channel_type": candidate.get("channel_type", "html_latest"),
+        "is_official": bool(candidate.get("is_official", False)),
+        "title": item.get("title", ""),
+        "summary": "",
+        "hot": None,
+        "url": item.get("url", ""),
+        "published_at": "",
+        "author": "",
+        "categories": [],
+    }
+
+
+def _normalize_tikhub_item(source: str, item: Any, rank: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {
+            "rank": rank,
+            "source": "tikhub",
+            "source_id": source,
+            "platform": source,
+            "platform_label": TIKHUB_PLATFORMS[source]["label"],
+            "channel_type": "hotlist",
+            "is_official": False,
+            "title": str(item),
+            "summary": "",
+            "hot": None,
+            "url": "",
+            "raw": item,
+        }
+    if source == "weibo" and isinstance(item.get("data"), dict):
+        item = {**item, **item["data"]}
+
+    title = _first_value(item, TITLE_KEYS)
+    hot = _first_value(item, HOT_KEYS)
+    url = _first_value(item, URL_KEYS)
+
+    if source == "weibo" and title and (not url or str(url).startswith("sinaweibo://")):
+        url = f"https://s.weibo.com/weibo?q={quote_plus(str(title))}"
+
+    if not url and title:
+        encoded = quote_plus(str(title))
+        fallback_urls = {
+            "douyin": f"https://www.douyin.com/search/{encoded}",
+            "bilibili": f"https://search.bilibili.com/all?keyword={encoded}",
+            "xiaohongshu": f"https://www.xiaohongshu.com/search_result?keyword={encoded}",
+            "weibo": f"https://s.weibo.com/weibo?q={encoded}",
+        }
+        url = fallback_urls.get(source, "")
+
+    return {
+        "rank": rank,
+        "source": "tikhub",
+        "source_id": source,
+        "platform": source,
+        "platform_label": TIKHUB_PLATFORMS[source]["label"],
+        "channel_type": "hotlist",
+        "is_official": False,
+        "title": str(title or ""),
+        "summary": "",
+        "hot": hot,
+        "url": str(url or ""),
+    }
+
+
+def _normalize_aihot_item(item: dict[str, Any], rank: int) -> dict[str, Any]:
+    return {
+        "rank": rank,
+        "source": "aihot",
+        "source_id": "aihot",
+        "platform": "aihot",
+        "platform_label": "AI HOT",
+        "channel_type": "hotlist",
+        "is_official": False,
+        "title": item.get("title") or item.get("title_en") or "",
+        "summary": item.get("summary") or "",
+        "hot": None,
+        "category": item.get("category"),
+        "origin_source": item.get("source"),
+        "published_at": item.get("publishedAt"),
+        "url": item.get("url") or "",
+    }
+
+
+def _parse_feed_items(raw: bytes) -> list[ET.Element]:
+    try:
+        root = ET.fromstring(_xml_bytes_for_element_tree(raw))
+    except ET.ParseError:
+        cleaned = INVALID_XML_CHARS.sub("", _decode_xml_bytes(raw))
+        try:
+            root = ET.fromstring(_rewrite_xml_encoding(cleaned).encode("utf-8"))
+        except ET.ParseError:
+            return _parse_feed_items_loose(cleaned)
+    items = [element for element in root.iter() if _local_name(element.tag) == "item"]
+    if items:
+        return items
+    return [element for element in root.iter() if _local_name(element.tag) == "entry"]
+
+
+def _xml_bytes_for_element_tree(raw: bytes) -> bytes:
+    text = _decode_xml_bytes(raw)
+    cleaned = INVALID_XML_CHARS.sub("", text)
+    return _rewrite_xml_encoding(cleaned).encode("utf-8")
+
+
+def _decode_xml_bytes(raw: bytes) -> str:
+    head = raw[:200].decode("ascii", errors="ignore")
+    match = re.search(r"encoding=[\"']([^\"']+)[\"']", head, flags=re.I)
+    encodings = [match.group(1)] if match else []
+    encodings.extend(["utf-8", "gb18030", "gbk", "gb2312"])
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _rewrite_xml_encoding(text: str) -> str:
+    return re.sub(
+        r"(<\?xml\b[^>]*\bencoding=)[\"'][^\"']+[\"']",
+        r'\1"UTF-8"',
+        text,
+        count=1,
+        flags=re.I,
+    )
+
+
+def _parse_feed_items_loose(text: str) -> list[ET.Element]:
+    items: list[ET.Element] = []
+    for tag in ("item", "entry"):
+        for block in re.findall(rf"(?is)<{tag}\b[^>]*>(.*?)</{tag}>", text):
+            element = ET.Element(tag)
+            for child_name in (
+                "title",
+                "link",
+                "description",
+                "summary",
+                "content",
+                "pubDate",
+                "published",
+                "updated",
+                "author",
+                "creator",
+            ):
+                value = _extract_tag_text(block, child_name)
+                if value:
+                    child = ET.SubElement(element, child_name)
+                    child.text = value
+            for value in re.findall(r"(?is)<category\b[^>]*>(.*?)</category>", block):
+                child = ET.SubElement(element, "category")
+                child.text = _strip_html(_strip_cdata(value))
+            items.append(element)
+        if items:
+            return items
+    return items
+
+
+def _extract_tag_text(block: str, tag: str) -> str:
+    match = re.search(rf"(?is)<(?:[\w.-]+:)?{tag}\b[^>]*>(.*?)</(?:[\w.-]+:)?{tag}>", block)
+    if match:
+        return _strip_html(_strip_cdata(match.group(1)))
+    if tag == "link":
+        href_match = re.search(r"(?is)<link\b[^>]*\bhref=[\"']([^\"']+)[\"'][^>]*/?>", block)
+        if href_match:
+            return html.unescape(href_match.group(1)).strip()
+    return ""
+
+
+def _strip_cdata(value: str) -> str:
+    return re.sub(r"(?is)<!\[CDATA\[(.*?)]]>", r"\1", value).strip()
+
+
+def _parse_html_links(raw: bytes, base_url: str) -> list[dict[str, str]]:
+    text = raw.decode("utf-8", errors="replace")
+    text = re.sub(r"(?is)<(?:script|style|noscript).*?>.*?</(?:script|style|noscript)>", " ", text)
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r"(?is)<a\b[^>]*\bhref=[\"'](?P<href>[^\"']+)[\"'][^>]*>(?P<body>.*?)</a>",
+        text,
+    ):
+        title = _strip_html(match.group("body"))
+        if len(title) < 6 or len(title) > 120:
+            continue
+        href = html.unescape(match.group("href")).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        url = urljoin(base_url, href)
+        parsed_base = urlparse(base_url)
+        parsed_url = urlparse(url)
+        if parsed_base.netloc and parsed_url.netloc and parsed_base.netloc != parsed_url.netloc:
+            continue
+        key = url.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"title": title, "url": url})
+    return found
+
+
+def _extract_items(payload: Any, preferred_paths: list[list[str]]) -> list[Any]:
+    if not isinstance(payload, dict):
+        return []
+    for path in preferred_paths:
+        value = _get_by_path(payload, path)
+        if isinstance(value, list):
+            return value
+    candidates = [items for items in _walk_lists(payload) if items and isinstance(items[0], dict)]
+    return max(candidates, key=len) if candidates else []
+
+
+def _get_by_path(data: Any, path: list[str]) -> Any:
+    current = data
+    for key in path:
+        if isinstance(current, dict):
+            if key not in current:
+                return None
+            current = current[key]
+        elif isinstance(current, list) and key.isdigit():
+            index = int(key)
+            if index >= len(current):
+                return None
+            current = current[index]
+        else:
+            return None
+    return current
+
+
+def _walk_lists(data: Any) -> list[list[Any]]:
+    found: list[list[Any]] = []
+    if isinstance(data, list):
+        found.append(data)
+        for item in data[:3]:
+            found.extend(_walk_lists(item))
+    elif isinstance(data, dict):
+        for value in data.values():
+            found.extend(_walk_lists(value))
+    return found
+
+
+def _child_text(element: ET.Element, *names: str) -> str:
+    wanted = set(names)
+    for child in list(element):
+        if _local_name(child.tag) in wanted:
+            return "".join(child.itertext()).strip()
+    return ""
+
+
+def _rss_item_link(item: ET.Element) -> str:
+    link_text = _child_text(item, "link")
+    if link_text:
+        return link_text
+    for child in list(item):
+        if _local_name(child.tag) == "link" and child.attrib.get("href"):
+            return child.attrib["href"]
+    guid = _child_text(item, "guid", "id")
+    return guid if guid.startswith("http") else ""
+
+
+def _rss_item_categories(item: ET.Element) -> list[str]:
+    categories: list[str] = []
+    for child in list(item):
+        if _local_name(child.tag) == "category":
+            value = "".join(child.itertext()).strip()
+            if value:
+                categories.append(value)
+    return categories
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _strip_html(value: str) -> str:
+    if not value:
+        return ""
+    text = re.sub(r"(?is)<(?:script|style).*?>.*?</(?:script|style)>", " ", value)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = text.replace("\ufffd", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _truncate(value: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return value[: max_chars - 1].rstrip() + "..."
+
+
+def _first_value(item: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+

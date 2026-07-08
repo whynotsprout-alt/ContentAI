@@ -4,8 +4,24 @@ from typing import Final
 
 HOTSPOT_SOURCE_OPTIONS: Final[dict[str, str]] = {
     "36kr": "36Kr",
+    "cls": "财联社",
+    "eeo": "经济观察报",
+    "yicai": "第一财经",
     "huxiu": "虎嗅",
+    "jiemian": "界面",
+    "tmtpost": "钛媒体",
+    "latepost": "晚点 LatePost",
+    "qbitai": "量子位",
+    "leiphone": "雷峰网",
+    "caixin": "财新",
+    "vista": "Vista 看天下",
+    "bloomberg": "Bloomberg",
+    "ft": "Financial Times",
+    "wsj": "WSJ",
+    "techcrunch": "TechCrunch",
+    "theverge": "The Verge",
     "ifanr": "爱范儿",
+    "stcn": "证券时报",
     "douyin": "抖音",
     "bilibili": "Bilibili",
     "xiaohongshu": "小红书",
@@ -13,7 +29,27 @@ HOTSPOT_SOURCE_OPTIONS: Final[dict[str, str]] = {
     "aihot": "AI HOT",
 }
 
-RSS_HOTSPOT_SOURCES: Final[tuple[str, ...]] = ("36kr", "huxiu", "ifanr")
+RSS_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
+    "36kr",
+    "cls",
+    "eeo",
+    "yicai",
+    "huxiu",
+    "jiemian",
+    "tmtpost",
+    "latepost",
+    "qbitai",
+    "leiphone",
+    "caixin",
+    "vista",
+    "bloomberg",
+    "ft",
+    "wsj",
+    "techcrunch",
+    "theverge",
+    "ifanr",
+    "stcn",
+)
 TIKHUB_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
     "douyin",
     "bilibili",
@@ -21,7 +57,28 @@ TIKHUB_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
     "weibo",
 )
 AIHOT_SOURCE: Final[str] = "aihot"
-DEFAULT_HOTSPOT_SOURCES: Final[tuple[str, ...]] = tuple(HOTSPOT_SOURCE_OPTIONS)
+
+DEFAULT_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
+    "36kr",
+    "cls",
+    "eeo",
+    "yicai",
+    "huxiu",
+    "jiemian",
+    "tmtpost",
+    "latepost",
+    "qbitai",
+    "leiphone",
+    "bloomberg",
+    "ft",
+    "wsj",
+    "techcrunch",
+    "douyin",
+    "bilibili",
+    "xiaohongshu",
+    "weibo",
+    "aihot",
+)
 
 
 def normalize_hotspot_sources(values: list[str] | tuple[str, ...]) -> list[str]:

@@ -15,9 +15,29 @@ class MessageType(StrEnum):
 
 
 class RunStatus(StrEnum):
-    queued = "queued"
     running = "running"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
     interrupted = "interrupted"
+
+
+class ToolExecutionStatus(StrEnum):
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class MemoryKind(StrEnum):
+    semantic = "semantic"
+    episodic = "episodic"
+    procedural = "procedural"
+    summary = "summary"
+    profile = "profile"
+    preference = "preference"
+    goal = "goal"
+
+
+class MemoryScope(StrEnum):
+    short_term = "short_term"
+    long_term = "long_term"

@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from core.paths import PROJECT_ROOT
 
@@ -14,16 +13,23 @@ MOJIBAKE_TOKENS = (
 )
 
 CHECKED_PATHS = (
-    "backend/src/agent/runtime/executor.py",
-    "backend/src/agent/memory/retriever.py",
-    "backend/src/core/hotspot_sources.py",
-    "backend/src/agent/prompts/registry.py",
-    "backend/src/agent/tools/search.py",
-    "backend/src/agent/tools/hotspots.py",
+    "backend/src",
+    "backend/tests",
 )
 
 
 def test_key_chinese_sources_do_not_contain_mojibake_tokens():
     for relative_path in CHECKED_PATHS:
-        text = Path(PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
-        assert not any(token in text for token in MOJIBAKE_TOKENS), relative_path
+        path = PROJECT_ROOT / relative_path
+        files = path.rglob("*") if path.is_dir() else [path]
+        for file_path in files:
+            if file_path.name == "test_encoding.py":
+                continue
+            if file_path.suffix not in {".py", ".md"}:
+                continue
+            if any(part.startswith(".") for part in file_path.relative_to(PROJECT_ROOT).parts):
+                continue
+            text = file_path.read_text(encoding="utf-8")
+            assert not any(token in text for token in MOJIBAKE_TOKENS), str(
+                file_path.relative_to(PROJECT_ROOT)
+            )

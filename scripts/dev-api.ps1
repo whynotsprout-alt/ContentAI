@@ -7,6 +7,24 @@ if (!(Test-Path $VenvPython)) {
 }
 
 $env:PYTHONPATH = Join-Path $Root "backend/src"
-$Port = if ($env:CONTENTAI_API_PORT) { $env:CONTENTAI_API_PORT } else { "8000" }
-& $VenvPython -m uvicorn main:app --host 127.0.0.1 --port $Port
+$EnvFile = Join-Path $Root ".env"
+$DotEnv = @{}
+if (Test-Path $EnvFile) {
+  Get-Content $EnvFile | ForEach-Object {
+    if ($_ -match "^\s*([^#][^=]+?)=(.*)$") {
+      $Name = $Matches[1].Trim()
+      $Value = $Matches[2].Trim()
+      $DotEnv[$Name] = $Value
+      [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+    }
+  }
+}
+$Port = if ($DotEnv.ContainsKey("CONTENTAI_API_PORT")) { $DotEnv["CONTENTAI_API_PORT"] } else { "8000" }
+$Reload = if ($DotEnv.ContainsKey("CONTENTAI_API_RELOAD")) { $DotEnv["CONTENTAI_API_RELOAD"] } else { "false" }
+if ($Reload -eq "true") {
+  $BackendSrc = Join-Path $Root "backend/src"
+  & $VenvPython -m uvicorn main:app --host 127.0.0.1 --port $Port --reload --reload-dir $BackendSrc
+} else {
+  & $VenvPython -m uvicorn main:app --host 127.0.0.1 --port $Port
+}
 

@@ -1,6 +1,6 @@
 from logging.config import fileConfig
 
-import models.db  # noqa: F401 - register SQLModel metadata
+import models.database  # noqa: F401 - register SQLModel metadata
 from alembic import context
 from core.config import get_settings
 from sqlalchemy import engine_from_config, pool
@@ -15,7 +15,10 @@ target_metadata = SQLModel.metadata
 
 
 def _database_url() -> str:
-    return get_settings().database_url
+    database_url = get_settings().database.url
+    if database_url is None:
+        raise RuntimeError("Database URL is not configured.")
+    return database_url
 
 
 def run_migrations_offline() -> None:

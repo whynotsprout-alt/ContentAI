@@ -4,7 +4,7 @@
 
 参数说明：
 - source：热点来源分组，可填 all、rss、tikhub、aihot，多个值用英文逗号分隔。
-- rss_sources：RSS 来源，可填 all、36kr、huxiu、ifanr，多个值用英文逗号分隔。
+- rss_sources：媒体/RSS 来源，可填 all、36kr、cls、eeo、yicai、huxiu、jiemian、tmtpost、latepost、qbitai、leiphone、caixin、vista、bloomberg、ft、wsj、techcrunch、theverge、ifanr、stcn，多个值用英文逗号分隔。
 - platforms：TikHub 平台，可填 all、douyin、bilibili、xiaohongshu、weibo，多个值用英文逗号分隔。
 
 工具会自动按当前账号配置的允许热点来源取交集；工具只返回候选热点，不负责选题筛选、评分或内容创作。
