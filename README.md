@@ -1,83 +1,62 @@
 # ContentAI
 
-ContentAI 是一个开放式对话 Agent 工作台，后端使用 FastAPI、LangChain 和 LangGraph，前端使用 Vue 3、TypeScript 和 Vite。
+ContentAI 是一个面向内容创作者的持续对话 Agent 工作台。内容流程保持为自然对话：热点发现、选题判断、搜索研究、用户确认与稿件交付；所有结果都以会话消息输出。
 
-## 代码语言约定
+## 目录
 
-这个仓库不是单一语言项目，按职责分层：
-
-- `backend/`：Python，承载 API、Agent Runtime、LangGraph、记忆、工具和数据库访问。
-- `frontend/`：Vue 3 + TypeScript，承载浏览器工作台界面。
-- `frontend/src/styles.css`：前端样式，属于前端源码的一部分。
-- `scripts/`：PowerShell 开发脚本，只是本地启动、安装和验收入口，不是业务运行代码。
-- `frontend/scripts/`：前端专项验收脚本，不是浏览器端业务代码。
-
-GitHub 的 Languages 面板会按文件字节数统计源码语言，所以会看到 Python、Vue、TypeScript、CSS、PowerShell、JavaScript 和 HTML。这里的主语言仍然是 Python 后端 + Vue/TypeScript 前端；PowerShell 和 JavaScript 脚本已通过 `.gitattributes` 从语言统计中排除，避免工具入口干扰项目语言占比。
-
-## 主要结构
-
-- `backend/src/agent/graph`：LangGraph ReAct 风格循环。
-- `backend/src/agent/runtime`：运行执行、事件、checkpoint/store 编排。
-- `backend/src/agent/memory`：短期记忆和长期记忆。
-- `backend/src/agent/prompts`：系统提示词、工具提示词和提示词注册。
-- `backend/src/agent/tools`：模型可调用工具。
-- `backend/src/agent/infrastructure/llm`：底层模型网关。
-- `frontend/src`：Vue 工作台界面、状态管理和 API 客户端。
-
-## 根目录 scripts 的作用
-
-`scripts/` 是 Windows PowerShell 开发入口，目的是减少手敲命令：
-
-- `scripts/setup.ps1`：创建 `.venv`，安装后端依赖；默认也安装前端依赖，可传 `-SkipFrontend` 跳过。
-- `scripts/dev-api.ps1`：启动后端 FastAPI，默认监听 `http://127.0.0.1:8000/`，可用 `CONTENTAI_API_PORT` 覆盖端口。
-- `scripts/dev-web.ps1`：启动前端 Vite，监听 `http://127.0.0.1:5180/`。
-- `scripts/test.ps1`：运行后端 pytest。
-- `scripts/review.ps1`：依次运行 Ruff、pytest 和前端 build，用作提交前检查。
-
-## 初始化
-
-```powershell
-scripts/setup.ps1
+```text
+apps/
+  api/                 FastAPI、LangGraph、工具、数据库迁移与后端测试
+  web/                 Vue 3、TypeScript、Vite 与前端测试
+docs/                  产品边界与技术设计的唯一事实源
+infra/                 容器镜像、Nginx 反向代理与部署配置
+tools/                 Windows 本地开发、验收与整套重启脚本
+data/                  本地运行数据（不提交）
+logs/                  本地运行日志（不提交）
 ```
 
-只安装后端依赖：
+工程级配置保留在根目录：`pyproject.toml`、`requirements.txt`、`alembic.ini`、`.env.example` 与 `docker-compose.yml`。
 
-```powershell
-scripts/setup.ps1 -SkipFrontend
-```
+## 核心边界
+
+- 不建立内容候选、稿件版本等中间业务表或文件；研究资料包作为跨轮只读依据持久化。
+- 不抓取搜索结果 URL 的网页正文；研究只依据搜索标题、摘要和链接。
+- 会话创建时固定 AgentVersion，后续筛选、研究、确认和写稿不自动切换版本。
+- 最终稿件是普通 Assistant 消息。
+- checkpoint、执行状态与不含正文的审计仅用于持续对话与可靠性恢复。
+
+完整文档导航见 [docs/README.md](docs/README.md)；产品与技术事实源分别是
+[产品说明](docs/PRODUCT.md) 和 [技术设计](docs/DESIGN.md)。
 
 ## 本地开发
 
-后端：
-
 ```powershell
-scripts/dev-api.ps1
+tools/setup.ps1
+tools/dev-api.ps1
+tools/dev-web.ps1
 ```
 
-前端：
+- Web：`http://127.0.0.1:5180/`
+- API 文档：`http://127.0.0.1:8000/docs`
+
+运行验收：
 
 ```powershell
-scripts/dev-web.ps1
+tools/review.ps1
 ```
 
-打开：
+## 容器化启动与重启
 
-- 前端工作台：`http://127.0.0.1:5180/`
-- 后端文档：`http://127.0.0.1:8000/docs`
-
-## 验证
-
-完整检查：
+完整服务（PostgreSQL、Redis、迁移、API、Dispatcher、Worker、Beat、Web）使用：
 
 ```powershell
-scripts/review.ps1
+tools/restart.ps1
 ```
 
-分开运行：
+或直接运行：
 
 ```powershell
-python -m ruff check backend/src backend/tests
-python -m pytest backend/tests
-cd frontend
-npm run build
+docker compose up --detach --build --wait
 ```
+
+Web 容器以 Nginx 提供前端静态文件，并将 `/api/` 反向代理到 API 服务。

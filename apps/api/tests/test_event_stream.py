@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from agent.runtime.events import PersistentAgentEventWriter
+from db.session import get_engine
+from models.chat import AgentEvent, AgentExecution, AgentInvocation, ChatSession
+from services.event_stream import (
+    RedisEventStream,
+    execution_stream_key,
+    redis_stream_id,
+)
+from sqlmodel import Session, select
+
+
+class FakePipeline:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def xadd(self, *args: Any, **kwargs: Any) -> None:
+        self.commands.append(("xadd", args, kwargs))
+
+    def expire(self, *args: Any, **kwargs: Any) -> None:
+        self.commands.append(("expire", args, kwargs))
+
+    def execute(self) -> list[Any]:
+        return [True] * len(self.commands)
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.last_pipeline: FakePipeline | None = None
+        self.read_response: list[Any] = []
+        self.read_args: tuple[Any, ...] | None = None
+        self.read_kwargs: dict[str, Any] | None = None
+
+    def pipeline(self, *, transaction: bool) -> FakePipeline:
+        assert transaction is False
+        self.last_pipeline = FakePipeline()
+        return self.last_pipeline
+
+    def xread(self, *args: Any, **kwargs: Any) -> list[Any]:
+        self.read_args = args
+        self.read_kwargs = kwargs
+        return self.read_response
+
+
+def test_publish_uses_event_sequence_as_stream_id() -> None:
+    redis = FakeRedis()
+    stream = RedisEventStream(redis, ttl_seconds=60, max_length=100)
+    created_at = datetime(2026, 7, 13, 8, 0, tzinfo=UTC)
+
+    stream.publish(
+        [
+            AgentEvent(
+                execution_id="exe-1",
+                event_type="token",
+                sequence=7,
+                payload={"content": "你好"},
+                created_at=created_at,
+            )
+        ]
+    )
+
+    assert redis.last_pipeline is not None
+    xadd = redis.last_pipeline.commands[0]
+    assert xadd[0] == "xadd"
+    assert xadd[1][0] == execution_stream_key("exe-1")
+    assert xadd[2]["id"] == "7-0"
+    assert xadd[2]["maxlen"] == 100
+    assert xadd[1][1]["sequence"] == "7"
+    assert xadd[1][1]["type"] == "token"
+    assert redis.last_pipeline.commands[-1] == (
+        "expire",
+        (execution_stream_key("exe-1"), 60),
+        {},
+    )
+
+
+def test_read_starts_after_database_sequence_and_decodes_payload() -> None:
+    redis = FakeRedis()
+    redis.read_response = [
+        (
+            execution_stream_key("exe-1"),
+            [
+                (
+                    "8-0",
+                    {
+                        "sequence": "8",
+                        "execution_id": "exe-1",
+                        "type": "done",
+                        "timestamp": "2026-07-13T08:01:00+00:00",
+                        "data": '{"status":"completed"}',
+                    },
+                )
+            ],
+        )
+    ]
+    stream = RedisEventStream(redis, ttl_seconds=60, max_length=100, block_ms=1234)
+
+    events = stream.read("exe-1", after_sequence=7)
+
+    assert redis.read_args == ({execution_stream_key("exe-1"): redis_stream_id(7)},)
+    assert redis.read_kwargs == {"block": 1234}
+    assert len(events) == 1
+    assert events[0].sequence == 8
+    assert events[0].event_type == "done"
+    assert events[0].payload == {"status": "completed"}
+
+
+def test_runtime_writer_does_not_persist_intermediate_events() -> None:
+    with Session(get_engine()) as session:
+        chat = ChatSession(
+            agent_id="default-agent",
+            agent_version_id="default-agent-v1",
+            tenant_id="local",
+            owner_user_id="local-user",
+        )
+        session.add(chat)
+        session.flush()
+        invocation = AgentInvocation(
+            session_id=chat.id,
+            agent_id=chat.agent_id,
+            tenant_id=chat.tenant_id,
+            created_by_user_id=chat.owner_user_id,
+        )
+        session.add(invocation)
+        session.flush()
+        execution = AgentExecution(
+            invocation_id=invocation.id,
+            agent_version_id="default-agent-v1",
+        )
+        session.add(execution)
+        session.commit()
+        execution_id = execution.id
+
+    class CapturingPublisher:
+        def __init__(self) -> None:
+            self.sequences: list[int] = []
+
+        def publish(self, events: list[object]) -> None:
+            self.sequences.extend(int(event.sequence) for event in events)
+
+    publisher = CapturingPublisher()
+    writer = PersistentAgentEventWriter(
+        execution_id,
+        get_engine(),
+        stream_publisher=publisher,
+    )
+    writer.emit("state", {"status": "running"})
+    writer.close()
+
+    assert publisher.sequences == [1]
+    with Session(get_engine()) as session:
+        assert (
+            session.exec(select(AgentEvent).where(AgentEvent.execution_id == execution_id)).first()
+            is None
+        )

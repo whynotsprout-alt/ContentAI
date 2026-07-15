@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+from typing import Final
+
+HOTSPOT_SOURCE_OPTIONS: Final[dict[str, str]] = {
+    "36kr": "36Kr",
+    "cls": "财联社",
+    "eeo": "经济观察报",
+    "yicai": "第一财经",
+    "huxiu": "虎嗅",
+    "jiemian": "界面",
+    "tmtpost": "钛媒体",
+    "latepost": "晚点 LatePost",
+    "qbitai": "量子位",
+    "leiphone": "雷峰网",
+    "caixin": "财新",
+    "vista": "Vista 看天下",
+    "ft": "Financial Times",
+    "wsj": "WSJ",
+    "techcrunch": "TechCrunch",
+    "theverge": "The Verge",
+    "ifanr": "爱范儿",
+    "stcn": "证券时报",
+    "douyin": "抖音",
+    "bilibili": "Bilibili",
+    "xiaohongshu": "小红书",
+    "weibo": "微博",
+    "aihot": "AI HOT",
+}
+
+RSS_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
+    "36kr",
+    "cls",
+    "eeo",
+    "yicai",
+    "huxiu",
+    "jiemian",
+    "tmtpost",
+    "latepost",
+    "qbitai",
+    "leiphone",
+    "caixin",
+    "vista",
+    "ft",
+    "wsj",
+    "techcrunch",
+    "theverge",
+    "ifanr",
+    "stcn",
+)
+TIKHUB_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
+    "douyin",
+    "bilibili",
+    "xiaohongshu",
+    "weibo",
+)
+AIHOT_SOURCE: Final[str] = "aihot"
+
+DEFAULT_HOTSPOT_SOURCES: Final[tuple[str, ...]] = (
+    "36kr",
+    "cls",
+    "eeo",
+    "yicai",
+    "huxiu",
+    "jiemian",
+    "tmtpost",
+    "latepost",
+    "qbitai",
+    "leiphone",
+    "caixin",
+    "vista",
+    "ft",
+    "wsj",
+    "techcrunch",
+    "theverge",
+    "ifanr",
+    "stcn",
+    "douyin",
+    "bilibili",
+    "xiaohongshu",
+    "weibo",
+    "aihot",
+)
+
+
+def normalize_hotspot_sources(values: list[str] | tuple[str, ...]) -> list[str]:
+    selected, unsupported = partition_hotspot_sources(values)
+    if unsupported:
+        raise ValueError(f"Unsupported hotspot source: {unsupported[0]}")
+    if not selected:
+        raise ValueError("hotspot_sources cannot be empty")
+    return selected
+
+
+def partition_hotspot_sources(
+    values: list[str] | tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    selected: list[str] = []
+    unsupported: list[str] = []
+    for value in values:
+        source = str(value).strip().lower()
+        if source not in HOTSPOT_SOURCE_OPTIONS:
+            unsupported.append(str(value))
+            continue
+        if source not in selected:
+            selected.append(source)
+    return selected, unsupported
+
+
+def render_hotspot_sources(values: list[str] | tuple[str, ...]) -> str:
+    sources = normalize_hotspot_sources(values)
+    return "\n".join(f"- {source}: {HOTSPOT_SOURCE_OPTIONS[source]}" for source in sources)
+
+
+def split_hotspot_sources(
+    values: list[str] | tuple[str, ...],
+) -> tuple[list[str], list[str], list[str]]:
+    sources = normalize_hotspot_sources(values)
+    rss_sources = [source for source in sources if source in RSS_HOTSPOT_SOURCES]
+    tikhub_platforms = [source for source in sources if source in TIKHUB_HOTSPOT_SOURCES]
+    source_groups: list[str] = []
+    if rss_sources:
+        source_groups.append("rss")
+    if tikhub_platforms:
+        source_groups.append("tikhub")
+    if AIHOT_SOURCE in sources:
+        source_groups.append("aihot")
+    return source_groups, rss_sources, tikhub_platforms

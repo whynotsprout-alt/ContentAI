@@ -1,20 +1,64 @@
-# Product
+# ContentAI 产品定义
 
-ContentAI is now an account-configured conversational content Agent, not a fixed autonomous content-production workflow.
+> 本文定义产品范围；目录、开发和部署说明见 [文档导航](README.md)。若与历史文档或旧工作流约定冲突，以本文为准。
 
-The product surface is intentionally small:
+## 产品目标
 
-- Manage content accounts with positioning, topic scoring prompts, content creation prompts and hotspot source selections.
-- Create chat sessions.
-- Send messages into a LangGraph Agent loop.
-- Persist assistant replies, tool calls and run events.
-- Maintain short-term thread memory and long-term account memory.
-- Fetch account-limited hotspot candidates when the user asks for trends or topic planning.
-- Let the model score topics and create content from the active account's database-backed prompts.
+ContentAI 是面向内容创作者的持续对话助手。产品以一个自然对话中的内容任务为核心，协助用户完成“热点发现 → 选题判断 → 搜索研究 → 用户确认 → 内容稿件”。
 
-Out of scope after this refactor:
+当前对话式流程是唯一产品基线。系统不维护旧式工作流阶段，不以固定状态机限制用户表达，也不提供工作流看板。模型通过会话历史识别当前选题、用户约束和是否已经完成研究。
 
-- Deep search orchestration.
-- Code-driven topic scoring.
-- Autonomous draft-generation pipelines.
-- Backward compatibility with old content-state-machine code.
+## 交付形式
+
+- 热点列表、候选评分、研究摘要、风险提示和最终稿件均以普通 Assistant 消息交付。
+- 最终稿件随会话消息保存，不创建稿件副本或中间文件；研究资料包作为跨轮只读依据持久化，不作为用户可编辑内容产物。
+- 一个会话同时只围绕一个当前内容任务；偏题交流不切换任务，切换选题需要用户在对话中确认。
+- 用户首次要求跳过研究直接写稿时，助手先解释依据不足并建议研究。只有用户在后续新消息中再次明确坚持，才可直接写稿，并必须注明依据有限。
+
+## 内容能力边界
+
+### 热点与选题
+
+- `fetch_hotspots` 从已配置来源取得候选，保留来源平台和原始排名。
+- 默认每来源最多 10 条；23 个逻辑平台逐轮公平进入最多 200 条的评分池，每轮起点循环偏移。
+- 同一候选按规范化 URL/标题聚合来源，使用稳定 `candidate_id` 关联评分与原始链接。
+- 子模型一次浏览完整评分池，只返回达到账号标准的好选题、分数、理由和风险；数量不固定，输出顺序就是最终顺序。
+
+### 搜索研究
+
+- `prepare_topic_research` 并发调用固定 endpoint 的 Metaso 与 Anspire 两个内部搜索工具，只使用两者返回的标题、摘要、站点名和链接；服务端永不请求搜索结果 URL，也不解析其 DNS。
+- 搜索供应商文本统一清理控制字符、零宽/双向字符、HTML 残片和异常长度；命中角色覆盖、工具调用、提示词或凭据索取等特征的结果会被隔离，不进入研究子模型。
+- 清理后的来源以独立 JSON 数据块交给研究子模型，按固定“核心结论”“事实与证据”“争议/风险”模板整理。
+- 系统信任两个搜索工具的结果质量，不计算注册域、不判断原始信源、不要求双源交叉，也不产生 `insufficient` 状态；单个提供商的一条可用结果即可继续。
+- 引用仅做机械归属校验：未知 `source_id` 或工具结果以外的链接会被移除，但不会删除 finding 或阻止资料包生成。两方均失败或没有可用文本时返回 `SEARCH_NO_RESULTS`。
+
+## 数据边界
+
+为支持持续对话，系统保存正常会话消息、执行状态、恢复所需 checkpoint、研究资料包，以及不含内容正文的安全审计元数据。研究资料包只保存经清理和限长的搜索字段、结构化归纳、诊断与渲染文本，不保存网页正文。
+
+系统不创建或写入 `ContentRun`、`ContentSource`、候选选题、稿件版本或审查清单等业务产物。`ResearchPackage` 是唯一的研究中间状态，以 `(execution_id, topic_hash)` 幂等保存，并在会话删除时级联清理。工具审计只保存工具名、参数哈希、结果摘要哈希、状态、耗时、错误和幂等标识。
+
+## Agent 与会话
+
+- 每个会话明确属于一个 Agent。
+- 创建会话时固定当时最新的 `agent_version_id`；后续选题筛选、研究、确认和写稿全部沿用该版本，新版本只影响新会话。
+- 发送消息和恢复执行必须同时提交 `session_id` 与 `agent_id`；两者不一致时返回 `409 SESSION_AGENT_MISMATCH`，且不得写入消息或创建执行。
+- 创建或切换 Agent 后，客户端必须创建或加载属于该 Agent 的会话，再允许发送消息。
+- 空闲会话删除是内容硬删除：消息、执行、工具审计、事件、关联记忆与 checkpoint 一并删除，仅保留不含内容的哈希化安全墓碑。
+- 活跃执行中的会话不可删除，返回 `409 SESSION_HAS_ACTIVE_EXECUTION`；用户先取消执行，再删除会话。
+
+## 明确不在范围内
+
+- 网页内容归档
+- 独立内容产物 CRUD、文件下载和稿件版本管理
+- 固定工作流阶段、阶段切换 API 和工作流 UI
+- 平台发布、发布交接、发布后指标回收和效果反馈闭环
+- 自动替用户完成未经确认的高风险内容发布动作
+
+## 生产验收底线
+
+- 数据迁移不得清空或隐式删除业务数据与 LangGraph checkpoint。
+- 人工确认必须能跨 Worker、进程重启和任务重试恢复，并保证副作用工具幂等。
+- Broker 暂时不可用时，执行与后处理任务保留在 outbox 中，不得静默丢失。
+- 禁用用户不得重新激活、启动或恢复任务；Worker 领取任务时必须再次校验用户状态。
+- 工具迭代、执行时间和输出大小必须有实际生效的上限。

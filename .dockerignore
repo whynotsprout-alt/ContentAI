@@ -1,0 +1,16 @@
+.git
+.codex-logs
+.venv
+.pytest_cache
+.ruff_cache
+apps/web/node_modules
+apps/web/dist
+apps/web/.vite
+apps/web/*.tsbuildinfo
+__pycache__
+*.py[cod]
+*.log
+logs
+data
+celerybeat-schedule*
+.env

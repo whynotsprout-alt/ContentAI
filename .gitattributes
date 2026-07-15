@@ -1,5 +1,5 @@
 # Keep GitHub language stats focused on product source.
-scripts/*.ps1 linguist-detectable=false
+tools/*.ps1 linguist-detectable=false
 *.js linguist-detectable=false
 *.mjs linguist-detectable=false
 *.cjs linguist-detectable=false
