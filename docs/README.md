@@ -9,6 +9,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 目录职责、服务拓扑与请求链路 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 本地配置、开发、测试与质量检查 |
 | [OPERATIONS.md](OPERATIONS.md) | 容器启动、健康检查、迁移、日志与故障处理 |
+| [UBUNTU_FROM_SCRATCH.md](UBUNTU_FROM_SCRATCH.md) | 从零安装 Ubuntu、配置 HTTPS、启动服务并创建初始管理员 |
 | [API.md](API.md) | 35 个公开端点、认证、调用方与请求响应边界 |
 | [SESSION_TO_CONTENT_PIPELINE.md](SESSION_TO_CONTENT_PIPELINE.md) | 从会话到内容交付的执行细节 |
 
