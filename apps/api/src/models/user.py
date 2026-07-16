@@ -20,7 +20,7 @@ class AppUser(SQLModel, table=True):
     email_normalized: str = Field(index=True)
     password_hash: str
     role: str = Field(default="user", index=True)
-    status: str = Field(default="pending_verification", index=True)
+    status: str = Field(default="active", index=True)
     email_verified_at: datetime | None = Field(default=None, index=True)
     password_changed_at: datetime = Field(default_factory=utcnow)
     failed_login_count: int = 0

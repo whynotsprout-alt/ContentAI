@@ -61,7 +61,6 @@ def _authenticate_local_request(request: Request, settings: Settings) -> AuthCon
             auth_session.revoked_at is not None
             or auth_session.expires_at <= now
             or user.status != "active"
-            or user.email_verified_at is None
         ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
