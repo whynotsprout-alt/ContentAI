@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { ArrowRight, CheckCircle2, Eye, EyeOff, LoaderCircle, Mail, RefreshCw } from '@lucide/vue';
+import { computed, ref } from 'vue';
+import { ArrowRight, Eye, EyeOff, LoaderCircle } from '@lucide/vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { ApiError, authApi } from '../services/api';
 import { useAuthStore } from '../stores/auth';
@@ -17,28 +17,22 @@ const showConfirmPassword = ref(false);
 const loading = ref(false);
 const error = ref('');
 const message = ref('');
-const registrationSent = ref(false);
-const resendCooldown = ref(0);
-let cooldownTimer = 0;
 
 const mode = computed(() => String(route.name ?? 'login'));
 const isLogin = computed(() => mode.value === 'login');
 const isRegister = computed(() => mode.value === 'register');
 const isForgot = computed(() => mode.value === 'forgot-password');
 const isReset = computed(() => mode.value === 'reset-password');
-const isVerify = computed(() => mode.value === 'verify-email');
 const title = computed(() => {
   if (isRegister.value) return '创建你的内容空间';
   if (isForgot.value) return '找回账号访问权';
   if (isReset.value) return '设置新密码';
-  if (isVerify.value) return '验证邮箱';
   return '欢迎回到 ContentAI';
 });
 const description = computed(() => {
   if (isRegister.value) return '创建独立账号，管理属于你的内容配置和历史对话。';
   if (isForgot.value) return '输入注册邮箱，我们会发送一次性密码重置链接。';
   if (isReset.value) return '密码更新后，其他已登录设备会自动退出。';
-  if (isVerify.value) return '正在确认验证链接，请稍候。';
   return '登录后继续管理内容账号和对话。';
 });
 
@@ -47,15 +41,6 @@ function errorText(value: unknown) {
     return `${value.message}${value.requestId ? `（请求标识：${value.requestId}）` : ''}`;
   }
   return value instanceof Error ? value.message : String(value || '请求失败');
-}
-
-function startCooldown(seconds = 60) {
-  window.clearInterval(cooldownTimer);
-  resendCooldown.value = seconds;
-  cooldownTimer = window.setInterval(() => {
-    resendCooldown.value = Math.max(0, resendCooldown.value - 1);
-    if (!resendCooldown.value) window.clearInterval(cooldownTimer);
-  }, 1000);
 }
 
 async function submit() {
@@ -72,11 +57,10 @@ async function submit() {
       await router.replace(String(route.query.redirect || '/app'));
     } else if (isRegister.value) {
       const result = await authApi.register(email.value, password.value);
-      registrationSent.value = true;
-      message.value = result.message || '验证邮件已发送。';
+      message.value = result.message;
       password.value = '';
       confirmPassword.value = '';
-      startCooldown();
+      await router.replace('/login');
     } else if (isForgot.value) {
       const result = await authApi.forgotPassword(email.value);
       message.value = result.message;
@@ -94,60 +78,6 @@ async function submit() {
   }
 }
 
-async function resendVerification() {
-  if (!email.value || loading.value || resendCooldown.value) return;
-  loading.value = true;
-  error.value = '';
-  message.value = '';
-  try {
-    const result = await authApi.resendVerification(email.value);
-    message.value = result.message || '验证邮件已重新发送。';
-    startCooldown();
-  } catch (value) {
-    error.value = errorText(value);
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function verify() {
-  if (!isVerify.value) return;
-  const token = String(route.query.token || '');
-  if (!token) {
-    error.value = '缺少邮箱验证令牌。';
-    return;
-  }
-  loading.value = true;
-  try {
-    await authApi.verifyEmail(token);
-    message.value = '邮箱验证成功，现在可以登录。';
-  } catch (value) {
-    error.value = errorText(value);
-  } finally {
-    loading.value = false;
-  }
-}
-
-watch(() => route.name, () => {
-  error.value = '';
-  message.value = '';
-  registrationSent.value = false;
-  resendCooldown.value = 0;
-  password.value = '';
-  confirmPassword.value = '';
-  showPassword.value = false;
-  showConfirmPassword.value = false;
-  window.clearInterval(cooldownTimer);
-  void verify();
-});
-
-onMounted(() => {
-  void verify();
-});
-
-onBeforeUnmount(() => {
-  window.clearInterval(cooldownTimer);
-});
 </script>
 
 <template>
@@ -168,30 +98,6 @@ onBeforeUnmount(() => {
             <p>{{ description }}</p>
           </header>
 
-          <div v-if="isVerify" class="auth-state" :class="{ success: message }">
-            <LoaderCircle v-if="loading" :size="28" class="spin" />
-            <CheckCircle2 v-else-if="message" :size="30" />
-            <Mail v-else :size="30" />
-            <p v-if="message">{{ message }}</p>
-            <p v-else-if="error" class="auth-error" role="alert">{{ error }}</p>
-            <RouterLink v-if="!loading" class="auth-link-button" to="/login">前往登录</RouterLink>
-          </div>
-
-          <div v-else-if="registrationSent" class="auth-state email-sent">
-            <span class="auth-state-icon"><Mail :size="25" /></span>
-            <h3>检查你的邮箱</h3>
-            <p>验证链接已发送至 <strong>{{ email }}</strong>。完成验证后即可登录。</p>
-            <p v-if="message" class="auth-success" role="status">{{ message }}</p>
-            <p v-if="error" class="auth-error" role="alert">{{ error }}</p>
-            <button class="auth-submit secondary" type="button" :disabled="loading || resendCooldown > 0" @click="resendVerification">
-              <LoaderCircle v-if="loading" :size="17" class="spin" />
-              <RefreshCw v-else :size="17" />
-              {{ resendCooldown ? `${resendCooldown} 秒后可重发` : '重新发送验证邮件' }}
-            </button>
-            <RouterLink class="auth-link-button" to="/login">返回登录</RouterLink>
-          </div>
-
-          <template v-else>
             <label v-if="!isReset" class="field-block">
               <span>邮箱</span>
               <input v-model="email" type="email" autocomplete="email" required placeholder="name@example.com" />
@@ -232,7 +138,6 @@ onBeforeUnmount(() => {
               </span>
               <RouterLink v-else to="/login">返回登录</RouterLink>
             </nav>
-          </template>
           </form>
         </div>
       </div>

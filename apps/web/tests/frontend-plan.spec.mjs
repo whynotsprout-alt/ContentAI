@@ -40,14 +40,17 @@ describe('frontend plan contracts', () => {
     expect(store).toContain('api.executionEvents(this.executionId, this.lastEventSequence)');
   });
 
-  it('provides post-registration verification and reset administration flows', async () => {
-    const [auth, admin] = await Promise.all([
+  it('registers without exposing verification or resend UI', async () => {
+    const [auth, router, api, admin] = await Promise.all([
       read('../src/views/AuthView.vue'),
+      read('../src/router.ts'),
+      read('../src/services/api.ts'),
       read('../src/views/AdminUsersView.vue')
     ]);
-    expect(auth).toContain('registrationSent.value = true');
-    expect(auth).toContain('resendVerification');
-    expect(auth).toContain('resendCooldown');
+    expect(auth).toContain("await router.replace('/login')");
+    expect(auth).not.toMatch(/verify-email|registrationSent|resendVerification|resendCooldown/);
+    expect(router).not.toContain("path: '/verify-email'");
+    expect(api).not.toMatch(/verifyEmail|resendVerification/);
     expect(admin).toContain('canResetPassword');
     expect(admin).toContain('confirmStatusChange');
     expect(admin).not.toMatch(/disabled\s+title=.*暂不/);

@@ -9,7 +9,6 @@ export const router = createRouter({
     { path: '/register', name: 'register', component: () => import('./views/AuthView.vue'), meta: { public: true, visualMode: 'hero' } },
     { path: '/forgot-password', name: 'forgot-password', component: () => import('./views/AuthView.vue'), meta: { public: true, visualMode: 'hero' } },
     { path: '/reset-password', name: 'reset-password', component: () => import('./views/AuthView.vue'), meta: { public: true, visualMode: 'hero' } },
-    { path: '/verify-email', name: 'verify-email', component: () => import('./views/AuthView.vue'), meta: { public: true, visualMode: 'hero' } },
     { path: '/app', name: 'app', component: () => import('./App.vue'), meta: { visualMode: 'workspace' } },
     { path: '/admin/users', name: 'admin-users', component: () => import('./views/AdminUsersView.vue'), meta: { admin: true, visualMode: 'admin' } },
     { path: '/:pathMatch(.*)*', redirect: '/app' }

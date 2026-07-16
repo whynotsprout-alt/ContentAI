@@ -198,10 +198,6 @@
   border-radius: 18px;
 }
 
-.email-sent .auth-submit {
-  margin-top: 2px;
-}
-
 @keyframes auth-reveal {
   from { opacity: 0; transform: translateY(16px); }
   to { opacity: 1; transform: translateY(0); }

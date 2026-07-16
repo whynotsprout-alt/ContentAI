@@ -9,7 +9,7 @@ const groups = {
     'executionEvents', 'runStatus', 'cancelRun', 'resumeRun'
   ],
   authApi: [
-    'register', 'verifyEmail', 'resendVerification', 'login', 'logout', 'me',
+    'register', 'login', 'logout', 'me',
     'forgotPassword', 'resetPassword', 'changePassword'
   ],
   adminApi: [

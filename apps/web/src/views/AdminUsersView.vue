@@ -43,7 +43,7 @@ const confirmRoleChange = ref(false);
 let searchTimer = 0;
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
-const canResetPassword = computed(() => Boolean(selected.value?.email_verified_at) && selected.value?.status === 'active');
+const canResetPassword = computed(() => selected.value?.status !== 'disabled');
 const canChangeRole = computed(() => Boolean(selected.value) && !(
   selected.value?.id === auth.user?.id && selected.value?.role === 'admin'
 ));
@@ -224,7 +224,7 @@ onMounted(() => void load());
             <section v-if="usage.length" class="admin-detail-section"><header><strong>近期用量</strong></header><p v-for="bucket in usage.slice(0, 7)" :key="bucket.bucket" class="admin-usage-row"><span>{{ bucket.bucket }}</span><strong>{{ formatTokens(bucket.total_tokens) }} Token</strong></p></section>
             <p v-if="notice" class="form-feedback success" role="status"><CheckCircle2 :size="16" /> {{ notice }}</p>
             <div class="admin-actions">
-              <button type="button" :disabled="actionLoading || !canResetPassword" :title="canResetPassword ? '发送密码重置邮件' : '仅已验证且未禁用用户可重置密码'" @click="sendReset"><LoaderCircle v-if="actionLoading" :size="16" class="spin" /><KeyRound v-else :size="16" />发送密码重置</button>
+              <button type="button" :disabled="actionLoading || !canResetPassword" :title="canResetPassword ? '发送密码重置邮件' : '已禁用用户不可重置密码'" @click="sendReset"><LoaderCircle v-if="actionLoading" :size="16" class="spin" /><KeyRound v-else :size="16" />发送密码重置</button>
               <button type="button" :disabled="actionLoading || !canChangeRole" :title="canChangeRole ? '修改用户角色' : '不能降级当前登录的管理员'" @click="confirmRoleChange = true"><ShieldCheck :size="16" />{{ selected.role === 'admin' ? '降级为普通用户' : '提升为管理员' }}</button>
               <button class="danger-button" type="button" :disabled="actionLoading || selected.id === auth.user?.id" @click="confirmStatusChange = true"><Ban v-if="selected.status !== 'disabled'" :size="16" /><UserCheck v-else :size="16" />{{ selected.status === 'disabled' ? '启用用户' : '禁用用户' }}</button>
             </div>
