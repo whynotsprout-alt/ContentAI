@@ -7,7 +7,6 @@ from agent.prompts.registry import load_tool_description
 from agent.runtime.context import get_tool_runtime_context
 from langchain_core.tools import tool
 
-
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
