@@ -13,7 +13,6 @@ from pwdlib import PasswordHash
 from services.mailer import Mailer
 from sqlmodel import Session, select
 
-VERIFY_PURPOSE = "verify_email"
 RESET_PURPOSE = "reset_password"
 
 
@@ -54,48 +53,18 @@ class AuthService:
             raise AuthServiceError("该邮箱已注册", status_code=409)
         role = "admin" if normalized in self.settings.auth.bootstrap_admin_emails else "user"
         now = utcnow()
-        requires_verification = self.settings.auth.require_email_verification
         user = AppUser(
             email=normalized,
             email_normalized=normalized,
             password_hash=self.password_hash.hash(password),
             role=role,
-            status="pending_verification" if requires_verification else "active",
-            email_verified_at=None if requires_verification else now,
+            status="active",
+            email_verified_at=now,
         )
         session.add(user)
         session.commit()
         session.refresh(user)
-        if requires_verification:
-            raw = self.issue_action_token(session, user=user, purpose=VERIFY_PURPOSE)
-            self.send_verification(user, raw)
         return user
-
-    def verify_email(self, session: Session, *, token: str) -> AppUser:
-        record, user = self.consume_action_token(
-            session,
-            token=token,
-            purpose=VERIFY_PURPOSE,
-        )
-        if user.status == "disabled":
-            raise AuthServiceError("Account is disabled", status_code=403)
-        now = utcnow()
-        user.email_verified_at = user.email_verified_at or now
-        user.status = "active"
-        user.updated_at = now
-        record.used_at = now
-        session.add(record)
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
-
-    def resend_verification(self, session: Session, *, email: str) -> None:
-        user = self.get_user_by_email(session, email)
-        if user is None or user.email_verified_at is not None or user.status == "disabled":
-            return
-        raw = self.issue_action_token(session, user=user, purpose=VERIFY_PURPOSE)
-        self.send_verification(user, raw)
 
     def login(
         self,
@@ -124,11 +93,9 @@ class AuthService:
             raise AuthServiceError("邮箱或密码错误", status_code=401)
         if user.status == "disabled":
             raise AuthServiceError("账号已被禁用", status_code=403)
-        if not self.settings.auth.require_email_verification and user.email_verified_at is None:
+        if user.status == "pending_verification" or user.email_verified_at is None:
             user.email_verified_at = now
             user.status = "active"
-        if user.email_verified_at is None or user.status != "active":
-            raise AuthServiceError("请先完成邮箱验证", status_code=403)
 
         user.failed_login_count = 0
         user.locked_until = None
@@ -162,12 +129,6 @@ class AuthService:
         user = self.get_user_by_email(session, email)
         if user is None or user.status == "disabled":
             return
-        if self.settings.auth.require_email_verification and user.email_verified_at is None:
-            return
-        if user.email_verified_at is None:
-            user.email_verified_at = utcnow()
-            user.status = "active"
-            session.add(user)
         raw = self.issue_action_token(session, user=user, purpose=RESET_PURPOSE)
         self.send_password_reset(user, raw)
 
@@ -221,11 +182,7 @@ class AuthService:
             item.used_at = now
             session.add(item)
         raw = secrets.token_urlsafe(48)
-        lifetime = (
-            timedelta(hours=self.settings.auth.verification_hours)
-            if purpose == VERIFY_PURPOSE
-            else timedelta(minutes=self.settings.auth.reset_minutes)
-        )
+        lifetime = timedelta(minutes=self.settings.auth.reset_minutes)
         session.add(
             UserActionToken(
                 user_id=user.id,
@@ -278,16 +235,6 @@ class AuthService:
         return session.exec(
             select(AppUser).where(AppUser.email_normalized == self.normalize_email(email))
         ).first()
-
-    def send_verification(self, user: AppUser, token: str) -> None:
-        link = f"{self.settings.auth.public_base_url.rstrip('/')}/verify-email?token={token}"
-        self.mailer.send(
-            recipient=user.email,
-            subject="验证你的 ContentAI 邮箱",
-            text=(
-                f"请在 {self.settings.auth.verification_hours} 小时内打开以下链接完成验证：\n{link}"
-            ),
-        )
 
     def send_password_reset(self, user: AppUser, token: str) -> None:
         link = f"{self.settings.auth.public_base_url.rstrip('/')}/reset-password?token={token}"

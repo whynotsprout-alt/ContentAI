@@ -84,18 +84,7 @@ class AdminService:
             raise AuthServiceError("不能禁用当前管理员", status_code=409)
         if disabled and user.role == "admin":
             self._ensure_not_last_admin(session, user.id)
-        user.status = (
-            "disabled"
-            if disabled
-            else (
-                "active"
-                if (
-                    not self.auth_service.settings.auth.require_email_verification
-                    or user.email_verified_at is not None
-                )
-                else "pending_verification"
-            )
-        )
+        user.status = "disabled" if disabled else "active"
         session.add(user)
         if disabled:
             self.auth_service.revoke_all_sessions(session, user.id, commit=False)
@@ -123,8 +112,8 @@ class AdminService:
         user = session.get(AppUser, user_id)
         if user is None:
             raise AuthServiceError("用户不存在", status_code=404)
-        if user.status == "disabled" or user.email_verified_at is None:
-            raise AuthServiceError("只能为已验证且未禁用的用户重置密码", status_code=409)
+        if user.status == "disabled":
+            raise AuthServiceError("不能为已禁用的用户重置密码", status_code=409)
         raw = self.auth_service.issue_action_token(
             session,
             user=user,

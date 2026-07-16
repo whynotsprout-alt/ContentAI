@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
@@ -24,7 +25,6 @@ def auth_app():
             },
             auth={
                 "mail_backend": "console",
-                "require_email_verification": True,
                 "bootstrap_admin_emails": ["admin@example.com"],
                 "public_base_url": "http://testserver",
             },
@@ -32,12 +32,10 @@ def auth_app():
     )
 
 
-def _register_and_verify(client: TestClient, app, email: str, password: str) -> None:
+def _register(client: TestClient, email: str, password: str) -> None:
     response = client.post("/api/auth/register", json={"email": email, "password": password})
     assert response.status_code == 201
-    token = app.state.mailer.outbox[-1].text.split("token=", 1)[1].strip()
-    verified = client.post("/api/auth/verify-email", json={"token": token})
-    assert verified.status_code == 200
+    assert response.json()["message"] == "Registration successful. You can sign in now."
 
 
 def _login(client: TestClient, email: str, password: str):
@@ -48,10 +46,11 @@ def _login(client: TestClient, email: str, password: str):
     return {"X-CSRF-Token": csrf}
 
 
-def test_local_registration_verification_login_and_password_reset():
+def test_local_registration_login_and_password_reset():
     app = auth_app()
     with TestClient(app) as client:
-        _register_and_verify(client, app, "person@example.com", "correct horse battery")
+        _register(client, "person@example.com", "correct horse battery")
+        assert app.state.mailer.outbox == []
         login_headers = _login(client, "person@example.com", "correct horse battery")
         assert client.get("/api/auth/me").json()["email"] == "person@example.com"
 
@@ -68,36 +67,52 @@ def test_local_registration_verification_login_and_password_reset():
         _login(client, "person@example.com", "a different secure password")
 
 
-def test_local_registration_can_skip_email_verification_for_development():
-    app = create_app(
-        Settings(
-            env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
-            auth={
-                "mail_backend": "console",
-                "require_email_verification": False,
-            },
-        )
-    )
+def test_legacy_pending_user_is_activated_after_valid_login():
+    app = auth_app()
     with TestClient(app) as client:
-        response = client.post(
-            "/api/auth/register",
-            json={"email": "local@example.com", "password": "correct horse battery"},
-        )
+        _register(client, "legacy@example.com", "correct horse battery")
+        with Session(get_engine(app.state.settings)) as session:
+            user = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "legacy@example.com")
+            ).one()
+            user.status = "pending_verification"
+            user.email_verified_at = None
+            session.add(user)
+            session.commit()
+        _login(client, "legacy@example.com", "correct horse battery")
+        with Session(get_engine(app.state.settings)) as session:
+            user = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "legacy@example.com")
+            ).one()
+            assert user.status == "active"
+            assert user.email_verified_at is not None
 
-        assert response.status_code == 201
-        assert response.json()["message"] == "Registration successful. You can sign in now."
-        assert app.state.mailer.outbox == []
-        _login(client, "local@example.com", "correct horse battery")
+
+def _production_settings(**auth_overrides: object) -> Settings:
+    return Settings(
+        env="production",
+        server={"frontend_origins": "https://content.example.com"},
+        database={"url": "postgresql+psycopg://postgres:postgres@db/contentai"},
+        search={"traffic_relay_api_key": "test-relay-key"},
+        auth={
+            "public_base_url": "https://content.example.com",
+            "bootstrap_admin_emails": ["admin@example.com"],
+            **auth_overrides,
+        },
+    )
+
+
+def test_production_rejects_reenabling_email_verification():
+    assert _production_settings(mail_backend="console").auth.mail_backend == "console"
+    with pytest.raises(ValueError, match="must remain disabled in production"):
+        _production_settings(require_email_verification=True)
 
 
 def test_admin_user_listing_usage_and_disable():
     app = auth_app()
     with TestClient(app) as client:
-        _register_and_verify(client, app, "member@example.com", "member password 123")
-        _register_and_verify(client, app, "admin@example.com", "admin password 123")
+        _register(client, "member@example.com", "member password 123")
+        _register(client, "admin@example.com", "admin password 123")
         admin_headers = _login(client, "admin@example.com", "admin password 123")
 
         with Session(get_engine(app.state.settings)) as session:
@@ -135,47 +150,22 @@ def test_admin_user_listing_usage_and_disable():
         assert disabled.json()["status"] == "disabled"
 
 
-def test_disabled_pending_user_cannot_reactivate_with_old_verification_link():
+def test_verification_endpoints_are_retired_without_side_effects():
     app = auth_app()
     with TestClient(app) as client:
-        registered = client.post(
-            "/api/auth/register",
-            json={"email": "pending@example.com", "password": "pending password 123"},
-        )
-        assert registered.status_code == 201
-        old_token = app.state.mailer.outbox[-1].text.split("token=", 1)[1].strip()
-
-        _register_and_verify(client, app, "admin@example.com", "admin password 123")
-        admin_headers = _login(client, "admin@example.com", "admin password 123")
-        with Session(get_engine(app.state.settings)) as session:
-            pending = session.exec(
-                select(AppUser).where(AppUser.email_normalized == "pending@example.com")
-            ).one()
-            pending_id = pending.id
-
-        disabled = client.post(
-            f"/api/admin/users/{pending_id}/disable",
-            headers=admin_headers,
-        )
-        assert disabled.status_code == 200
-
-        verification = client.post(
-            "/api/auth/verify-email",
-            json={"token": old_token},
-        )
-        assert verification.status_code in {400, 403}
-        with Session(get_engine(app.state.settings)) as session:
-            pending = session.get(AppUser, pending_id)
-            assert pending is not None
-            assert pending.status == "disabled"
-            assert pending.email_verified_at is None
+        _register(client, "person@example.com", "correct horse battery")
+        assert client.post("/api/auth/verify-email", json={"token": "old-token"}).status_code == 410
+        assert client.post(
+            "/api/auth/resend-verification", json={"email": "person@example.com"}
+        ).status_code == 410
+        assert app.state.mailer.outbox == []
 
 
 def test_admin_can_view_session_messages_after_audit_is_recorded():
     app = auth_app()
     with TestClient(app) as client:
-        _register_and_verify(client, app, "member@example.com", "member password 123")
-        _register_and_verify(client, app, "admin@example.com", "admin password 123")
+        _register(client, "member@example.com", "member password 123")
+        _register(client, "admin@example.com", "admin password 123")
         admin_headers = _login(client, "admin@example.com", "admin password 123")
 
         with Session(get_engine(app.state.settings)) as session:
@@ -222,7 +212,7 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
 def test_non_admin_cannot_access_admin_api_and_csrf_is_required():
     app = auth_app()
     with TestClient(app) as client:
-        _register_and_verify(client, app, "member@example.com", "member password 123")
+        _register(client, "member@example.com", "member password 123")
         _login(client, "member@example.com", "member password 123")
         assert client.get("/api/admin/users").status_code == 403
         assert client.post("/api/auth/logout").status_code == 403
@@ -231,7 +221,7 @@ def test_non_admin_cannot_access_admin_api_and_csrf_is_required():
 def test_local_users_cannot_access_each_others_content_accounts():
     app = auth_app()
     with TestClient(app) as client:
-        _register_and_verify(client, app, "first@example.com", "first password 123")
+        _register(client, "first@example.com", "first password 123")
         first_headers = _login(client, "first@example.com", "first password 123")
         created = client.post(
             "/api/agents",
@@ -247,7 +237,7 @@ def test_local_users_cannot_access_each_others_content_accounts():
         assert created.status_code == 201
         account_id = created.json()["id"]
 
-        _register_and_verify(client, app, "second@example.com", "second password 123")
+        _register(client, "second@example.com", "second password 123")
         _login(client, "second@example.com", "second password 123")
         assert client.get("/api/agents").json() == []
         assert client.get(f"/api/agents/{account_id}").status_code == 404

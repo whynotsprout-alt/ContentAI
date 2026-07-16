@@ -230,15 +230,10 @@ class Settings(BaseSettings):
     def _validate_auth(self) -> None:
         if self.auth.session_days < 1:
             raise ValueError("CONTENTAI_AUTH__SESSION_DAYS must be at least 1.")
-        if self.auth.verification_hours < 1 or self.auth.reset_minutes < 1:
-            raise ValueError("Auth token lifetimes must be positive.")
+        if self.auth.reset_minutes < 1:
+            raise ValueError("Password reset token lifetime must be positive.")
         if self.auth.login_max_failures < 1 or self.auth.login_lock_minutes < 1:
             raise ValueError("Auth login lock settings must be positive.")
-        if (
-            self.auth.resend_verification_limit < 1
-            or self.auth.resend_verification_window_seconds < 60
-        ):
-            raise ValueError("Verification resend limits must be positive and at least 60 seconds.")
         self.auth.bootstrap_admin_emails = list(
             dict.fromkeys(
                 email.strip().lower() for email in self.auth.bootstrap_admin_emails if email.strip()
@@ -247,9 +242,9 @@ class Settings(BaseSettings):
         if self.auth.mail_backend not in {"console", "smtp"}:
             raise ValueError("CONTENTAI_AUTH__MAIL_BACKEND must be console or smtp.")
         if self.env == Env.production:
-            if not self.auth.require_email_verification:
+            if self.auth.require_email_verification:
                 raise ValueError(
-                    "CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION must be enabled in production."
+                    "CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION must remain disabled in production."
                 )
             parsed_base = urlparse(self.auth.public_base_url)
             if not (parsed_base.scheme == "https" and parsed_base.netloc):
@@ -260,10 +255,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS is required in production."
                 )
-            if self.auth.mail_backend != "smtp":
-                raise ValueError("SMTP mail backend is required in production.")
-            if not self.auth.smtp_host.strip() or not self.auth.smtp_from_email.strip():
-                raise ValueError("SMTP host and from email are required in production.")
 
     def _validate_frontend_origins(self) -> None:
         for origin in self.server.frontend_origins:

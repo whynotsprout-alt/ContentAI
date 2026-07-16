@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from api.dependencies import AuthServiceDep, CurrentUserDep, SessionDep
 from core.config import Env
-from core.rate_limit import RateLimitRule, RateLimitUnavailable
 from fastapi import APIRouter, HTTPException, Request, Response
 from models.schemas import (
     ChangePasswordRequest,
@@ -12,7 +11,6 @@ from models.schemas import (
     MessageResponse,
     RegisterRequest,
     ResetPasswordRequest,
-    TokenRequest,
 )
 from models.user import AppUser
 from services.auth_service import AuthServiceError
@@ -63,7 +61,6 @@ def _clear_auth_cookies(response: Response, request: Request) -> None:
 @router.post("/register", response_model=MessageResponse, status_code=201)
 def register(
     payload: RegisterRequest,
-    request: Request,
     service: AuthServiceDep,
     session: SessionDep,
 ) -> MessageResponse:
@@ -71,57 +68,19 @@ def register(
         service.register(session, email=str(payload.email), password=payload.password)
     except AuthServiceError as exc:
         _raise_auth_error(exc)
-    if not request.app.state.settings.auth.require_email_verification:
-        return MessageResponse(message="Registration successful. You can sign in now.")
-    return MessageResponse(message="注册成功，请查收验证邮件")
+    return MessageResponse(message="Registration successful. You can sign in now.")
 
 
-@router.post("/verify-email", response_model=CurrentUserResponse)
+@router.post("/verify-email", response_model=MessageResponse)
 def verify_email(
-    payload: TokenRequest,
-    request: Request,
-    service: AuthServiceDep,
-    session: SessionDep,
-) -> CurrentUserResponse:
-    try:
-        user = service.verify_email(session, token=payload.token)
-    except AuthServiceError as exc:
-        _raise_auth_error(exc)
-    return service.to_response(user)
+) -> MessageResponse:
+    raise HTTPException(status_code=410, detail="Email verification has been retired.")
 
 
 @router.post("/resend-verification", response_model=MessageResponse)
 def resend_verification(
-    payload: EmailRequest,
-    request: Request,
-    service: AuthServiceDep,
-    session: SessionDep,
 ) -> MessageResponse:
-    normalized_email = service.normalize_email(str(payload.email))
-    user = service.get_user_by_email(session, normalized_email)
-    identities = [
-        ("verification_resend:email", normalized_email),
-        (
-            "verification_resend:ip",
-            request.client.host if request.client else "unknown",
-        ),
-    ]
-    if user is not None:
-        identities.append(("verification_resend:user", user.id))
-    settings = request.app.state.settings.auth
-    rule = RateLimitRule(
-        settings.resend_verification_limit,
-        settings.resend_verification_window_seconds,
-    )
-    try:
-        for scope, identity in identities:
-            request.app.state.rate_limiter.check(scope, identity, rule)
-    except PermissionError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
-    except RateLimitUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    service.resend_verification(session, email=str(payload.email))
-    return MessageResponse(message="如果该邮箱需要验证，我们已发送新邮件")
+    raise HTTPException(status_code=410, detail="Email verification has been retired.")
 
 
 @router.post("/login", response_model=CurrentUserResponse)
