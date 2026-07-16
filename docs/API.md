@@ -13,9 +13,9 @@
 
 | 方法 | 路径 | 认证 | 调用方 | 请求 / 响应 | 用途 |
 | --- | --- | --- | --- | --- | --- |
-| POST | `/api/auth/register` | 无 | AuthView | email、password / 提示消息 | 注册 |
-| POST | `/api/auth/verify-email` | 无 | AuthView | token / 当前用户 | 验证邮箱 |
-| POST | `/api/auth/resend-verification` | 无 | AuthView | email / 提示消息 | 重发验证邮件 |
+| POST | `/api/auth/register` | 无 | AuthView | email、password / 提示消息 | 注册后可立即登录 |
+| POST | `/api/auth/verify-email` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的旧验证接口 |
+| POST | `/api/auth/resend-verification` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的旧验证重发接口 |
 | POST | `/api/auth/login` | 无 | Auth Store | email、password / 当前用户 + Cookie | 登录 |
 | POST | `/api/auth/logout` | 登录 + CSRF | Auth Store | 无 / 204 | 退出并撤销会话 |
 | GET | `/api/auth/me` | 登录 | Auth Store | 无 / 当前用户 | 恢复登录态 |

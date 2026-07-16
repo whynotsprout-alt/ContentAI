@@ -25,18 +25,21 @@
 - `apps/api/src/core/config/settings.py`：认证及生产启动配置校验。
 - `apps/api/src/services/auth_service.py`：注册、旧账号登录规范化、密码重置与遗留验证代码边界。
 - `apps/api/src/api/auth.py`：注册响应及两个保留验证端点的 `410` 合约。
+- `apps/api/src/core/security.py`、`apps/api/src/models/user.py`：认证会话与用户默认状态不再将邮箱验证字段作为门槛。
 - `apps/api/src/services/admin_service.py`、`apps/web/src/views/AdminUsersView.vue`：允许已启用但缺少历史验证时间的用户取得管理员发送的重置邮件。
 - `apps/api/tests/test_auth_admin.py`：认证行为与遗留端点集成测试。
 - `apps/api/tests/test_api_contract.py`：保留 35 个 OpenAPI 业务端点的契约。
 - `apps/web/src/router.ts`、`apps/web/src/views/AuthView.vue`、`apps/web/src/services/api.ts`：移除验证页面和客户端调用。
 - `apps/web/tests/frontend-plan.spec.mjs`、`apps/web/tests/api-client-contract.spec.mjs`：前端无验证流程契约。
-- `.env.example`、`docs/API.md`、`docs/DEVELOPMENT.md`、`docs/OPERATIONS.md`、`docs/ARCHITECTURE.md`：生产设置与支持的认证流程说明。
+- `.env.example`、`docs/API.md`、`docs/DEVELOPMENT.md`、`docs/OPERATIONS.md`、`docs/DESIGN.md`：生产设置与支持的认证流程说明。
 
 ### Task 1: 后端取消验证前置条件并保留 410 兼容端点
 
 **Files:**
 - Modify: `apps/api/src/core/config/auth.py:12-18`
 - Modify: `apps/api/src/core/config/settings.py:228-266`
+- Modify: `apps/api/src/core/security.py:55-68`
+- Modify: `apps/api/src/models/user.py:19-25`
 - Modify: `apps/api/src/services/auth_service.py:16-101, 125-173, 220-290`
 - Modify: `apps/api/src/api/auth.py:63-123`
 - Modify: `apps/api/src/services/admin_service.py:88-130`
@@ -47,7 +50,7 @@
 - Consumes: `AuthSettings.require_email_verification: bool`, `AuthService.register()`, `AuthService.login()`, `AuthService.forgot_password()`.
 - Produces: registration response `"Registration successful. You can sign in now."`; legacy verification routes returning HTTP `410` and detail `"Email verification has been retired."`.
 
-- [ ] **Step 1: Write failing backend tests**
+- [x] **Step 1: Write failing backend tests**
 
 Replace the verification helper with a registration helper and add assertions that make the new policy explicit:
 
@@ -114,13 +117,13 @@ def test_production_rejects_reenabling_email_verification():
         _production_settings(require_email_verification=True)
 ```
 
-- [ ] **Step 2: Run the focused test to verify it fails**
+- [x] **Step 2: Run the focused test to verify it fails**
 
 Run: `uv run pytest apps/api/tests/test_auth_admin.py -q`
 
 Expected: failures because registration sends a verification email, pending users cannot log in, and the two endpoints return their former success/error behavior.
 
-- [ ] **Step 3: Implement the smallest policy change**
+- [x] **Step 3: Implement the smallest policy change**
 
 Make the configuration and services obey the following concrete rules:
 
@@ -150,18 +153,18 @@ raw = self.issue_action_token(session, user=user, purpose=RESET_PURPOSE)
 self.send_password_reset(user, raw)
 ```
 
-Remove `VERIFY_PURPOSE`, `verify_email`, `resend_verification`, `send_verification`, verification-lifetime branching and resend limit usage from the normal service code. In `settings.py`, reject only a true production verification flag, retain HTTPS/base URL and bootstrap-admin validation, and remove the production SMTP requirement. In `auth.py`, make both retained route handlers raise `HTTPException(status_code=410, detail="Email verification has been retired.")` before touching sessions, rate limits, tokens, or the mailer. Keep the routes in OpenAPI. Change administrator reset eligibility to require only a non-disabled account, not a historical verification timestamp.
+Remove `VERIFY_PURPOSE`, `verify_email`, `resend_verification`, `send_verification`, verification-lifetime branching and resend limit usage from the normal service code. In `settings.py`, reject only a true production verification flag, retain HTTPS/base URL and bootstrap-admin validation, and remove the production SMTP requirement. In `auth.py`, make both retained route handlers raise `HTTPException(status_code=410, detail="Email verification has been retired.")` before touching sessions, rate limits, tokens, or the mailer. Keep the routes in OpenAPI. Remove the verification timestamp predicate from session authentication, make the model's default user status `active`, and change administrator reset eligibility to require only a non-disabled account.
 
-- [ ] **Step 4: Run focused backend tests to verify they pass**
+- [x] **Step 4: Run focused backend tests to verify they pass**
 
 Run: `uv run pytest apps/api/tests/test_auth_admin.py apps/api/tests/test_api_contract.py -q`
 
 Expected: all selected tests pass and OpenAPI still lists 35 operations.
 
-- [ ] **Step 5: Commit the backend task**
+- [x] **Step 5: Commit the backend task**
 
 ```bash
-git add apps/api/src/core/config/auth.py apps/api/src/core/config/settings.py apps/api/src/services/auth_service.py apps/api/src/api/auth.py apps/api/src/services/admin_service.py apps/api/tests/test_auth_admin.py apps/api/tests/test_api_contract.py
+git add apps/api/src/core/config/auth.py apps/api/src/core/config/settings.py apps/api/src/core/security.py apps/api/src/models/user.py apps/api/src/services/auth_service.py apps/api/src/api/auth.py apps/api/src/services/admin_service.py apps/api/tests/test_auth_admin.py apps/api/tests/test_api_contract.py
 git commit -m "feat: retire email verification flow"
 ```
 
@@ -180,7 +183,7 @@ git commit -m "feat: retire email verification flow"
 - Consumes: `authApi.register(email, password): Promise<{ message: string }>` and existing login/reset methods.
 - Produces: `/register` submission that displays the success message then uses `router.replace('/login')`; no `/verify-email` route or verification client methods.
 
-- [ ] **Step 1: Write failing frontend contract tests**
+- [x] **Step 1: Write failing frontend contract tests**
 
 Replace the current verification-flow assertions with:
 
@@ -200,7 +203,7 @@ it('registers without exposing verification or resend UI', async () => {
 
 Remove `verifyEmail` and `resendVerification` from `authApi` in `api-client-contract.spec.mjs`; retain all password reset methods as required callers.
 
-- [ ] **Step 2: Run the focused frontend tests to verify they fail**
+- [x] **Step 2: Run the focused frontend tests to verify they fail**
 
 Run: `npm test -- --run tests/frontend-plan.spec.mjs tests/api-client-contract.spec.mjs`
 
@@ -208,11 +211,11 @@ Working directory: `apps/web`
 
 Expected: failures because the router, view, and client still expose verification flow identifiers.
 
-- [ ] **Step 3: Implement the smallest UI and client change**
+- [x] **Step 3: Implement the smallest UI and client change**
 
 Delete the `verify-email` route, `isVerify`, lifecycle verification calls, resend timer/function/state, email-sent and verification template branches, plus unused `CheckCircle2`, `Mail`, `RefreshCw`, `onMounted`, `onBeforeUnmount`, and `watch` imports. After `authApi.register`, clear password fields, set the message, then call `await router.replace('/login')`. Remove the two verification client methods. Change administrator reset eligibility and its explanatory title to require only `selected.status !== 'disabled'`; remove the obsolete `.email-sent .auth-submit` rule when no selector remains.
 
-- [ ] **Step 4: Run frontend tests and type/build verification**
+- [x] **Step 4: Run frontend tests and type/build verification**
 
 Run: `npm test -- --run tests/frontend-plan.spec.mjs tests/api-client-contract.spec.mjs && npm run build`
 
@@ -220,7 +223,7 @@ Working directory: `apps/web`
 
 Expected: both contract files pass and `vue-tsc -b && vite build` exits with code 0.
 
-- [ ] **Step 5: Commit the Web task**
+- [x] **Step 5: Commit the Web task**
 
 ```bash
 git add apps/web/src/router.ts apps/web/src/views/AuthView.vue apps/web/src/services/api.ts apps/web/src/views/AdminUsersView.vue apps/web/src/styles/auth.css apps/web/tests/frontend-plan.spec.mjs apps/web/tests/api-client-contract.spec.mjs
@@ -234,7 +237,7 @@ git commit -m "feat: remove email verification UI"
 - Modify: `docs/API.md:1-27, 末尾契约约束`
 - Modify: `docs/DEVELOPMENT.md:10`
 - Modify: `docs/OPERATIONS.md:16-20`
-- Modify: `docs/ARCHITECTURE.md:认证与删除、安全与限流段落`
+- Modify: `docs/DESIGN.md:删除、安全与限流段落`
 - Test: `apps/api/tests/test_api_contract.py`
 - Test: `apps/web/tests/frontend-plan.spec.mjs`
 
@@ -242,7 +245,7 @@ git commit -m "feat: remove email verification UI"
 - Consumes: 已完成的 API 路由、生产配置校验与 Web 路由。
 - Produces: 明确的“注册即登录资格、验证端点 410、SMTP 仅用于密码重置”运维合同。
 
-- [ ] **Step 1: Confirm the implemented contract before documenting it**
+- [x] **Step 1: Confirm the implemented contract before documenting it**
 
 Run: `uv run pytest apps/api/tests/test_api_contract.py apps/api/tests/test_auth_admin.py -q` and `npm test -- --run tests/frontend-plan.spec.mjs tests/api-client-contract.spec.mjs`
 
@@ -250,11 +253,11 @@ Working directory for the second command: `apps/web`
 
 Expected: the retained verification routes appear in OpenAPI but return `410`; the Web contract has no verification route or client calls.
 
-- [ ] **Step 2: Update exact documentation and configuration language**
+- [x] **Step 2: Update exact documentation and configuration language**
 
 Remove `CONTENTAI_AUTH__VERIFICATION_HOURS`, `CONTENTAI_AUTH__RESEND_VERIFICATION_LIMIT`, and `CONTENTAI_AUTH__RESEND_VERIFICATION_WINDOW_SECONDS` from `.env.example`; set `CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION=false` and label it as an enforced disabled compatibility flag. Keep `PUBLIC_BASE_URL` and SMTP variables, but explain SMTP is needed to deliver password resets rather than to create or access accounts. In `docs/API.md`, retain the two verification rows as `410 Gone / 已停用兼容接口` with no caller, and describe register as immediately eligible for login. Update development, operations, and architecture documentation to remove production verification/SMTP startup requirements, retain HTTPS and password-reset guidance, and describe legacy pending-account normalization.
 
-- [ ] **Step 3: Run documentation-adjacent contract tests**
+- [x] **Step 3: Run documentation-adjacent contract tests**
 
 Run: `uv run pytest apps/api/tests/test_api_contract.py -q` and `npm test -- --run tests/frontend-plan.spec.mjs tests/api-client-contract.spec.mjs`
 
@@ -262,17 +265,17 @@ Working directory for the second command: `apps/web`
 
 Expected: all selected contracts pass with no verification UI or active verification endpoint behavior reintroduced.
 
-- [ ] **Step 4: Commit documentation and plan updates**
+- [x] **Step 4: Commit documentation and plan updates**
 
 ```bash
-git add .env.example docs/API.md docs/DEVELOPMENT.md docs/OPERATIONS.md docs/ARCHITECTURE.md docs/superpowers/plans/2026-07-16-no-email-verification.md
+git add .env.example docs/API.md docs/DEVELOPMENT.md docs/OPERATIONS.md docs/DESIGN.md docs/superpowers/plans/2026-07-16-no-email-verification.md
 git commit -m "docs: document retired email verification"
 ```
 
 ## Final Verification
 
-- [ ] Run `uv run pytest -q` from the repository root.
-- [ ] Run `uv run ruff check apps/api/src apps/api/tests` from the repository root.
-- [ ] Run `npm test && npm run build` from `apps/web`.
-- [ ] Run `git diff --check` and `git status --short`; confirm only the intended files changed and previously existing unrelated changes remain unstaged.
-- [ ] Run `rg -n -i "resendVerification|verifyEmail|path: '/verify-email'|require_email_verification: bool = True" apps/web/src apps/web/tests apps/api/src .env.example docs` and inspect every remaining match; only the retained 410 compatibility endpoints and their documentation may reference verification.
+- [x] Run `uv run pytest -q` from the repository root.
+- [x] Run `uv run ruff check apps/api/src apps/api/tests` from the repository root.
+- [x] Run `npm test && npm run build` from `apps/web`.
+- [x] Run `git diff --check` and `git status --short`; confirm only the intended files changed and previously existing unrelated changes remain unstaged.
+- [x] Run `rg -n -i "resendVerification|verifyEmail|path: '/verify-email'|require_email_verification: bool = True" apps/web/src apps/web/tests apps/api/src .env.example docs` and inspect every remaining match; only the retained 410 compatibility endpoints and their documentation may reference verification.

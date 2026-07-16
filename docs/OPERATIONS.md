@@ -13,7 +13,7 @@ tar -xzf contentai-0.4.1-ubuntu.tar.gz
 cd contentai-0.4.1-ubuntu
 cp .env.example .env
 chmod 600 .env
-# 编辑 .env：数据库密码、HTTPS 域名、SMTP、模型与搜索密钥
+# 编辑 .env：数据库密码、HTTPS 域名、模型与搜索密钥；如需投递密码重置邮件，再配置 SMTP
 bash infra/ubuntu/deploy.sh
 ```
 
