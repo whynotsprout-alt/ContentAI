@@ -1,3 +1,5 @@
+$ErrorActionPreference = "Stop"
+
 $Action = $args[0]
 $EnvFile = Join-Path $env:TEMP "contentai-test-deps.env"
 $Compose = @("--env-file", $EnvFile, "-p", "contentai-test-deps", "-f", "compose.yaml", "-f", "compose.dev.yaml")
@@ -14,8 +16,10 @@ API_PORT=8010
 CONTENTAI_DATABASE__URL=postgresql+psycopg://postgres:postgres@postgres:5432/contentai_test
 '@ | Set-Content -Encoding utf8 $EnvFile
   docker compose @Compose up --detach --wait postgres
+  if ($LASTEXITCODE -ne 0) { throw "Unable to start isolated test PostgreSQL." }
 } elseif ($Action -eq "down") {
   docker compose @Compose down --volumes --remove-orphans
+  if ($LASTEXITCODE -ne 0) { throw "Unable to remove isolated test PostgreSQL." }
   Remove-Item -Force -ErrorAction SilentlyContinue $EnvFile
 } else {
   throw "Usage: tools/test-deps.ps1 up|down"

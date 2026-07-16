@@ -1,0 +1,164 @@
+name: contentai
+
+x-logging: &container-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILES:-5}
+
+x-api-build: &api-build
+  context: .
+  dockerfile: infra/Dockerfile
+
+x-app-environment: &app-environment
+  CONTENTAI_ENV: ${CONTENTAI_ENV:-production}
+  CONTENTAI_DATABASE__URL: ${CONTENTAI_DATABASE__URL:?Set CONTENTAI_DATABASE__URL in .env}
+  CONTENTAI_REDIS__URL: ${CONTENTAI_REDIS__URL:-redis://redis:6379/0}
+
+x-app-service: &app-service
+  build: *api-build
+  env_file: .env
+  environment: *app-environment
+  logging: *container-logging
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    logging: *container-logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+    logging: *container-logging
+    restart: unless-stopped
+
+  migration:
+    <<: *app-service
+    command: ["python", "-m", "services.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app-service
+    command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  dispatcher:
+    <<: *app-service
+    command: ["python", "-m", "services.dispatcher"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  agent-worker:
+    <<: *app-service
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--hostname=agent@%h"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    stop_grace_period: 35m
+    healthcheck:
+      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d agent@$$HOSTNAME --timeout=3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  background-worker:
+    <<: *app-service
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=2", "--hostname=background@%h"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    stop_grace_period: 10m
+    healthcheck:
+      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d background@$$HOSTNAME --timeout=3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  beat:
+    <<: *app-service
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/contentai-celerybeat-schedule"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5180}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    logging: *container-logging
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
