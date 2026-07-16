@@ -21,11 +21,13 @@ describe('frontend plan contracts', () => {
     expect(activity).not.toMatch(/research_package|draft_version|workflow_stage/);
   });
 
-  it('shows hotspot source health and candidate-pool contribution', async () => {
+  it('keeps the primary status copy but hides activity details', async () => {
     const activity = await read('../src/components/RunActivityBar.vue');
-    expect(activity).toContain('source_health');
-    expect(activity).toContain('item_count');
-    expect(activity).toContain('selected_count');
+    expect(activity).toContain('progressLabel');
+    expect(activity).not.toContain('activity-detail');
+    expect(activity).not.toContain('source-health');
+    expect(activity).not.toContain('source_health');
+    expect(activity).not.toContain('candidate_count');
   });
 
   it('falls back to three-second run status polling for degraded SSE', async () => {

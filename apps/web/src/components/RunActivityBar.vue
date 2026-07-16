@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { AlertCircle, CheckCircle2, Clock3, LoaderCircle, Radio, Search, Square } from '@lucide/vue';
+import { AlertCircle, CheckCircle2, LoaderCircle, Radio, Square } from '@lucide/vue';
 import type { RunLifecycle, TimelineEvent } from '../stores/workbench';
 
 const props = defineProps<{
@@ -28,25 +28,6 @@ const toolProgress = computed(() => {
   return progress && typeof progress === 'object'
     ? progress as Record<string, unknown>
     : {};
-});
-
-type SourceHealth = {
-  source_id?: string;
-  label?: string;
-  status?: string;
-  item_count?: number;
-  selected_count?: number;
-};
-
-const sourceHealth = computed(() => Array.isArray(toolProgress.value.source_health)
-  ? toolProgress.value.source_health.filter((item): item is SourceHealth => Boolean(item && typeof item === 'object'))
-  : []
-);
-
-const toolDetail = computed(() => {
-  const candidateCount = toolProgress.value.candidate_count;
-  if (typeof candidateCount === 'number') return `${candidateCount} 条候选`;
-  return toolName.value;
 });
 
 const toolLabel = computed(() => {
@@ -91,12 +72,5 @@ const visible = computed(() => Boolean(label.value) && props.lifecycle !== 'comp
     <CheckCircle2 v-else-if="lifecycle === 'waiting_input'" :size="16" />
     <Radio v-else :size="16" />
     <span>{{ label }}</span>
-    <span v-if="lifecycle === 'queued'" class="activity-detail"><Clock3 :size="13" /> 排队状态会自动刷新</span>
-    <span v-else-if="lifecycle === 'running' && toolDetail" class="activity-detail"><Search :size="13" /> {{ toolDetail }}</span>
-    <span v-if="sourceHealth.length" class="activity-detail source-health">
-      <span v-for="source in sourceHealth" :key="source.source_id" :class="`source-${source.status || 'ok'}`">
-        {{ source.label || source.source_id }} {{ source.item_count || 0 }}→{{ source.selected_count || 0 }}
-      </span>
-    </span>
   </div>
 </template>
