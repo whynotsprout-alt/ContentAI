@@ -73,12 +73,12 @@ flowchart LR
 
 - 主模型最大迭代数、单工具超时和工具输出字符上限在执行包装层强制执行；研究工具采用 cooperative timeout，不进入不可中断的外层线程池。
 - 超时或超限转为结构化工具错误返回主模型，并停止失控循环。
-- `ToolExecution` 只记录工具名、`tool_call_id`、参数哈希、结果摘要哈希、状态、耗时和错误；原始参数与结果字段仅兼容历史数据，新执行不写入内容正文。
+- `ToolExecution` 只记录工具名、`tool_call_id`、参数哈希、结果摘要哈希、状态、耗时和错误，不存在原始参数与结果正文列。
 - 搜索引用必须来自本轮工具结果；未知引用会被移除。来源数量、域名和来源类别不构成结论门槛。
 
 ## 删除、安全与限流
 
-- 删除空闲 session 时，在事务内硬删除消息、执行、恢复请求、尝试、工具审计、事件和关联记忆；事务提交后删除对应 LangGraph thread。
+- 删除空闲 session 时，业务关联行主要由数据库外键级联硬删除；事务提交后单独删除对应 LangGraph thread。
 - 保留的 `AdminAuditLog` 墓碑仅含不可逆目标哈希和操作元数据。
 - 禁用用户时使验证令牌和登录会话失效，取消排队/待确认任务，并为运行中任务设置取消请求；Worker 在安全边界终止。
 - LLM 限流使用稳定的认证用户 scope，并叠加可配置日预算。验证邮件重发分别按用户、规范化邮箱和 IP 限流。
@@ -86,9 +86,11 @@ flowchart LR
 
 ## 数据库与部署
 
-- `202607150001` 为会话增加非空 `agent_version_id` 并创建 `ResearchPackage`；历史会话优先回填最近 execution 的版本，空会话回填当前最新版本。
+- `202607150001_initial_schema.py` 是与当前最终模型一致的唯一初始迁移，`down_revision=None`；只面向空数据库，不含历史数据回填。
 - LangGraph checkpoint/store 表由 `PostgresSaver.setup()` 初始化，并从 Alembic autogenerate 比较中明确排除。
-- 清理业务数据只能运行独立管理命令并显式确认，不能通过 Alembic 触发。
+- Alembic 配置从显式环境变量、当前工作目录或 wheel 包资源定位，不依赖仓库根目录。
 - 容器启动顺序为 PostgreSQL 健康 → 一次性 migration 成功 → API、Dispatcher、Worker 和 Beat 启动。
 - readiness 检查数据库 revision、checkpoint schema、Redis、队列连接及 outbox 最老积压时间。
 - Celery Beat 调度文件位于运行目录 `/tmp`，不写入源码目录。
+- Python 容器只安装构建出的 wheel，并以非 root 用户运行；提示词和迁移均随 wheel 打包。
+- 应用日志只写 stdout/stderr，Compose 对九个容器统一配置 `json-file` 滚动策略。

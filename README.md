@@ -6,16 +6,14 @@ ContentAI 是一个面向内容创作者的持续对话 Agent 工作台。内容
 
 ```text
 apps/
-  api/                 FastAPI、LangGraph、工具、数据库迁移与后端测试
-  web/                 Vue 3、TypeScript、Vite 与前端测试
+  api/                 FastAPI、LangGraph、工具与单一初始迁移
+  web/                 Vue 3、TypeScript、Vite 与 Nginx 静态站点
 docs/                  产品边界与技术设计的唯一事实源
 infra/                 容器镜像、Nginx 反向代理与部署配置
-tools/                 Windows 本地开发、验收与整套重启脚本
-data/                  本地运行数据（不提交）
-logs/                  本地运行日志（不提交）
+tools/                 本地开发、验收与 Ubuntu 发布打包脚本
 ```
 
-工程级配置保留在根目录：`pyproject.toml`、`requirements.txt`、`alembic.ini`、`.env.example` 与 `docker-compose.yml`。
+工程级配置保留在根目录：`pyproject.toml`、`uv.lock`、`alembic.ini`、`.env.example`、`compose.yaml` 与 `compose.dev.yaml`。
 
 ## 核心边界
 
@@ -60,3 +58,5 @@ docker compose up --detach --build --wait
 ```
 
 Web 容器以 Nginx 提供前端静态文件，并将 `/api/` 反向代理到 API 服务。
+
+生产部署仅将 Web 绑定到宿主机 `127.0.0.1`；HTTPS 由宿主机 Nginx、Caddy 或云负载均衡终止。Ubuntu 部署、备份、恢复和打包见 [运维文档](docs/OPERATIONS.md)，完整接口见 [API 清单](docs/API.md)。所有应用日志写入 stdout/stderr，通过 `docker compose logs <service>` 按容器查看。

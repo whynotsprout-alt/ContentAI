@@ -54,7 +54,7 @@ const toolLabel = computed(() => {
   if (typeof progressLabel === 'string' && progressLabel.trim()) return progressLabel;
   if (activeEvent.value?.event === 'tool_end') return '工具执行完成，正在组织回答';
   if (toolName.value === 'fetch_hotspots') return '正在采集并筛选热点';
-  if (toolName.value === 'prepare_topic_research' || toolName.value === 'search_topic_sources') return '正在整理研究资料';
+  if (toolName.value === 'prepare_topic_research') return '正在整理研究资料';
   if (toolName.value === 'recall_memory') return '正在读取相关偏好';
   if (toolName.value === 'remember') return '正在整理会话记忆';
   if (toolName.value === 'current_datetime') return '正在确认时间信息';
@@ -66,7 +66,7 @@ const label = computed(() => {
   if (props.lifecycle === 'queued') return '任务已提交，正在等待执行';
   if (props.lifecycle === 'reconnecting') return '实时连接中断，正在恢复';
   if (props.lifecycle === 'running') return toolLabel.value;
-  if (props.lifecycle === 'waiting_input' || props.lifecycle === 'interrupted') return '需要你的确认后继续';
+  if (props.lifecycle === 'waiting_input') return '需要你的确认后继续';
   if (props.lifecycle === 'cancelling') return '正在停止生成';
   if (props.lifecycle === 'failed') return props.error || '本次执行未完成';
   if (props.lifecycle === 'cancelled') return '生成已停止';
@@ -88,7 +88,7 @@ const visible = computed(() => Boolean(label.value) && props.lifecycle !== 'comp
     <LoaderCircle v-if="['queued', 'running', 'reconnecting', 'cancelling'].includes(lifecycle)" :size="16" class="spin" />
     <AlertCircle v-else-if="lifecycle === 'failed'" :size="16" />
     <Square v-else-if="lifecycle === 'cancelled'" :size="14" />
-    <CheckCircle2 v-else-if="lifecycle === 'waiting_input' || lifecycle === 'interrupted'" :size="16" />
+    <CheckCircle2 v-else-if="lifecycle === 'waiting_input'" :size="16" />
     <Radio v-else :size="16" />
     <span>{{ label }}</span>
     <span v-if="lifecycle === 'queued'" class="activity-detail"><Clock3 :size="13" /> 排队状态会自动刷新</span>

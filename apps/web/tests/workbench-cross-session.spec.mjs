@@ -184,10 +184,7 @@ function setSession(sessionId, patch = {}) {
     messages: [],
     latest_execution: {
       id: 'exe-0',
-      invocation_id: 'inv-0',
       session_id: sessionId,
-      agent_id: 'acc-1',
-      user_message_id: '',
       status: 'idle',
       error: ''
     },
@@ -573,10 +570,7 @@ describe('workbench cross-session recovery', () => {
       messages: [],
       latest_execution: {
         id: 'exe-1',
-        invocation_id: 'inv-1',
         session_id: 's1',
-        agent_id: 'acc-1',
-        user_message_id: '',
         status: 'running',
         error: ''
       }

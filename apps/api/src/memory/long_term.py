@@ -8,7 +8,7 @@ from typing import Any
 from memory.repository import MemoryRepository, normalize_memory_kind
 from memory.retriever import extract_memory_candidates
 from memory.types import MemoryEntry
-from models.enums import MemoryOwnerType, MemoryScope, MemorySourceType
+from models.enums import MemorySourceType
 from pydantic import BaseModel, Field
 
 SENSITIVE_PATTERNS = (
@@ -49,7 +49,6 @@ class LongTermMemory:
         agent_id: str,
         content: str,
         *,
-        tenant_id: str,
         user_id: str,
         session_id: str | None = None,
         kind: str = "semantic",
@@ -77,12 +76,9 @@ class LongTermMemory:
             content=normalized[:1000],
             kind=memory_kind,
             payload=normalized_payload,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.agent,
             agent_id=agent_id,
             session_id=None,
-            memory_scope=MemoryScope.long_term,
             confidence=confidence,
             importance_score=importance_score,
             source_type=source_type or normalized_payload.get("source"),
@@ -98,7 +94,6 @@ class LongTermMemory:
         agent_id: str,
         message: str,
         *,
-        tenant_id: str,
         user_id: str,
         session_id: str | None = None,
         source_message_id: str | None = None,
@@ -110,7 +105,6 @@ class LongTermMemory:
                 self.remember(
                     agent_id,
                     content,
-                    tenant_id=tenant_id,
                     user_id=user_id,
                     session_id=session_id,
                     kind=kind,
@@ -132,14 +126,13 @@ class LongTermMemory:
         assistant_response: str,
         tool_results: list[str],
         model_gateway: Any,
-        tenant_id: str,
         user_id: str,
         session_id: str | None = None,
         source_message_id: str | None = None,
         source_execution_id: str | None = None,
         callbacks: list[Any] | None = None,
     ) -> list[MemoryEntry]:
-        existing = self.list_all(agent_id, tenant_id=tenant_id, user_id=user_id, limit=20)
+        existing = self.list_all(agent_id, user_id=user_id, limit=20)
         prompt = _memory_extraction_prompt(
             account_name=account_name,
             account_positioning=account_positioning,
@@ -168,14 +161,12 @@ class LongTermMemory:
                 self.remember(
                     agent_id,
                     content,
-                    tenant_id=tenant_id,
                     user_id=user_id,
                     session_id=session_id,
                     kind=kind[:40],
                     payload={
                         "source": "turn_summary",
                         "scope": {
-                            "tenant_id": tenant_id,
                             "user_id": user_id,
                             "agent_id": agent_id,
                             "session_id": session_id,
@@ -199,35 +190,27 @@ class LongTermMemory:
         agent_id: str,
         query: str,
         *,
-        tenant_id: str,
         user_id: str,
         limit: int = 8,
     ) -> list[MemoryEntry]:
         return self.repository.search(
             query,
             limit=limit,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.agent,
             agent_id=agent_id,
-            memory_scope=MemoryScope.long_term,
         )
 
     def list_all(
         self,
         agent_id: str,
         *,
-        tenant_id: str,
         user_id: str,
         limit: int = 20,
     ) -> list[MemoryEntry]:
         return self.repository.list_scope(
             limit=limit,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.agent,
             agent_id=agent_id,
-            memory_scope=MemoryScope.long_term,
         )
 
     @staticmethod

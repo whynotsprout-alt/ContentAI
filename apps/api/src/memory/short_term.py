@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from memory.repository import MemoryRepository
 from memory.summary import merge_summaries, summarize_messages
 from models.chat import ChatMessage
 from models.enums import (
     MemoryKind,
-    MemoryOwnerType,
-    MemoryScope,
     MemorySourceType,
     MessageRole,
     MessageType,
@@ -28,24 +26,18 @@ class ShortTermMemory:
         session: Session,
         *,
         session_id: str,
-        tenant_id: str,
         user_id: str,
-        agent_id: str | None = None,
     ) -> tuple[str, list[BaseMessage]]:
         messages = self.load_messages(session, session_id=session_id)
         summary = self.load_summary(
             session_id,
-            tenant_id=tenant_id,
             user_id=user_id,
-            agent_id=agent_id,
         )
         if not summary:
             summary = self.refresh_summary(
                 session,
                 session_id=session_id,
-                tenant_id=tenant_id,
                 user_id=user_id,
-                agent_id=agent_id,
             )
         return summary, messages
 
@@ -62,18 +54,12 @@ class ShortTermMemory:
         self,
         session_id: str,
         *,
-        tenant_id: str,
         user_id: str,
-        agent_id: str | None = None,
     ) -> str:
         entry = self.repository.get(
             SHORT_TERM_SUMMARY_KEY,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.session,
-            agent_id=agent_id,
             session_id=session_id,
-            memory_scope=MemoryScope.short_term,
         )
         return entry.content if entry else ""
 
@@ -82,9 +68,7 @@ class ShortTermMemory:
         session_id: str,
         summary: str,
         *,
-        tenant_id: str,
         user_id: str,
-        agent_id: str | None = None,
         cursor_created_at: str | None = None,
         cursor_message_id: str | None = None,
     ) -> None:
@@ -99,12 +83,8 @@ class ShortTermMemory:
                 "cursor_created_at": cursor_created_at,
                 "cursor_message_id": cursor_message_id,
             },
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.session,
-            agent_id=agent_id,
             session_id=session_id,
-            memory_scope=MemoryScope.short_term,
             source_type=MemorySourceType.summary,
             source_session_id=session_id,
         )
@@ -114,18 +94,12 @@ class ShortTermMemory:
         session: Session,
         *,
         session_id: str,
-        tenant_id: str,
         user_id: str,
-        agent_id: str | None = None,
     ) -> str:
         entry = self.repository.get(
             SHORT_TERM_SUMMARY_KEY,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=MemoryOwnerType.session,
-            agent_id=agent_id,
             session_id=session_id,
-            memory_scope=MemoryScope.short_term,
         )
         previous = entry.content if entry else ""
         payload = entry.payload if entry and isinstance(entry.payload, dict) else {}
@@ -168,9 +142,7 @@ class ShortTermMemory:
         self.save_summary(
             session_id,
             summary,
-            tenant_id=tenant_id,
             user_id=user_id,
-            agent_id=agent_id,
             cursor_created_at=(
                 latest.created_at.isoformat()
                 if latest is not None
@@ -199,6 +171,4 @@ class ShortTermMemory:
             return HumanMessage(content=content, id=row.id)
         if row.role == MessageRole.assistant:
             return AIMessage(content=content, id=row.id)
-        if row.role == MessageRole.system:
-            return SystemMessage(content=content, id=row.id)
         return None

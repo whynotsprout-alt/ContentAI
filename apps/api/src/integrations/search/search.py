@@ -460,15 +460,7 @@ def _validate_configured_endpoints() -> None:
 
 def _metaso_api_key(settings: Any) -> str:
     search_settings = getattr(settings, "search", settings)
-    for secret in (
-        search_settings.metaso_api_key,
-        search_settings.metaso_search_api_key,
-        search_settings.metaso_key,
-    ):
-        value = secret.get_secret_value().strip()
-        if value:
-            return value
-    return ""
+    return search_settings.metaso_api_key.get_secret_value().strip()
 
 
 def _safe_metaso_request(payload: dict[str, Any]) -> dict[str, Any]:

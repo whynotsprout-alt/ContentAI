@@ -93,7 +93,7 @@ LangGraph 定义在 `apps/api/src/agent/graph`：
 
 入口：`apps/api/src/agent/tools/hotspots.py`。
 
-1. 根据账号版本的 `tools_config.hotspot_sources` 选择来源；未配置时默认 23 个逻辑平台：18 个 RSS、4 个 TikHub 平台和 AI HOT。
+1. 根据账号版本的 `hotspot_sources` 选择来源；未配置时默认 23 个逻辑平台：18 个 RSS、4 个 TikHub 平台和 AI HOT。
 2. 每个平台内部保留原始 rank；平台间逐轮各取一条，每轮起点循环偏移。失败、数据不足和重复候选释放出的容量由其他平台继续补齐，总上限 200 条。
 3. 全局去重时合并来源信息，并为唯一候选生成稳定、无业务语义的 `candidate_id`。
 4. `normalize_hotspot_candidates()` 向评分模型提供 `candidate_id` 与 `title`、`url`、`summary`、`platform`、`published_at`。

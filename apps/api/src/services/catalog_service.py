@@ -28,10 +28,7 @@ class CatalogService:
     def list_agents(self, session: Session, auth: AuthContext) -> list[AgentProfileSummary]:
         query = (
             select(AgentProfile)
-            .where(
-                AgentProfile.tenant_id == auth.tenant_id,
-                (AgentProfile.owner_user_id == auth.user_id) | AgentProfile.owner_user_id.is_(None),
-            )
+            .where(AgentProfile.user_id == auth.user_id)
             .order_by(AgentProfile.updated_at.desc(), AgentProfile.id)
         )
         if AGENT_WILDCARD not in auth.allowed_agent_ids:
@@ -54,10 +51,7 @@ class CatalogService:
         self._ensure_agent_allowed(agent_id, auth)
         versions = self._versions_for_agent(session, profile.id)
         current = versions[-1] if versions else None
-        return AgentProfileDetail(
-            **self._to_summary(profile, current).model_dump(),
-            versions=[self._to_version_summary(version) for version in versions],
-        )
+        return AgentProfileDetail(**self._to_summary(profile, current).model_dump())
 
     def create_agent(
         self,
@@ -67,19 +61,13 @@ class CatalogService:
     ) -> AgentProfileDetail:
         self._ensure_name_available(
             session,
-            tenant_id=auth.tenant_id,
-            owner_user_id=auth.user_id,
+            user_id=auth.user_id,
             name=payload.name,
         )
         profile = AgentProfile(
-            tenant_id=auth.tenant_id,
-            owner_user_id=auth.user_id,
+            user_id=auth.user_id,
             name=payload.name,
             description=payload.description,
-            agent_type=payload.agent_type,
-            status=payload.status,
-            created_by_user_id=auth.user_id,
-            updated_by_user_id=auth.user_id,
         )
         session.add(profile)
         session.flush()
@@ -88,10 +76,7 @@ class CatalogService:
             version=1,
             topic_scoring_prompt=payload.topic_scoring_prompt,
             content_prompt=payload.content_prompt,
-            graph_name=payload.graph_name,
-            tools_config=payload.tools_config,
-            memory_config=payload.memory_config,
-            created_by_user_id=auth.user_id,
+            hotspot_sources=payload.hotspot_sources,
         )
         session.add(version)
         try:
@@ -101,10 +86,7 @@ class CatalogService:
             self._raise_integrity_error(exc)
         session.refresh(profile)
         session.refresh(version)
-        return AgentProfileDetail(
-            **self._to_summary(profile, version).model_dump(),
-            versions=[self._to_version_summary(version)],
-        )
+        return AgentProfileDetail(**self._to_summary(profile, version).model_dump())
 
     def update_agent(
         self,
@@ -125,19 +107,13 @@ class CatalogService:
                 raise AgentValidationError("Agent name cannot be empty")
             self._ensure_name_available(
                 session,
-                tenant_id=profile.tenant_id,
-                owner_user_id=profile.owner_user_id,
+                user_id=profile.user_id,
                 name=name,
                 exclude_agent_id=profile.id,
             )
             profile.name = name
         if "description" in updates and updates["description"] is not None:
             profile.description = updates["description"]
-        if "agent_type" in updates and updates["agent_type"] is not None:
-            profile.agent_type = updates["agent_type"]
-        if "status" in updates and updates["status"] is not None:
-            profile.status = updates["status"]
-        profile.updated_by_user_id = auth.user_id
         session.add(profile)
         try:
             session.commit()
@@ -164,12 +140,8 @@ class CatalogService:
             version=next_version,
             topic_scoring_prompt=payload.topic_scoring_prompt,
             content_prompt=payload.content_prompt,
-            graph_name=payload.graph_name,
-            tools_config=payload.tools_config,
-            memory_config=payload.memory_config,
-            created_by_user_id=auth.user_id,
+            hotspot_sources=payload.hotspot_sources,
         )
-        profile.updated_by_user_id = auth.user_id
         session.add(profile)
         session.add(version)
         session.commit()
@@ -221,8 +193,7 @@ class CatalogService:
         return session.exec(
             select(AgentProfile).where(
                 AgentProfile.id == agent_id,
-                AgentProfile.tenant_id == auth.tenant_id,
-                (AgentProfile.owner_user_id == auth.user_id) | AgentProfile.owner_user_id.is_(None),
+                AgentProfile.user_id == auth.user_id,
             )
         ).first()
 
@@ -230,14 +201,12 @@ class CatalogService:
     def _ensure_name_available(
         session: Session,
         *,
-        tenant_id: str,
-        owner_user_id: str,
+        user_id: str,
         name: str,
         exclude_agent_id: str | None = None,
     ) -> None:
         query = select(AgentProfile.id).where(
-            AgentProfile.tenant_id == tenant_id,
-            AgentProfile.owner_user_id == owner_user_id,
+            AgentProfile.user_id == user_id,
             AgentProfile.name == name,
         )
         if exclude_agent_id is not None:
@@ -299,12 +268,8 @@ class CatalogService:
     ) -> AgentProfileSummary:
         return AgentProfileSummary(
             id=profile.id,
-            tenant_id=profile.tenant_id,
-            owner_user_id=profile.owner_user_id,
             name=profile.name,
             description=profile.description,
-            agent_type=profile.agent_type,
-            status=profile.status,
             current_version=(
                 CatalogService._to_version_summary(current_version)
                 if current_version is not None
@@ -320,15 +285,13 @@ class CatalogService:
             version=version.version,
             topic_scoring_prompt=version.topic_scoring_prompt,
             content_prompt=version.content_prompt,
-            graph_name=version.graph_name,
-            tools_config=version.tools_config,
-            memory_config=version.memory_config,
+            hotspot_sources=version.hotspot_sources,
         )
 
     @staticmethod
     def _raise_integrity_error(exc: IntegrityError) -> None:
         constraint_name = CatalogService._extract_constraint_name(exc)
-        if constraint_name == "ux_agentprofile_tenant_user_name":
+        if constraint_name == "ux_agentprofile_user_name":
             raise AgentAlreadyExistsError("Agent name already exists for this user") from exc
         raise exc
 
@@ -338,6 +301,6 @@ class CatalogService:
         diag_constraint = getattr(getattr(orig, "diag", None), "constraint_name", None)
         if isinstance(diag_constraint, str) and diag_constraint:
             return diag_constraint
-        if "ux_agentprofile_tenant_user_name" in str(exc):
-            return "ux_agentprofile_tenant_user_name"
+        if "ux_agentprofile_user_name" in str(exc):
+            return "ux_agentprofile_user_name"
         return None

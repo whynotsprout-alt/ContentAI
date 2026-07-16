@@ -301,7 +301,6 @@ class AuthService:
     def to_response(user: AppUser) -> CurrentUserResponse:
         return CurrentUserResponse(
             id=user.id,
-            tenant_id=user.tenant_id,
             email=user.email,
             role=user.role,
             status=user.status,

@@ -74,7 +74,7 @@ def claim_execution(
             _fail_execution(session, execution, "SESSION_AGENT_MISMATCH", now)
             return None
 
-        user = session.get(AppUser, invocation.created_by_user_id)
+        user = session.get(AppUser, invocation.user_id)
         if user is None or user.status != "active":
             _cancel_disabled_user_execution(session, execution, now)
             return None
@@ -126,12 +126,6 @@ def claim_execution(
                 return None
             continue_from_checkpoint = checkpoint is not None
 
-        configured_tools = version.tools_config.get("allowed_tools")
-        permissions = (
-            tuple(str(item) for item in configured_tools if str(item).strip())
-            if isinstance(configured_tools, list)
-            else ("*",)
-        )
         execution.worker_id = worker_id
         execution.status = RunStatus.pending
         execution.attempt_count += 1
@@ -159,11 +153,10 @@ def claim_execution(
         session.commit()
         return ClaimedExecution(
             auth=AuthContext(
-                user_id=invocation.created_by_user_id,
-                tenant_id=chat.tenant_id,
+                user_id=invocation.user_id,
                 role=user.role,
                 allowed_agent_ids=(chat.agent_id,),
-                tool_permissions=permissions,
+                tool_permissions=("*",),
             ),
             resume_value=resume_value,
             resume_request_id=resume_request.id if resume_request is not None else None,

@@ -51,7 +51,6 @@ def remember(content: str, kind: str = "semantic") -> dict[str, str]:
         entry = context.long_term_memory.remember(
             context.agent_id,
             sanitized_content,
-            tenant_id=context.tenant_id,
             user_id=context.user_id,
             session_id=context.conversation_id,
             kind=normalized_kind,
@@ -92,7 +91,6 @@ def recall_memory(query: str) -> dict[str, list[dict[str, str]]]:
     memories = context.long_term_memory.recall(
         context.agent_id,
         normalized_query,
-        tenant_id=context.tenant_id,
         user_id=context.user_id,
         limit=8,
     )
@@ -159,7 +157,6 @@ def _extract_text_from_payload(value: object) -> str:
 def _memory_scope_metadata(context) -> dict[str, object]:
     return {
         "scope": {
-            "tenant_id": context.tenant_id,
             "user_id": context.user_id,
             "agent_id": context.agent_id,
             "session_id": context.conversation_id,

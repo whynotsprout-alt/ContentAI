@@ -42,7 +42,6 @@ class ChangePasswordRequest(InputSchemaBase):
 
 class CurrentUserResponse(SchemaBase):
     id: str
-    tenant_id: str
     email: EmailStr
     role: str
     status: str

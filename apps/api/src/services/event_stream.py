@@ -89,7 +89,6 @@ class RedisEventStream:
         ttl_seconds: int,
         max_length: int,
         block_ms: int = 5_000,
-        failure_cooldown_seconds: float | None = None,
     ) -> None:
         self.redis = redis
         self.ttl_seconds = max(1, int(ttl_seconds))

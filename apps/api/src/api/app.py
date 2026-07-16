@@ -7,7 +7,6 @@ from agent.runtime.container import RuntimeContainer
 from api.router import router
 from core.config import Env, Settings, get_settings
 from core.logging import configure_logging
-from core.paths import ensure_runtime_dirs
 from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
 from db.session import close_database, init_database
 from fastapi import FastAPI, Request, Response
@@ -84,7 +83,6 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
 
     try:
-        ensure_runtime_dirs()
         init_database(app.state.settings)
         _register_services(app)
         app.state.ready = True

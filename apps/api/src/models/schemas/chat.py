@@ -5,7 +5,6 @@ from typing import Any, Literal
 from models.enums import MessageRole, MessageType
 from models.schemas.agent import AgentId
 from models.schemas.base import InputSchemaBase, SchemaBase
-from models.schemas.memory import ConversationMemory
 from pydantic import Field, constr, field_validator, model_validator
 
 SessionId = constr(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -21,32 +20,12 @@ class AgentExecutionState(StrEnum):
     failed = "failed"
     cancelled = "cancelled"
     waiting_input = "waiting_input"
-    interrupted = "interrupted"
-
-
-class MessageState(StrEnum):
-    pending = "pending"
-    streaming = "streaming"
-    completed = "completed"
-    failed = "failed"
 
 
 class ErrorDetail(SchemaBase):
     code: constr(min_length=1, max_length=80, strip_whitespace=True)
     message: constr(min_length=1, max_length=4000, strip_whitespace=True)
     retryable: bool = False
-
-
-class MessageCitation(SchemaBase):
-    source: constr(min_length=1, max_length=300)
-    url: str | None = None
-
-
-class ToolExecutionResult(SchemaBase):
-    tool_call_id: str | None = None
-    tool_name: constr(min_length=1, max_length=120)
-    result: Any = None
-    error: ErrorDetail | None = None
 
 
 class CreateSessionRequest(InputSchemaBase):
@@ -57,8 +36,6 @@ class CreateSessionResponse(SchemaBase):
     session_id: SessionId
     agent_id: AgentId
     agent_version_id: str
-    tenant_id: str | None = None
-    user_id: str | None = None
     title: TitleText
 
 
@@ -98,39 +75,7 @@ class ChatMessageResponse(SchemaBase):
     role: MessageRole
     message_type: MessageType
     content: constr(min_length=1, max_length=240000)
-    status: MessageState = MessageState.completed
-    tool_name: str | None = None
-    tool_call_id: str | None = None
-    model_name: str | None = None
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    latency_ms: int | None = Field(default=None, ge=0)
-    trace_id: str | None = None
-    citations: list[MessageCitation] = Field(default_factory=list)
-    tool_results: list[ToolExecutionResult] = Field(default_factory=list)
     created_at: datetime
-
-    @model_validator(mode="after")
-    def _validate_role_type_pair(self) -> "ChatMessageResponse":
-        allowed = {
-            MessageRole.user: {MessageType.text, MessageType.markdown, MessageType.json},
-            MessageRole.assistant: {
-                MessageType.text,
-                MessageType.markdown,
-                MessageType.json,
-                MessageType.tool_call,
-                MessageType.reasoning,
-                MessageType.artifact,
-                MessageType.citation,
-                MessageType.image,
-                MessageType.file,
-            },
-            MessageRole.tool: {MessageType.tool_result, MessageType.json, MessageType.text},
-            MessageRole.system: {MessageType.text, MessageType.markdown, MessageType.json},
-        }
-        if self.message_type not in allowed[self.role]:
-            raise ValueError(f"Invalid message_type {self.message_type!s} for role {self.role!s}")
-        return self
 
 
 class ChatExecutionResponse(SchemaBase):
@@ -151,13 +96,7 @@ class ChatExecutionResponse(SchemaBase):
 class ChatSessionDetail(ChatSessionSummary):
     messages: list[ChatMessageResponse] = Field(default_factory=list)
     next_cursor: str | None = None
-    memory: ConversationMemory = Field(default_factory=ConversationMemory)
     latest_execution: ChatExecutionResponse | None = None
-
-
-class ExecutionResponse(ChatExecutionResponse):
-    messages: list[ChatMessageResponse] = Field(default_factory=list)
-    memory: ConversationMemory = Field(default_factory=ConversationMemory)
 
 
 class MessageListRequest(InputSchemaBase):
@@ -191,24 +130,6 @@ class MessageListRequest(InputSchemaBase):
         if self.cursor is not None and self.before is not None:
             raise ValueError("cursor and before are mutually exclusive")
         return self
-
-
-class ChatHistoryResponse(SchemaBase):
-    messages: list[ChatMessageResponse] = Field(default_factory=list)
-    next_cursor: str | None = None
-
-
-class StreamEventV2(SchemaBase):
-    type: Literal[
-        "token", "tool_start", "tool_progress", "tool_end", "state", "error", "done", "heartbeat"
-    ]
-    execution_id: str | None = None
-    session_id: str | None = None
-    thread_id: str | None = None
-    request_id: str | None = None
-    tool_name: str | None = None
-    tool_call_id: str | None = None
-    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class StreamEventV3(SchemaBase):

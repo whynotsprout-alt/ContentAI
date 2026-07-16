@@ -148,36 +148,24 @@ class AdminService:
         *,
         actor_user_id: str,
         user_id: str,
-        status: str | None,
-        role: str | None,
+        role: str,
         request_id: str = "",
     ) -> AdminUserSummary:
         user = session.get(AppUser, user_id)
         if user is None:
             raise AuthServiceError("用户不存在", status_code=404)
-        if status is None and role is None:
-            raise AuthServiceError("至少提供一个要更新的字段")
         if role == "user" and user.role == "admin":
             self._ensure_not_last_admin(session, user.id)
-        if status == "disabled":
-            if user.id == actor_user_id:
-                raise AuthServiceError("不能禁用当前管理员", status_code=409)
-            if user.role == "admin":
-                self._ensure_not_last_admin(session, user.id)
-            user.status = "disabled"
-            self.auth_service.revoke_all_sessions(session, user.id, commit=False)
-            self._disable_user_runtime(session, user.id)
-        elif status == "active":
-            user.status = "active" if user.email_verified_at else "pending_verification"
-        if role is not None:
-            user.role = role
+        if user.id == actor_user_id and role == "user":
+            raise AuthServiceError("不能降级当前管理员账号", status_code=409)
+        user.role = role
         self._audit(
             session,
             actor_user_id=actor_user_id,
             target_user_id=user.id,
             action="user.updated",
             request_id=request_id,
-            detail={"status": user.status, "role": user.role},
+            detail={"role": user.role},
         )
         session.add(user)
         session.commit()
@@ -195,7 +183,7 @@ class AdminService:
         user = session.get(AppUser, user_id)
         if user is None:
             raise AuthServiceError("用户不存在", status_code=404)
-        query = select(ChatSession).where(ChatSession.owner_user_id == user_id)
+        query = select(ChatSession).where(ChatSession.user_id == user_id)
         total = int(session.exec(select(func.count()).select_from(query.subquery())).one() or 0)
         chats = session.exec(
             query.order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
@@ -220,7 +208,7 @@ class AdminService:
         chat = session.get(ChatSession, session_id)
         if chat is None:
             raise AuthServiceError("会话不存在", status_code=404)
-        user = session.get(AppUser, chat.owner_user_id)
+        user = session.get(AppUser, chat.user_id)
         if user is None:
             raise AuthServiceError("会话所属用户不存在", status_code=404)
         messages = list(
@@ -330,7 +318,6 @@ class AdminService:
             user_email=user.email,
             agent_id=chat.agent_id,
             title=chat.title,
-            status=str(chat.status),
             message_count=message_count,
             latest_execution_status=str(latest) if latest is not None else None,
             updated_at=chat.updated_at,
@@ -394,7 +381,7 @@ class AdminService:
         executions = session.exec(
             select(AgentExecution)
             .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)
-            .where(AgentInvocation.created_by_user_id == user_id)
+            .where(AgentInvocation.user_id == user_id)
             .where(
                 AgentExecution.status.in_(
                     [RunStatus.pending, RunStatus.running, RunStatus.waiting_input]
@@ -429,10 +416,7 @@ class AdminService:
             session.exec(
                 select(func.count())
                 .select_from(AgentProfile)
-                .where(
-                    AgentProfile.tenant_id == user.tenant_id,
-                    AgentProfile.owner_user_id == user.id,
-                )
+                .where(AgentProfile.user_id == user.id)
             ).one()
             or 0
         )
@@ -440,10 +424,7 @@ class AdminService:
             session.exec(
                 select(func.count())
                 .select_from(ChatSession)
-                .where(
-                    ChatSession.tenant_id == user.tenant_id,
-                    ChatSession.owner_user_id == user.id,
-                )
+                .where(ChatSession.user_id == user.id)
             ).one()
             or 0
         )

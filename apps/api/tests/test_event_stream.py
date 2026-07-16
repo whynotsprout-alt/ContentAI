@@ -5,13 +5,15 @@ from typing import Any
 
 from agent.runtime.events import PersistentAgentEventWriter
 from db.session import get_engine
-from models.chat import AgentEvent, AgentExecution, AgentInvocation, ChatSession
+from models.chat import AgentExecution, AgentInvocation, ChatSession
 from services.event_stream import (
     RedisEventStream,
+    StreamEvent,
     execution_stream_key,
     redis_stream_id,
 )
-from sqlmodel import Session, select
+from sqlalchemy import inspect
+from sqlmodel import Session
 
 
 class FakePipeline:
@@ -53,12 +55,12 @@ def test_publish_uses_event_sequence_as_stream_id() -> None:
 
     stream.publish(
         [
-            AgentEvent(
+            StreamEvent(
                 execution_id="exe-1",
                 event_type="token",
                 sequence=7,
                 payload={"content": "你好"},
-                created_at=created_at,
+                timestamp=created_at,
             )
         ]
     )
@@ -114,16 +116,14 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
         chat = ChatSession(
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
         session.add(chat)
         session.flush()
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id=chat.agent_id,
-            tenant_id=chat.tenant_id,
-            created_by_user_id=chat.owner_user_id,
+            user_id=chat.user_id,
         )
         session.add(invocation)
         session.flush()
@@ -152,8 +152,4 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
     writer.close()
 
     assert publisher.sequences == [1]
-    with Session(get_engine()) as session:
-        assert (
-            session.exec(select(AgentEvent).where(AgentEvent.execution_id == execution_id)).first()
-            is None
-        )
+    assert "agentevent" not in inspect(get_engine()).get_table_names()

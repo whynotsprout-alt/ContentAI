@@ -10,8 +10,6 @@ from models.enums import (
     MessageRole,
     MessageType,
     RunStatus,
-    SessionStatus,
-    TitleSource,
     ToolExecutionStatus,
 )
 from sqlalchemy import Column, Index, UniqueConstraint
@@ -22,21 +20,20 @@ from sqlmodel import Field, SQLModel
 class ChatSession(SQLModel, table=True):
     __tablename__ = "chatsession"
     __table_args__ = (
-        Index("ix_chatsession_tenant_owner", "tenant_id", "owner_user_id"),
-        Index("ix_chatsession_tenant_owner_updated", "tenant_id", "owner_user_id", "updated_at"),
+        Index("ix_chatsession_user_updated", "user_id", "updated_at"),
         Index("ix_chatsession_agent_updated", "agent_id", "updated_at"),
     )
 
     id: str = Field(default_factory=lambda: new_id("ses"), primary_key=True)
     title: str = "New Session"
-    title_source: TitleSource = Field(default=TitleSource.default, index=True)
-    status: SessionStatus = Field(default=SessionStatus.active, index=True)
-    agent_id: str = Field(index=True, foreign_key="agentprofile.id")
-    agent_version_id: str = Field(index=True, foreign_key="agentversion.id")
-    langgraph_thread_id: str = Field(default_factory=lambda: new_id("thr"), index=True)
-    tenant_id: str = Field(index=True)
-    owner_user_id: str = Field(index=True)
-    pinned_at: datetime | None = Field(default=None, index=True)
+    agent_id: str = Field(index=True, foreign_key="agentprofile.id", ondelete="RESTRICT")
+    agent_version_id: str = Field(index=True, foreign_key="agentversion.id", ondelete="RESTRICT")
+    langgraph_thread_id: str = Field(
+        default_factory=lambda: new_id("thr"),
+        index=True,
+        unique=True,
+    )
+    user_id: str = Field(index=True, foreign_key="appuser.id", ondelete="CASCADE")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -48,20 +45,19 @@ class AgentInvocation(SQLModel, table=True):
     __tablename__ = "agentinvocation"
     __table_args__ = (
         Index("ix_agentinvocation_session_created", "session_id", "created_at"),
-        Index(
-            "ix_agentinvocation_tenant_user_created",
-            "tenant_id",
-            "created_by_user_id",
-            "created_at",
+        Index("ix_agentinvocation_user_created", "user_id", "created_at"),
+        UniqueConstraint(
+            "session_id",
+            "idempotency_key",
+            name="ux_agentinvocation_session_idempotency",
         ),
     )
 
     id: str = Field(default_factory=lambda: new_id("inv"), primary_key=True)
-    session_id: str = Field(index=True, foreign_key="chatsession.id")
-    agent_id: str = Field(index=True, foreign_key="agentprofile.id")
-    user_message_id: str | None = Field(default=None, index=True, foreign_key="chatmessage.id")
-    tenant_id: str = Field(index=True)
-    created_by_user_id: str = Field(index=True)
+    session_id: str = Field(index=True, foreign_key="chatsession.id", ondelete="CASCADE")
+    agent_id: str = Field(index=True, foreign_key="agentprofile.id", ondelete="RESTRICT")
+    user_id: str = Field(index=True, foreign_key="appuser.id", ondelete="CASCADE")
+    idempotency_key: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -74,8 +70,12 @@ class AgentExecution(SQLModel, table=True):
     )
 
     id: str = Field(default_factory=lambda: new_id("exe"), primary_key=True)
-    invocation_id: str = Field(index=True, foreign_key="agentinvocation.id")
-    agent_version_id: str = Field(index=True, foreign_key="agentversion.id")
+    invocation_id: str = Field(
+        index=True,
+        foreign_key="agentinvocation.id",
+        ondelete="CASCADE",
+    )
+    agent_version_id: str = Field(index=True, foreign_key="agentversion.id", ondelete="RESTRICT")
     trace_id: str = Field(default_factory=lambda: new_id("trc"), index=True)
     latest_checkpoint_id: str | None = Field(default=None, index=True)
     status: RunStatus = Field(default=RunStatus.pending, index=True)
@@ -126,7 +126,7 @@ class AgentExecutionAttempt(SQLModel, table=True):
     )
 
     id: str = Field(default_factory=lambda: new_id("att"), primary_key=True)
-    execution_id: str = Field(index=True, foreign_key="agentexecution.id")
+    execution_id: str = Field(index=True, foreign_key="agentexecution.id", ondelete="CASCADE")
     ordinal: int = Field(index=True)
     kind: ExecutionAttemptKind = Field(default=ExecutionAttemptKind.initial, index=True)
     worker_id: str = Field(default="", index=True)
@@ -142,23 +142,16 @@ class ChatMessage(SQLModel, table=True):
     __table_args__ = (Index("ix_chatmessage_session_created_id", "session_id", "created_at", "id"),)
 
     id: str = Field(default_factory=lambda: new_id("msg"), primary_key=True)
-    session_id: str = Field(index=True, foreign_key="chatsession.id")
-    invocation_id: str | None = Field(default=None, index=True, foreign_key="agentinvocation.id")
-    parent_message_id: str | None = Field(default=None, index=True, foreign_key="chatmessage.id")
+    session_id: str = Field(index=True, foreign_key="chatsession.id", ondelete="CASCADE")
+    invocation_id: str | None = Field(
+        default=None,
+        index=True,
+        foreign_key="agentinvocation.id",
+        ondelete="CASCADE",
+    )
     role: MessageRole
     message_type: MessageType = Field(default=MessageType.text)
-    message_metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        sa_column=Column(JSONB, nullable=False),
-    )
-    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False))
     content: str
-    tool_name: str | None = Field(default=None, index=True)
-    tool_call_id: str | None = Field(default=None, index=True)
-    model_name: str | None = Field(default=None, index=True)
-    input_tokens: int = Field(default=0)
-    output_tokens: int = Field(default=0)
-    latency_ms: int | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -176,13 +169,11 @@ class ToolExecution(SQLModel, table=True):
     )
 
     id: str = Field(default_factory=lambda: new_id("tool"), primary_key=True)
-    execution_id: str = Field(index=True, foreign_key="agentexecution.id")
+    execution_id: str = Field(index=True, foreign_key="agentexecution.id", ondelete="CASCADE")
     tool_name: str = Field(index=True)
     tool_version: str = ""
     tool_call_id: str | None = Field(default=None, index=True)
     sequence: int = Field(default=0, index=True)
-    arguments: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False))
-    result: Any = Field(default=None, sa_column=Column(JSONB, nullable=True))
     arguments_hash: str = Field(default="", index=True)
     result_digest: str = Field(default="", index=True)
     status: ToolExecutionStatus = Field(default=ToolExecutionStatus.pending, index=True)
@@ -195,23 +186,6 @@ class ToolExecution(SQLModel, table=True):
 
     def touch_updated_at(self, at: datetime | None = None) -> None:
         self.updated_at = utcnow() if at is None else at
-
-
-class AgentEvent(SQLModel, table=True):
-    __tablename__ = "agentevent"
-    __table_args__ = (
-        UniqueConstraint("execution_id", "sequence", name="ux_agentevent_execution_sequence"),
-        Index("ix_agentevent_execution_created", "execution_id", "created_at"),
-        Index("ix_agentevent_execution_sequence", "execution_id", "sequence"),
-        Index("ix_agentevent_type_created", "event_type", "created_at"),
-    )
-
-    id: str = Field(default_factory=lambda: new_id("evt"), primary_key=True)
-    execution_id: str = Field(index=True, foreign_key="agentexecution.id")
-    event_type: str = Field(index=True)
-    sequence: int = Field(default=0, index=True)
-    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False))
-    created_at: datetime = Field(default_factory=utcnow)
 
 
 class ExecutionOutbox(SQLModel, table=True):

@@ -6,7 +6,7 @@ from typing import Any
 
 from memory.types import MemoryEntry
 from models.base import json_loads, utcnow
-from models.enums import MemoryKind, MemoryOwnerType, MemoryScope, MemorySourceType
+from models.enums import MemoryKind, MemorySourceType
 from models.memory import MemoryRecord
 from sqlalchemy import or_
 from sqlmodel import Session, select
@@ -17,13 +17,6 @@ def normalize_memory_kind(kind: str | MemoryKind | None) -> MemoryKind:
         return MemoryKind(str(kind or MemoryKind.semantic))
     except ValueError:
         return MemoryKind.semantic
-
-
-def normalize_memory_owner_type(owner_type: str | MemoryOwnerType) -> MemoryOwnerType:
-    try:
-        return MemoryOwnerType(str(owner_type))
-    except ValueError as exc:
-        raise ValueError(f"Unsupported memory owner type: {owner_type}") from exc
 
 
 def normalize_memory_source_type(
@@ -44,10 +37,7 @@ class MemoryRepository:
         key: str,
         *,
         content: str,
-        tenant_id: str,
         user_id: str,
-        owner_type: str | MemoryOwnerType,
-        memory_scope: str | MemoryScope,
         kind: str | MemoryKind = MemoryKind.semantic,
         payload: dict[str, Any] | None = None,
         agent_id: str | None = None,
@@ -60,36 +50,26 @@ class MemoryRepository:
         source_execution_id: str | None = None,
         expires_at: datetime | None = None,
     ) -> MemoryEntry:
-        scope = _normalize_scope(memory_scope)
-        owner = normalize_memory_owner_type(owner_type)
+        self._validate_owner(agent_id=agent_id, session_id=session_id)
         row = self._find_active(
             key=key,
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=owner,
             agent_id=agent_id,
             session_id=session_id,
-            memory_scope=scope,
         )
         now = utcnow()
         if row is None:
             row = MemoryRecord(
-                tenant_id=tenant_id,
                 user_id=user_id,
-                owner_type=owner,
                 agent_id=agent_id,
                 session_id=session_id,
-                memory_scope=scope,
                 memory_key=key,
             )
         else:
             row.version += 1
-        row.tenant_id = tenant_id
         row.user_id = user_id
-        row.owner_type = owner
         row.agent_id = agent_id
         row.session_id = session_id
-        row.memory_scope = scope
         row.kind = normalize_memory_kind(kind)
         row.content = content.strip()
         row.payload = payload or {}
@@ -111,18 +91,12 @@ class MemoryRepository:
         self,
         key: str,
         *,
-        tenant_id: str,
         user_id: str,
-        owner_type: str | MemoryOwnerType,
-        memory_scope: str | MemoryScope,
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> MemoryEntry | None:
         query = self._scoped_query(
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=owner_type,
-            memory_scope=memory_scope,
             agent_id=agent_id,
             session_id=session_id,
         ).where(MemoryRecord.memory_key == key)
@@ -135,27 +109,22 @@ class MemoryRepository:
     def list_scope(
         self,
         *,
-        tenant_id: str,
         user_id: str,
-        owner_type: str | MemoryOwnerType,
-        memory_scope: str | MemoryScope,
         agent_id: str | None = None,
         session_id: str | None = None,
         limit: int = 20,
     ) -> list[MemoryEntry]:
-        query = (
-            self._scoped_query(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                owner_type=owner_type,
-                memory_scope=memory_scope,
-                agent_id=agent_id,
-                session_id=session_id,
-            )
-            .order_by(MemoryRecord.updated_at.desc())
-            .limit(limit)
+        rows = list(
+            self.session.exec(
+                self._scoped_query(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                )
+                .order_by(MemoryRecord.updated_at.desc())
+                .limit(limit)
+            ).all()
         )
-        rows = list(self.session.exec(query).all())
         self._record_access(rows)
         return [self._to_entry(row) for row in rows]
 
@@ -163,27 +132,20 @@ class MemoryRepository:
         self,
         query_text: str,
         *,
-        tenant_id: str,
         user_id: str,
-        owner_type: str | MemoryOwnerType,
-        memory_scope: str | MemoryScope,
         agent_id: str | None = None,
         session_id: str | None = None,
         limit: int = 8,
     ) -> list[MemoryEntry]:
         candidates = self.list_scope(
-            tenant_id=tenant_id,
             user_id=user_id,
-            owner_type=owner_type,
             agent_id=agent_id,
             session_id=session_id,
-            memory_scope=memory_scope,
             limit=100,
         )
         terms = _memory_query_terms(query_text)
         if not terms:
             return candidates[:limit]
-
         scored: list[tuple[int, MemoryEntry]] = []
         for entry in candidates:
             haystack = f"{entry.kind} {entry.content} {entry.payload}".casefold()
@@ -197,22 +159,17 @@ class MemoryRepository:
         self,
         *,
         key: str,
-        tenant_id: str,
         user_id: str,
-        owner_type: MemoryOwnerType,
         agent_id: str | None,
         session_id: str | None,
-        memory_scope: MemoryScope,
     ) -> MemoryRecord | None:
-        query = self._scoped_query(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            owner_type=owner_type,
-            memory_scope=memory_scope,
-            agent_id=agent_id,
-            session_id=session_id,
-        ).where(MemoryRecord.memory_key == key)
-        return self.session.exec(query).first()
+        return self.session.exec(
+            self._scoped_query(
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+            ).where(MemoryRecord.memory_key == key)
+        ).first()
 
     @staticmethod
     def _active_query():
@@ -226,26 +183,26 @@ class MemoryRepository:
     def _scoped_query(
         cls,
         *,
-        tenant_id: str,
         user_id: str,
-        owner_type: str | MemoryOwnerType,
-        memory_scope: str | MemoryScope,
         agent_id: str | None,
         session_id: str | None,
     ):
-        scope = _normalize_scope(memory_scope)
-        owner = normalize_memory_owner_type(owner_type)
-        query = cls._active_query().where(
-            MemoryRecord.tenant_id == tenant_id,
-            MemoryRecord.user_id == user_id,
-            MemoryRecord.owner_type == owner,
-            MemoryRecord.memory_scope == scope,
+        cls._validate_owner(agent_id=agent_id, session_id=session_id)
+        query = cls._active_query().where(MemoryRecord.user_id == user_id)
+        if agent_id is not None:
+            return query.where(
+                MemoryRecord.agent_id == agent_id,
+                MemoryRecord.session_id.is_(None),
+            )
+        return query.where(
+            MemoryRecord.session_id == session_id,
+            MemoryRecord.agent_id.is_(None),
         )
-        if owner == MemoryOwnerType.agent:
-            query = query.where(MemoryRecord.agent_id == agent_id)
-        if owner == MemoryOwnerType.session:
-            query = query.where(MemoryRecord.session_id == session_id)
-        return query
+
+    @staticmethod
+    def _validate_owner(*, agent_id: str | None, session_id: str | None) -> None:
+        if (agent_id is None) == (session_id is None):
+            raise ValueError("exactly one of agent_id or session_id is required")
 
     def _record_access(self, rows: list[MemoryRecord]) -> None:
         if not rows:
@@ -267,12 +224,9 @@ class MemoryRepository:
             kind=str(row.kind),
             payload=payload if isinstance(payload, dict) else {},
             updated_at=row.updated_at,
-            tenant_id=row.tenant_id,
             user_id=row.user_id,
-            owner_type=row.owner_type,
             agent_id=row.agent_id,
             session_id=row.session_id,
-            memory_scope=str(row.memory_scope),
             confidence=row.confidence,
             importance_score=row.importance_score,
             source_type=row.source_type,
@@ -285,15 +239,7 @@ class MemoryRepository:
         )
 
 
-def _normalize_scope(scope: str | MemoryScope) -> MemoryScope:
-    try:
-        return MemoryScope(str(scope))
-    except ValueError as exc:
-        raise ValueError(f"Unsupported memory scope: {scope}") from exc
-
-
 def _memory_query_terms(value: str) -> list[str]:
-    """Use words plus CJK bigrams; never return broad recency results."""
     text = str(value or "").casefold()
     terms = [item for item in re.findall(r"[a-z0-9_]{2,}", text) if item]
     for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", text):

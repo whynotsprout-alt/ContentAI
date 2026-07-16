@@ -17,7 +17,6 @@ from sqlmodel import Session, select
 
 @dataclass(frozen=True)
 class UsageContext:
-    tenant_id: str
     user_id: str
     session_id: str | None
     execution_id: str | None
@@ -132,7 +131,6 @@ class ModelUsageCallback(BaseCallbackHandler):
             session.add(
                 ModelUsage(
                     call_id=call_id,
-                    tenant_id=self.context.tenant_id,
                     user_id=self.context.user_id,
                     session_id=self.context.session_id,
                     execution_id=self.context.execution_id,

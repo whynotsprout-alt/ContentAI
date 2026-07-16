@@ -22,8 +22,7 @@ def seed_execution() -> tuple[str, str]:
             id="session-research-persistence",
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
         session.add(chat)
         session.flush()
@@ -31,8 +30,7 @@ def seed_execution() -> tuple[str, str]:
             id="invocation-research-persistence",
             session_id=chat.id,
             agent_id=chat.agent_id,
-            tenant_id=chat.tenant_id,
-            created_by_user_id=chat.owner_user_id,
+            user_id=chat.user_id,
         )
         session.add(invocation)
         session.flush()
@@ -80,7 +78,6 @@ def test_research_tool_persists_complete_package_without_webpage_body(monkeypatc
         session_id="thread-research-persistence",
         agent_id="default-agent",
         agent_version_id="default-agent-v1",
-        tenant_id="local",
         user_id="local-user",
         permissions=["prepare_topic_research"],
         research_model_gateway=SimpleNamespace(),

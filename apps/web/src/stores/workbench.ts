@@ -24,7 +24,7 @@ const STREAM_DEGRADED_CODES = new Set([
 ]);
 
 export type AssistantBubbleState = 'normal' | 'pending' | 'streaming';
-export type RunLifecycle = 'idle' | 'queued' | 'running' | 'reconnecting' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'waiting_input' | 'interrupted';
+export type RunLifecycle = 'idle' | 'queued' | 'running' | 'reconnecting' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'waiting_input';
 
 export interface TimelineEvent {
   event: string;
@@ -118,7 +118,6 @@ function toRunLifecycle(status: string | null | undefined): RunLifecycle {
   if (normalized === 'failed') return 'failed';
   if (normalized === 'cancelled' || normalized === 'canceled') return 'cancelled';
   if (normalized === 'waiting_input') return 'waiting_input';
-  if (normalized === 'interrupted') return 'interrupted';
   return 'idle';
 }
 
@@ -186,14 +185,13 @@ export const useWorkbenchStore = defineStore('workbench', {
           (!state.sessionInfo || state.sessionInfo.agent_id === state.agentId) &&
           !state.isSwitchingAgent &&
           !state.isLoadingSession &&
-          !['queued', 'running', 'reconnecting', 'cancelling', 'waiting_input', 'interrupted'].includes(state.runLifecycle)
+          !['queued', 'running', 'reconnecting', 'cancelling', 'waiting_input'].includes(state.runLifecycle)
       );
     },
     canResume(state) {
       return Boolean(
         state.sessionId &&
-          (['waiting_input', 'interrupted'].includes(state.status) ||
-            ['waiting_input', 'interrupted'].includes(state.runLifecycle))
+          (state.status === 'waiting_input' || state.runLifecycle === 'waiting_input')
       );
     },
     selectedAgent(state) {
@@ -324,7 +322,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         }
         this.sessionId = session.session_id;
         this.messages = session.messages
-          .filter((message) => ['text', 'markdown'].includes(message.message_type) && message.role !== 'tool')
+          .filter((message) => ['text', 'markdown'].includes(message.message_type))
           .map((message) => ({
             role: message.role as WorkbenchMessage['role'],
             content: message.content,
@@ -345,7 +343,7 @@ export const useWorkbenchStore = defineStore('workbench', {
           this._ensureAssistantPlaceholder();
           return true;
         }
-        if (['failed', 'cancelled', 'waiting_input', 'interrupted'].includes(this.status)) {
+        if (['failed', 'cancelled', 'waiting_input'].includes(this.status)) {
           this._removeActiveStreamingAssistantPlaceholder();
         }
         return true;
@@ -443,7 +441,7 @@ export const useWorkbenchStore = defineStore('workbench', {
           const lifecycle = deletingCurrentSession
             ? this.runLifecycle
             : toRunLifecycle(session?.latest_execution_status);
-          this.error = ['waiting_input', 'interrupted'].includes(lifecycle)
+          this.error = lifecycle === 'waiting_input'
             ? '当前会话正在等待确认，请继续或取消当前运行后再删除。'
             : '当前会话正在运行，完成或取消后再删除。';
           return;
@@ -1240,7 +1238,7 @@ export const useWorkbenchStore = defineStore('workbench', {
 
     async _hydrateMessages(session: ChatSessionDetail) {
       const mapped: WorkbenchMessage[] = session.messages
-        .filter((message) => ['text', 'markdown'].includes(message.message_type) && message.role !== 'tool')
+        .filter((message) => ['text', 'markdown'].includes(message.message_type))
         .map((message) => ({
           role: message.role as WorkbenchMessage['role'],
           content: message.content,

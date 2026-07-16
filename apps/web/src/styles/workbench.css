@@ -663,8 +663,7 @@
   box-shadow: 0 14px 42px rgb(61 48 157 / 0.22), inset 0 1px rgb(255 255 255 / 0.06);
 }
 
-.run-activity.state-waiting_input,
-.run-activity.state-interrupted {
+.run-activity.state-waiting_input {
   color: #ded9ff;
   background: rgb(39 33 76 / 0.95);
   border-color: rgb(159 149 255 / 0.42);

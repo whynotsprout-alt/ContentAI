@@ -5,6 +5,7 @@ from core.config.llm import DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_OUTPUT_TO
 
 def test_default_prompt_budget_and_recent_message_window():
     settings = Settings(
+        _env_file=None,
         env="development",
         database={"url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai"},
     )
@@ -15,7 +16,7 @@ def test_default_prompt_budget_and_recent_message_window():
     assert settings.agent.context_max_messages == 40
 
 
-def test_legacy_auth_modes_are_rejected():
+def test_removed_auth_modes_are_rejected():
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         Settings(
             env="test",

@@ -1,15 +1,13 @@
 from agent.context.assembler import _select_memories_for_prompt
 from memory.types import MemoryEntry
-from models.enums import MemoryOwnerType
 
 
 def _memory(key: str, content: str) -> MemoryEntry:
     return MemoryEntry(
         key=key,
         content=content,
-        tenant_id="tenant",
-        user_id="user",
-        owner_type=MemoryOwnerType.agent,
+        user_id="local-user",
+        agent_id="default-agent",
         importance_score=1.0,
         confidence=1.0,
     )
@@ -24,9 +22,9 @@ def test_new_session_does_not_inject_unrelated_high_importance_memory():
     assert selected == []
 
 
-def test_context_never_injects_legacy_transient_task_memory():
+def test_context_never_injects_transient_task_memory():
     selected = _select_memories_for_prompt(
-        [_memory("legacy-task", "接着上一条，果切口播稿已完成，下一步继续出稿")],
+        [_memory("transient-task", "接着上一条，果切口播稿已完成，下一步继续出稿")],
         focus_message="果切内容怎么写",
         max_count=8,
     )

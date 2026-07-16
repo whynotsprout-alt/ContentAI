@@ -32,7 +32,6 @@ def test_research_pack_returns_as_a_normal_tool_result(monkeypatch):
         conversation_id="ses_1",
         session_id="thr_1",
         agent_id="agt_1",
-        tenant_id="tenant_1",
         user_id="user_1",
         agent_version_id="av_1",
         permissions=(

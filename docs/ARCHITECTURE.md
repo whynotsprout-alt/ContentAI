@@ -17,7 +17,7 @@ flowchart LR
   Migration["一次性 Migration"] --> PG
 ```
 
-`docker-compose.yml` 负责启动 PostgreSQL、Redis、迁移服务、API、Dispatcher、两个 Worker、Beat 与 Web。迁移成功是 API 和后台服务的启动前提；Web 仅在 API 就绪后启动。
+`compose.yaml` 负责启动 PostgreSQL、Redis、迁移服务、API、Dispatcher、两个 Worker、Beat 与 Web，共九个服务。迁移成功是 API 和后台服务的启动前提；Web 仅在 API 就绪后启动。`compose.dev.yaml` 只为本地开发在 loopback 暴露数据库、Redis 和 API。
 
 ## 目录职责
 
@@ -27,11 +27,12 @@ flowchart LR
 | `apps/api/src/agent` | LangGraph 组装、执行恢复、工具与提示词 |
 | `apps/api/src/services` | 会话、执行、outbox、任务、迁移和运维服务 |
 | `apps/api/src/models` | SQLAlchemy 实体与 API Schema |
-| `apps/api/alembic` | 业务 schema 迁移；不管理 LangGraph checkpoint/store 表 |
+| `apps/api/src/contentai_migrations` | 可随 wheel 安装的单一业务初始迁移；不管理 LangGraph checkpoint/store 表 |
 | `apps/api/tests` | 后端单元、集成与可靠性测试 |
 | `apps/web/src` | Vue 页面、状态管理和 API 客户端 |
 | `infra` | API/Web Dockerfile 与 Web Nginx 反向代理 |
-| `tools` | Windows 下的环境准备、开发、测试、评审和重启入口 |
+| `tools` | Windows 开发、测试、评审和 Ubuntu 发布打包入口 |
+| `infra/ubuntu` | Ubuntu 部署、健康检查、备份、恢复和升级脚本 |
 
 ## 对话执行链路
 

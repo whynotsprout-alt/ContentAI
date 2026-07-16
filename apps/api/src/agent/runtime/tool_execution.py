@@ -136,8 +136,8 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
             "tool_end",
             tool_name=tool_name,
             tool_call_id=tool_call_id,
-            status="interrupted",
-            stage="interrupted",
+            status="waiting_input",
+            stage="waiting_input",
         )
         raise
     except Exception as exc:  # noqa: BLE001
@@ -249,8 +249,6 @@ def _start_audit(
             )
         row.tool_name = tool_name
         row.tool_version = tool_version
-        row.arguments = {}
-        row.result = None
         row.arguments_hash = arguments_hash
         row.result_digest = ""
         row.status = ToolExecutionStatus.running
@@ -295,7 +293,6 @@ def _finish_audit(
         row = session.get(ToolExecution, row_id)
         if row is None:
             return
-        row.result = None
         row.result_digest = result_digest
         row.error = error[:2000]
         row.status = (

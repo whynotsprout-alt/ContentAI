@@ -19,7 +19,6 @@ TOOL_WILDCARD = "*"
 @dataclass(frozen=True)
 class AuthContext:
     user_id: str
-    tenant_id: str
     role: str = "user"
     status: str = "active"
     session_id: str | None = None
@@ -85,7 +84,6 @@ def _authenticate_local_request(request: Request, settings: Settings) -> AuthCon
             session.commit()
         return AuthContext(
             user_id=user.id,
-            tenant_id=user.tenant_id,
             role=user.role,
             status=user.status,
             session_id=auth_session.id,

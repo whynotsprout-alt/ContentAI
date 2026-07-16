@@ -19,6 +19,7 @@ apps/web/*.tsbuildinfo
 apps/web/vite.config.d.ts
 apps/web/vite.config.js
 output/
+dist/
 node_modules/
 celerybeat-schedule*
 apps/api/src/celerybeat-schedule*

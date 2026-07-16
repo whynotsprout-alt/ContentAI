@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from core.security import AGENT_WILDCARD, AuthContext
 from models.chat import AgentExecution, AgentInvocation, ChatSession
-from models.enums import SessionStatus
 from services.errors import ExecutionNotFoundError
 from sqlmodel import Session, select
 
@@ -35,9 +34,7 @@ class ExecutionScopeGuard:
             .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)
             .join(ChatSession, AgentInvocation.session_id == ChatSession.id)
             .where(AgentExecution.id == execution_id)
-            .where(ChatSession.tenant_id == auth.tenant_id)
-            .where(ChatSession.owner_user_id == auth.user_id)
-            .where(ChatSession.status != SessionStatus.deleted)
+            .where(ChatSession.user_id == auth.user_id)
         )
         if agent_filter is not None:
             statement = statement.where(agent_filter)

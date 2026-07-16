@@ -8,8 +8,6 @@ class SearchSettings(BaseModel):
     traffic_relay_api_key: SecretStr = SecretStr("")
     tikhub_api_key: SecretStr = SecretStr("")
     metaso_api_key: SecretStr = SecretStr("")
-    metaso_search_api_key: SecretStr = SecretStr("")
-    metaso_key: SecretStr = SecretStr("")
     anspire_api_key: SecretStr = SecretStr("")
     search_cache_ttl_seconds: int = 300
     hotspot_cache_ttl_seconds: int = 180

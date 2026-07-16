@@ -22,7 +22,6 @@ class AgentContext:
     runtime_context_messages: list[BaseMessage] = field(default_factory=list)
     user_id: str | None = None
     agent_id: str | None = None
-    tenant_id: str | None = None
     conversation_id: str | None = None
     run_id: str | None = None
     permissions: list[str] = field(default_factory=list)
@@ -43,7 +42,6 @@ class ContextAssembler:
         tool_names: list[str],
         focus_message: str | None = None,
         user_id: str | None = None,
-        tenant_id: str | None = None,
         conversation_id: str | None = None,
         run_id: str | None = None,
         permissions: list[str] | tuple[str, ...] | None = None,
@@ -59,7 +57,6 @@ class ContextAssembler:
             agent_profile=agent_profile,
             short_term_summary=short_term_summary,
             long_term_memories=curated_memories,
-            tenant_id=tenant_id,
             conversation_id=conversation_id,
             run_id=run_id,
         )
@@ -91,7 +88,6 @@ class ContextAssembler:
             long_term_memories=long_term_memories,
             user_id=user_id,
             agent_id=agent_profile.id,
-            tenant_id=tenant_id,
             conversation_id=conversation_id,
             run_id=run_id,
             permissions=list(permissions) if permissions is not None else list(tool_names),
@@ -229,7 +225,6 @@ def _render_runtime_context_message(
     agent_profile: AgentProfile,
     short_term_summary: str,
     long_term_memories: list[MemoryEntry],
-    tenant_id: str | None = None,
     conversation_id: str | None = None,
     run_id: str | None = None,
 ) -> HumanMessage:
@@ -241,7 +236,6 @@ def _render_runtime_context_message(
         f"- agent_id: {agent_profile.id}",
         f"- agent_name: {agent_profile.name}",
         f"- agent_description: {account_description or 'none'}",
-        f"- tenant_id: {tenant_id or 'none'}",
         f"- conversation_id: {conversation_id or 'none'}",
         f"- run_id: {run_id or 'none'}",
         f"- short_term_summary: {short_term_summary or 'none'}",

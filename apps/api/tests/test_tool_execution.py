@@ -18,8 +18,7 @@ def _seed_execution(execution_id: str) -> None:
             id=f"session-{execution_id}",
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
         session.add(chat)
         session.flush()
@@ -27,8 +26,7 @@ def _seed_execution(execution_id: str) -> None:
             id=f"invocation-{execution_id}",
             session_id=chat.id,
             agent_id="default-agent",
-            tenant_id="local",
-            created_by_user_id="local-user",
+            user_id="local-user",
         )
         session.add(invocation)
         session.flush()
@@ -54,7 +52,6 @@ def _runtime(
         conversation_id=f"session-{execution_id}",
         session_id=f"session-{execution_id}",
         agent_id="default-agent",
-        tenant_id="local",
         user_id="local-user",
         tool_policies=policies,
         event_writer=event_writer,
@@ -89,8 +86,6 @@ def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:
     with Session(get_engine()) as session:
         audit = session.exec(select(ToolExecution)).one()
         assert audit.status == ToolExecutionStatus.completed
-        assert audit.arguments == {}
-        assert audit.result is None
         assert audit.arguments_hash
         assert audit.result_digest
         assert "secret" not in audit.error
@@ -143,7 +138,6 @@ def test_tool_timeout_returns_structured_error_and_marks_audit_failed() -> None:
     with Session(get_engine()) as session:
         audit = session.exec(select(ToolExecution)).one()
         assert audit.status == ToolExecutionStatus.failed
-        assert audit.result is None
         assert audit.result_digest == ""
         assert "TOOL_TIMEOUT" in audit.error
 

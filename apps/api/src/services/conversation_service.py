@@ -9,22 +9,17 @@ from typing import Any, Protocol
 from agent.runtime.checkpoint import clear_thread_persistence
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
 from core.security import AuthContext
-from memory import LongTermMemory, MemoryRepository, ShortTermMemory
 from models.agent import AgentProfile, AgentVersion
 from models.chat import (
-    AgentEvent,
     AgentExecution,
-    AgentExecutionAttempt,
     AgentInvocation,
     ChatMessage,
     ChatSession,
     ExecutionOutbox,
     ExecutionResumeRequest,
-    ToolExecution,
 )
-from models.enums import ExecutionAttemptKind, MessageRole, MessageType, RunStatus, SessionStatus
+from models.enums import ExecutionAttemptKind, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
-from models.research import ResearchPackage
 from models.schemas import (
     AgentExecutionState,
     AgentMessageRequest,
@@ -33,15 +28,10 @@ from models.schemas import (
     ChatSessionDetail,
     ChatSessionSummary,
     ChatUserMessageResponse,
-    ConversationMemory,
     CreateSessionRequest,
     CreateSessionResponse,
     ErrorDetail,
-    ExecutionResponse,
-    MessageCitation,
     MessageListRequest,
-    MessageState,
-    ToolExecutionResult,
 )
 from models.user import AdminAuditLog
 from services.agent_service import AgentService
@@ -67,7 +57,7 @@ from services.event_stream import (
 )
 from services.execution_resume import interrupt_identity, stored_resume_value
 from services.execution_scope import ExecutionScopeGuard
-from sqlalchemy import and_, delete, func, or_, update
+from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 
 ACTIVE_EXECUTION_STATUSES = {RunStatus.pending, RunStatus.running}
@@ -79,7 +69,6 @@ TERMINAL_EXECUTION_STATUSES = {
     RunStatus.cancelled,
 }
 
-LOCAL_AUTH = AuthContext(user_id="local-user", tenant_id="local")
 _MESSAGE_CURSOR_SEP = "|"
 
 
@@ -105,15 +94,13 @@ class ConversationService:
         self,
         session: Session,
         payload: CreateSessionRequest,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
     ) -> CreateSessionResponse:
         if not auth.can_access_agent(payload.agent_id):
             raise AgentNotFoundError(payload.agent_id)
         profile = session.get(AgentProfile, payload.agent_id)
         if (
-            profile is None
-            or profile.tenant_id != auth.tenant_id
-            or (profile.owner_user_id is not None and profile.owner_user_id != auth.user_id)
+            profile is None or profile.user_id != auth.user_id
         ):
             raise AgentNotFoundError(payload.agent_id)
 
@@ -121,8 +108,7 @@ class ConversationService:
         chat = ChatSession(
             agent_id=payload.agent_id,
             agent_version_id=version.id,
-            tenant_id=auth.tenant_id,
-            owner_user_id=auth.user_id,
+            user_id=auth.user_id,
         )
         session.add(chat)
         session.commit()
@@ -131,15 +117,13 @@ class ConversationService:
             session_id=chat.id,
             agent_id=chat.agent_id,
             agent_version_id=chat.agent_version_id,
-            tenant_id=chat.tenant_id,
-            user_id=chat.owner_user_id,
             title=chat.title,
         )
 
     def list_sessions(
         self,
         session: Session,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
     ) -> list[ChatSessionSummary]:
         latest_execution_status = (
             select(
@@ -160,7 +144,6 @@ class ConversationService:
                 ChatMessage.session_id.label("session_id"),
                 func.count(ChatMessage.id).label("message_count"),
             )
-            .where(ChatMessage.role != MessageRole.tool)
             .where(ChatMessage.message_type.in_((MessageType.text, MessageType.markdown)))
             .group_by(ChatMessage.session_id)
             .subquery()
@@ -178,9 +161,7 @@ class ConversationService:
                 & (latest_execution_status.c.rank == 1),
             )
             .outerjoin(message_counts, message_counts.c.session_id == ChatSession.id)
-            .where(ChatSession.tenant_id == auth.tenant_id)
-            .where(ChatSession.owner_user_id == auth.user_id)
-            .where(ChatSession.status != SessionStatus.deleted)
+            .where(ChatSession.user_id == auth.user_id)
             .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
         ).all()
 
@@ -204,7 +185,7 @@ class ConversationService:
         self,
         session: Session,
         session_id: str,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         history: MessageListRequest | None = None,
     ) -> ChatSessionDetail:
         chat = self._get_chat(session, session_id, auth)
@@ -218,7 +199,6 @@ class ConversationService:
         message_count_result = session.exec(
             select(func.count())
             .where(ChatMessage.session_id == chat.id)
-            .where(ChatMessage.role != MessageRole.tool)
             .where(ChatMessage.message_type.in_((MessageType.text, MessageType.markdown)))
         ).one_or_none()
         message_count = 0 if message_count_result is None else int(message_count_result)
@@ -240,18 +220,13 @@ class ConversationService:
                 if latest_execution
                 else None
             ),
-            memory=self._conversation_memory(
-                session,
-                runtime=self.agent_service.runtime,
-                chat=chat,
-            ),
         )
 
     def delete_session(
         self,
         session: Session,
         session_id: str,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         request_id: str = "",
     ) -> None:
         chat = self._get_chat(session, session_id, auth, for_update=True)
@@ -269,50 +244,7 @@ class ConversationService:
             except Exception as exc:
                 session.rollback()
                 raise RuntimeError("Chat session persistence cleanup failed") from exc
-            execution_ids = [execution.id for execution in executions]
-            invocation_ids = list(
-                session.exec(
-                    select(AgentInvocation.id).where(AgentInvocation.session_id == chat.id)
-                ).all()
-            )
-            session.exec(
-                delete(MemoryRecord).where(
-                    or_(
-                        MemoryRecord.session_id == chat.id,
-                        MemoryRecord.source_session_id == chat.id,
-                        MemoryRecord.source_execution_id.in_(execution_ids)
-                        if execution_ids
-                        else False,
-                    )
-                )
-            )
-            if execution_ids:
-                session.exec(
-                    delete(ResearchPackage).where(ResearchPackage.session_id == chat.id)
-                )
-                for model in (
-                    ExecutionResumeRequest,
-                    ExecutionOutbox,
-                    ToolExecution,
-                    AgentEvent,
-                    AgentExecutionAttempt,
-                ):
-                    session.exec(delete(model).where(model.execution_id.in_(execution_ids)))
-                session.exec(delete(AgentExecution).where(AgentExecution.id.in_(execution_ids)))
-            if invocation_ids:
-                session.exec(
-                    update(AgentInvocation)
-                    .where(AgentInvocation.id.in_(invocation_ids))
-                    .values(user_message_id=None)
-                )
-            session.exec(
-                update(ChatMessage)
-                .where(ChatMessage.session_id == chat.id)
-                .values(invocation_id=None, parent_message_id=None)
-            )
-            session.exec(delete(ChatMessage).where(ChatMessage.session_id == chat.id))
-            if invocation_ids:
-                session.exec(delete(AgentInvocation).where(AgentInvocation.id.in_(invocation_ids)))
+            session.exec(delete(MemoryRecord).where(MemoryRecord.session_id == chat.id))
             session.delete(chat)
             session.add(
                 AdminAuditLog(
@@ -334,7 +266,7 @@ class ConversationService:
         self,
         session: Session,
         payload: AgentMessageRequest,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         *,
         idempotency_key: str | None = None,
         request_id: str | None = None,
@@ -397,7 +329,7 @@ class ConversationService:
         self,
         session: Session,
         payload: AgentMessageRequest,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> ChatUserMessageResponse:
@@ -410,41 +342,11 @@ class ConversationService:
         )
         return created
 
-    def get_execution(
-        self,
-        session: Session,
-        execution_id: str,
-        auth: AuthContext = LOCAL_AUTH,
-    ) -> ExecutionResponse:
-        execution, invocation, chat = self._get_execution_in_scope(
-            session=session,
-            execution_id=execution_id,
-            auth=auth,
-        )
-        messages = self._get_messages_for_invocation(
-            session,
-            invocation_id=invocation.id,
-        )
-        payload = self._execution_response(
-            execution=execution,
-            chat_id=chat.id,
-            queue_stage=self._queue_stage(session, execution),
-        ).model_dump()
-        return ExecutionResponse(
-            **payload,
-            messages=[self._to_message_response(item) for item in messages],
-            memory=self._conversation_memory(
-                session,
-                runtime=self.agent_service.runtime,
-                chat=chat,
-            ),
-        )
-
     def get_execution_status(
         self,
         session: Session,
         execution_id: str,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
     ) -> ChatExecutionResponse:
         execution, _, chat = self._get_execution_in_scope(
             session=session,
@@ -461,15 +363,19 @@ class ConversationService:
         self,
         session: Session,
         execution_id: str,
-        auth: AuthContext = LOCAL_AUTH,
-    ) -> ExecutionResponse:
-        execution, _, _chat = self._get_execution_in_scope(
+        auth: AuthContext,
+    ) -> ChatExecutionResponse:
+        execution, _, chat = self._get_execution_in_scope(
             session=session,
             execution_id=execution_id,
             auth=auth,
         )
         execution = self._cancel_execution(session, execution)
-        return self.get_execution(session, execution.id, auth)
+        return self._execution_response(
+            execution=execution,
+            chat_id=chat.id,
+            queue_stage=self._queue_stage(session, execution),
+        )
 
     def resume_execution(
         self,
@@ -477,9 +383,9 @@ class ConversationService:
         execution_id: str,
         resume_value: Any,
         agent_id: str,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         request_id: str | None = None,
-    ) -> ExecutionResponse:
+    ) -> ChatExecutionResponse:
         execution, _, chat = self._get_execution_in_scope(
             session=session,
             execution_id=execution_id,
@@ -490,7 +396,11 @@ class ConversationService:
                 f"Session {chat.id} belongs to agent {chat.agent_id}, not {agent_id}"
             )
         execution = self._resume_execution(session, execution, resume_value)
-        response = self.get_execution(session, execution.id, auth)
+        response = self._execution_response(
+            execution=execution,
+            chat_id=chat.id,
+            queue_stage=self._queue_stage(session, execution),
+        )
         if self.execution_dispatcher is not None:
             self.execution_dispatcher.dispatch(execution.id, request_id)
         return response
@@ -499,7 +409,7 @@ class ConversationService:
         self,
         session_bind: Any,
         execution_id: str,
-        auth: AuthContext = LOCAL_AUTH,
+        auth: AuthContext,
         *,
         after_sequence: int = 0,
         poll_interval_seconds: float = 0.35,
@@ -594,9 +504,7 @@ class ConversationService:
         chat = session.exec(query).first()
         if (
             chat is None
-            or chat.tenant_id != auth.tenant_id
-            or chat.owner_user_id != auth.user_id
-            or chat.status == SessionStatus.deleted
+            or chat.user_id != auth.user_id
             or not auth.can_access_agent(chat.agent_id)
         ):
             raise ChatSessionNotFoundError(session_id)
@@ -691,14 +599,11 @@ class ConversationService:
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id=chat.agent_id,
-            tenant_id=auth.tenant_id,
-            created_by_user_id=auth.user_id,
+            user_id=auth.user_id,
+            idempotency_key=idempotency_key,
         )
         session.add(invocation)
         session.flush()
-        metadata = {"invocation_id": invocation.id}
-        if idempotency_key is not None:
-            metadata["idempotency_key"] = idempotency_key
 
         message_kwargs: dict[str, Any] = {}
         if message_id:
@@ -709,14 +614,10 @@ class ConversationService:
             invocation_id=invocation.id,
             role=MessageRole.user,
             message_type=MessageType.text,
-            message_metadata=metadata,
             content=content,
         )
         session.add(message)
         session.flush()
-
-        invocation.user_message_id = message.id
-        session.add(invocation)
 
         execution = AgentExecution(
             invocation_id=invocation.id,
@@ -768,27 +669,12 @@ class ConversationService:
                 .where(AgentInvocation.session_id == chat.id)
                 .where(ChatMessage.role == MessageRole.user)
                 .where(AgentInvocation.agent_id == chat.agent_id)
-                .where(AgentInvocation.tenant_id == auth.tenant_id)
-                .where(AgentInvocation.created_by_user_id == auth.user_id)
+                .where(AgentInvocation.user_id == auth.user_id)
+                .where(AgentInvocation.idempotency_key == idempotency_key)
                 .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             ).all()
         )
-        for message, invocation, execution in rows:
-            if self._extract_idempotency_key(message) != idempotency_key:
-                continue
-            return message, invocation, execution
-        return None
-
-    @staticmethod
-    def _extract_idempotency_key(message: ChatMessage) -> str:
-        metadata = message.message_metadata
-        if not isinstance(metadata, dict):
-            return ""
-        value = metadata.get("idempotency_key")
-        if not isinstance(value, str):
-            return ""
-        value = value.strip()
-        return value
+        return rows[0] if rows else None
 
     @staticmethod
     def _normalize_idempotency_key(value: str | None) -> str | None:
@@ -1003,126 +889,14 @@ class ConversationService:
         return "dispatching"
 
     @staticmethod
-    def _conversation_memory(
-        session: Session,
-        runtime: object,
-        chat: ChatSession,
-    ) -> ConversationMemory:
-        repository = MemoryRepository(session)
-        short_term = ShortTermMemory(repository)
-        long_term = LongTermMemory(repository)
-        return ConversationMemory(
-            short_term_summary=short_term.load_summary(
-                chat.id,
-                tenant_id=chat.tenant_id,
-                user_id=chat.owner_user_id,
-                agent_id=chat.agent_id,
-            ),
-            long_term_memories=[
-                item
-                for item in long_term.list_all(
-                    chat.agent_id,
-                    tenant_id=chat.tenant_id,
-                    user_id=chat.owner_user_id,
-                    limit=20,
-                )
-            ],
-        )
-
-    @staticmethod
     def _to_message_response(item: ChatMessage) -> ChatMessageResponse:
-        metadata = item.message_metadata if isinstance(item.message_metadata, dict) else {}
-        trace_id = str(
-            metadata.get("execution_id")
-            or metadata.get("trace_id")
-            or metadata.get("stream_id")
-            or ""
-        )
         return ChatMessageResponse(
             id=item.id,
             role=item.role,
             message_type=item.message_type,
             content=item.content,
-            status=MessageState.completed,
-            tool_name=item.tool_name,
-            tool_call_id=item.tool_call_id,
-            model_name=item.model_name,
-            input_tokens=item.input_tokens,
-            output_tokens=item.output_tokens,
-            latency_ms=item.latency_ms,
-            trace_id=trace_id,
-            citations=ConversationService._message_citations(metadata.get("citations")),
-            tool_results=ConversationService._message_tool_results(metadata.get("tool_results")),
             created_at=item.created_at,
         )
-
-    @staticmethod
-    def _message_tool_results(value: Any) -> list[ToolExecutionResult]:
-        if not isinstance(value, list):
-            return []
-        parsed: list[ToolExecutionResult] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            try:
-                parsed.append(
-                    ToolExecutionResult(
-                        tool_call_id=(
-                            str(item["tool_call_id"])
-                            if item.get("tool_call_id") is not None
-                            else None
-                        ),
-                        tool_name=str(item.get("tool_name", "")),
-                        result=item.get("result"),
-                        error=ConversationService._to_error(item.get("error")),
-                    )
-                )
-            except Exception:
-                continue
-        return parsed
-
-    @staticmethod
-    def _message_citations(value: Any) -> list[MessageCitation]:
-        if not isinstance(value, list):
-            return []
-        parsed: list[MessageCitation] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            source = item.get("source")
-            if not isinstance(source, str) or not source.strip():
-                continue
-            url = item.get("url")
-            try:
-                parsed.append(
-                    MessageCitation(
-                        source=source,
-                        url=url if isinstance(url, str) or url is None else str(url),
-                    )
-                )
-            except Exception:
-                continue
-        return parsed
-
-    @staticmethod
-    def _to_error(value: Any) -> ErrorDetail | None:
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            code = value.get("code", "TOOL_ERROR")
-            message = value.get("message", "")
-            msg = str(message).strip()
-            if not msg:
-                return None
-            return ErrorDetail(
-                code=str(code) or "TOOL_ERROR",
-                message=msg,
-                retryable=bool(value.get("retryable", False)),
-            )
-        msg = str(value).strip()
-        if not msg:
-            return None
-        return ErrorDetail(code="TOOL_ERROR", message=msg, retryable=False)
 
     @staticmethod
     def _execution_state(value: RunStatus | str) -> AgentExecutionState:

@@ -1,6 +1,6 @@
 # ContentAI 文档导航
 
-本文档集以当前仓库布局为准。旧的 `backend/`、`frontend/`、`Docs/` 和 `scripts/` 路径已分别迁移至 `apps/api/`、`apps/web/`、`docs/` 和 `tools/`，不再作为有效入口。
+本文档集以当前 `apps/api`、`apps/web`、`infra`、`docs` 和 `tools` 布局为准。
 
 | 文档 | 用途 |
 | --- | --- |
@@ -9,6 +9,8 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 目录职责、服务拓扑与请求链路 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 本地配置、开发、测试与质量检查 |
 | [OPERATIONS.md](OPERATIONS.md) | 容器启动、健康检查、迁移、日志与故障处理 |
+| [API.md](API.md) | 35 个公开端点、认证、调用方与请求响应边界 |
+| [SESSION_TO_CONTENT_PIPELINE.md](SESSION_TO_CONTENT_PIPELINE.md) | 从会话到内容交付的执行细节 |
 
 ## 当前目录
 
@@ -21,7 +23,7 @@ infra/     API/Web 镜像与 Nginx 配置
 tools/     Windows 开发、验证与重启脚本
 ```
 
-仓库根目录保留跨应用配置：`pyproject.toml`、`requirements.txt`、`alembic.ini`、`.env.example` 与 `docker-compose.yml`。
+仓库根目录保留跨应用配置：`pyproject.toml`、`uv.lock`、`alembic.ini`、`.env.example`、`compose.yaml` 与 `compose.dev.yaml`。
 
 ## 快速入口
 

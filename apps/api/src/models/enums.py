@@ -4,21 +4,11 @@ from enum import StrEnum
 class MessageRole(StrEnum):
     user = "user"
     assistant = "assistant"
-    system = "system"
-    tool = "tool"
 
 
 class MessageType(StrEnum):
     text = "text"
     markdown = "markdown"
-    json = "json"
-    tool_call = "tool_call"
-    tool_result = "tool_result"
-    reasoning = "reasoning"
-    artifact = "artifact"
-    citation = "citation"
-    image = "image"
-    file = "file"
 
 
 class RunStatus(StrEnum):
@@ -52,32 +42,6 @@ class ToolExecutionStatus(StrEnum):
     failed = "failed"
 
 
-class AgentType(StrEnum):
-    content = "content"
-    customer_service = "customer_service"
-    recruiting = "recruiting"
-    custom = "custom"
-
-
-class AgentStatus(StrEnum):
-    draft = "draft"
-    active = "active"
-    disabled = "disabled"
-    archived = "archived"
-
-
-class SessionStatus(StrEnum):
-    active = "active"
-    archived = "archived"
-    deleted = "deleted"
-
-
-class TitleSource(StrEnum):
-    default = "default"
-    manual = "manual"
-    llm_generated = "llm_generated"
-
-
 class MemoryKind(StrEnum):
     semantic = "semantic"
     episodic = "episodic"
@@ -86,17 +50,6 @@ class MemoryKind(StrEnum):
     profile = "profile"
     preference = "preference"
     goal = "goal"
-
-
-class MemoryScope(StrEnum):
-    short_term = "short_term"
-    long_term = "long_term"
-
-
-class MemoryOwnerType(StrEnum):
-    user = "user"
-    agent = "agent"
-    session = "session"
 
 
 class MemorySourceType(StrEnum):

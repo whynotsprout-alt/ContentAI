@@ -31,7 +31,7 @@ from memory.message_persister import MessagePersister, message_to_text
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import AgentExecution, AgentInvocation, ChatMessage, ChatSession, ExecutionOutbox
-from models.enums import MessageRole, MessageType, TitleSource
+from models.enums import MessageRole, MessageType
 from pydantic import BaseModel, Field
 from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
@@ -259,11 +259,10 @@ class AgentExecutionEngine:
         short_term = ShortTermMemory(repository)
         runtime = self.container.create_runtime(
             tool_permissions=tool_permissions,
-            user_id=invocation.created_by_user_id,
+            user_id=invocation.user_id,
             agent_id=chat.agent_id,
             session_id=chat.langgraph_thread_id,
             conversation_id=chat.id,
-            tenant_id=invocation.tenant_id,
             execution_id=execution.id,
         )
         long_term = LongTermMemory(repository)
@@ -271,15 +270,12 @@ class AgentExecutionEngine:
         short_summary, db_messages = short_term.load(
             db_session,
             session_id=chat.id,
-            tenant_id=chat.tenant_id,
-            user_id=chat.owner_user_id,
-            agent_id=chat.agent_id,
+            user_id=chat.user_id,
         )
         recalled = long_term.recall(
             chat.agent_id,
             user_message.content,
-            tenant_id=invocation.tenant_id,
-            user_id=invocation.created_by_user_id,
+            user_id=invocation.user_id,
             limit=8,
         )
         tool_names = list(runtime.tool_permissions)
@@ -291,8 +287,7 @@ class AgentExecutionEngine:
             long_term_memories=recalled,
             tool_names=tool_names,
             focus_message=user_message.content,
-            user_id=invocation.created_by_user_id,
-            tenant_id=invocation.tenant_id,
+            user_id=invocation.user_id,
             conversation_id=str(chat.id),
             run_id=execution.id,
             permissions=tool_names,
@@ -308,7 +303,9 @@ class AgentExecutionEngine:
         state = {
             "messages": agent_context.messages if graph_input is None else graph_input,
             "available_tool_names": list(runtime.tool_permissions),
-            "confirmation_tool_names": _confirmation_tool_names(agent_version),
+            "confirmation_tool_names": _confirmation_tool_names(
+                self.container.tool_registry.registrations
+            ),
             "task_status": "thinking",
         }
         tool_context = ToolRuntimeContext(
@@ -317,8 +314,7 @@ class AgentExecutionEngine:
             session_id=chat.langgraph_thread_id,
             agent_id=chat.agent_id,
             agent_version_id=agent_version.id,
-            tenant_id=invocation.tenant_id,
-            user_id=invocation.created_by_user_id,
+            user_id=invocation.user_id,
             allowed_hotspot_sources=allowed_hotspot_sources,
             topic_scoring_prompt=agent_version.topic_scoring_prompt,
             hotspot_filter_model=self.container.model_gateway.build_hotspot_filter_model(),
@@ -363,8 +359,7 @@ class AgentExecutionEngine:
                 ModelUsageCallback(
                     self.container.settings,
                     UsageContext(
-                        tenant_id=invocation.tenant_id,
-                        user_id=invocation.created_by_user_id,
+                        user_id=invocation.user_id,
                         session_id=chat.id,
                         execution_id=execution.id,
                         category="chat_agent",
@@ -444,11 +439,6 @@ class AgentExecutionEngine:
                 invocation_id=invocation.id,
                 execution_id=execution.id,
                 content=assistant_text,
-                metadata={
-                    "execution_id": execution.id,
-                    "invocation_id": invocation.id,
-                    "fallback": True,
-                },
                 event_writer=event_writer,
                 emit_delta=not streamed_assistant_text,
             )
@@ -503,12 +493,6 @@ class AgentExecutionEngine:
             ),
             "metaso_api_key": _secret_value(
                 getattr(search_settings, "metaso_api_key", ""),
-            ),
-            "metaso_search_api_key": _secret_value(
-                getattr(search_settings, "metaso_search_api_key", ""),
-            ),
-            "metaso_key": _secret_value(
-                getattr(search_settings, "metaso_key", ""),
             ),
             "anspire_api_key": _secret_value(
                 getattr(search_settings, "anspire_api_key", ""),
@@ -836,11 +820,12 @@ class AgentPostExecutionService:
                 if invocation is None:
                     raise RuntimeError("postprocess invocation is missing")
                 chat = session.get(ChatSession, invocation.session_id)
-                user_message = (
-                    session.get(ChatMessage, invocation.user_message_id)
-                    if invocation.user_message_id
-                    else None
-                )
+                user_message = session.exec(
+                    select(ChatMessage)
+                    .where(ChatMessage.invocation_id == invocation.id)
+                    .where(ChatMessage.role == MessageRole.user)
+                    .order_by(ChatMessage.created_at.asc())
+                ).first()
                 agent_profile = session.get(AgentProfile, invocation.agent_id)
                 if chat is None or user_message is None or agent_profile is None:
                     raise RuntimeError("postprocess conversation context is incomplete")
@@ -850,26 +835,17 @@ class AgentPostExecutionService:
                     .where(ChatMessage.role == MessageRole.assistant)
                     .order_by(ChatMessage.created_at.desc())
                 ).first()
-                tool_messages = list(
-                    session.exec(
-                        select(ChatMessage)
-                        .where(ChatMessage.invocation_id == invocation.id)
-                        .where(ChatMessage.role == MessageRole.tool)
-                        .order_by(ChatMessage.created_at.asc())
-                    ).all()
-                )
                 context = {
                     "execution_id": execution.id,
                     "agent_id": chat.agent_id,
-                    "tenant_id": invocation.tenant_id,
-                    "user_id": invocation.created_by_user_id,
+                    "user_id": invocation.user_id,
                     "session_id": chat.id,
                     "account_name": agent_profile.name,
                     "account_positioning": agent_profile.description,
                     "user_message": user_message.content,
-                    "user_message_id": user_message.id,
+                    "source_message_id": user_message.id,
                     "assistant_text": assistant_message.content if assistant_message else "",
-                    "tool_results": [item.content for item in tool_messages],
+                    "tool_results": [],
                     "trace_id": execution.trace_id,
                     "thread_id": chat.langgraph_thread_id,
                 }
@@ -889,7 +865,6 @@ class AgentPostExecutionService:
             _update_title_background(
                 session_id=context["session_id"],
                 execution_id=context["execution_id"],
-                tenant_id=context["tenant_id"],
                 user_id=context["user_id"],
                 user_message=context["user_message"],
                 settings=self.settings,
@@ -953,9 +928,8 @@ class AgentPostExecutionService:
 
 
 def _allowed_hotspot_sources(agent_version: AgentVersion) -> list[str]:
-    configured = agent_version.tools_config.get("hotspot_sources")
-    if isinstance(configured, list) and configured:
-        selected, unsupported = partition_hotspot_sources(configured)
+    if agent_version.hotspot_sources:
+        selected, unsupported = partition_hotspot_sources(agent_version.hotspot_sources)
         if unsupported:
             logger.warning(
                 "Ignoring unsupported hotspot sources for agent version %s: %s",
@@ -967,11 +941,16 @@ def _allowed_hotspot_sources(agent_version: AgentVersion) -> list[str]:
     return list(DEFAULT_HOTSPOT_SOURCES)
 
 
-def _confirmation_tool_names(agent_version: AgentVersion) -> list[str]:
-    configured = agent_version.tools_config.get("confirmation_required_tools")
-    if not isinstance(configured, list | tuple | set):
-        return []
-    return list(dict.fromkeys(str(name).strip() for name in configured if str(name).strip()))
+def _confirmation_tool_names(registrations: Any) -> list[str]:
+    return [
+        registration.name
+        for registration in registrations
+        if registration.confirmation_policy.value == "always"
+        or (
+            registration.confirmation_policy.value == "configured"
+            and registration.side_effecting
+        )
+    ]
 
 
 def _secret_value(value: Any) -> str:
@@ -988,13 +967,12 @@ def _extract_memory_background(
     *,
     execution_id: str,
     agent_id: str,
-    tenant_id: str,
     user_id: str,
     session_id: str,
     account_name: str,
     account_positioning: str,
     user_message: str,
-    user_message_id: str,
+    source_message_id: str,
     assistant_text: str,
     tool_results: list[str],
     thread_id: str | None = None,
@@ -1020,13 +998,12 @@ def _extract_memory_background(
             long_term = LongTermMemory(repository)
             extracted = long_term.remember_after_turn(
                 agent_id=agent_id,
-                tenant_id=tenant_id,
                 user_id=user_id,
                 session_id=session_id,
                 account_name=account_name,
                 account_positioning=account_positioning,
                 user_message=user_message,
-                source_message_id=user_message_id,
+                source_message_id=source_message_id,
                 source_execution_id=execution_id,
                 assistant_response=assistant_text,
                 tool_results=tool_results,
@@ -1035,7 +1012,6 @@ def _extract_memory_background(
                     ModelUsageCallback(
                         settings,
                         UsageContext(
-                            tenant_id=tenant_id,
                             user_id=user_id,
                             session_id=session_id,
                             execution_id=execution_id,
@@ -1057,7 +1033,6 @@ def _extract_memory_background(
                     "execution_id": execution_id,
                     "count": len(extracted),
                     "scope": {
-                        "tenant_id": tenant_id,
                         "user_id": user_id,
                         "agent_id": agent_id,
                         "session_id": session_id,
@@ -1103,9 +1078,7 @@ def _refresh_short_summary_background(*, session_id: str, settings: Any) -> None
         ShortTermMemory(repository).refresh_summary(
             session,
             session_id=session_id,
-            tenant_id=chat.tenant_id,
-            user_id=chat.owner_user_id,
-            agent_id=chat.agent_id,
+            user_id=chat.user_id,
         )
 
 
@@ -1113,7 +1086,6 @@ def _update_title_background(
     *,
     session_id: str,
     execution_id: str,
-    tenant_id: str,
     user_id: str,
     user_message: str,
     settings: Any,
@@ -1132,7 +1104,6 @@ def _update_title_background(
                 ModelUsageCallback(
                     settings,
                     UsageContext(
-                        tenant_id=tenant_id,
                         user_id=user_id,
                         session_id=session_id,
                         execution_id=execution_id,
@@ -1141,7 +1112,6 @@ def _update_title_background(
                 )
             ],
         )
-        chat.title_source = TitleSource.llm_generated
         chat.touch_updated_at()
         session.add(chat)
         session.commit()

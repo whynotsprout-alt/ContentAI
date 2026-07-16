@@ -1,4 +1,8 @@
+from pathlib import Path
+
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
 TEST_ENV_VARS = {
@@ -13,9 +17,8 @@ def pytest_configure() -> None:
     import os
 
     from alembic import command
-    from alembic.config import Config
+    from core.alembic import build_alembic_config
     from core.config import set_settings_env_file
-    from core.paths import PROJECT_ROOT
 
     test_env_file = PROJECT_ROOT / ".pytest_cache" / "contentai-test.env"
     test_env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +29,7 @@ def pytest_configure() -> None:
     os.environ.update(TEST_ENV_VARS)
     set_settings_env_file(test_env_file)
     _ensure_test_database_exists()
-    alembic_config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    alembic_config = build_alembic_config()
     command.upgrade(alembic_config, "head")
     from agent.runtime.checkpoint import RuntimePersistence
     from core.config import get_settings
@@ -85,7 +88,6 @@ def reset_database() -> None:
                     appuser,
                     executionoutbox,
                     executionresumerequest,
-                    agentevent,
                     toolexecution,
                     agentexecutionattempt,
                     researchpackage,
@@ -104,12 +106,12 @@ def reset_database() -> None:
             text(
                 """
                 INSERT INTO appuser (
-                    id, tenant_id, email, email_normalized, password_hash,
+                    id, email, email_normalized, password_hash,
                     role, status, email_verified_at, password_changed_at,
                     failed_login_count, created_at, updated_at
                 )
                 VALUES (
-                    'local-user', 'local', 'local@test.invalid', 'local@test.invalid',
+                    'local-user', 'local@test.invalid', 'local@test.invalid',
                     'test-only-password-hash', 'user', 'active', now(), now(), 0, now(), now()
                 )
                 """
@@ -119,29 +121,19 @@ def reset_database() -> None:
             text(
                 """
                 INSERT INTO agentprofile (
-                    id, tenant_id, owner_user_id, name, description, agent_type, status,
-                    created_by_user_id, updated_by_user_id, created_at, updated_at
+                    id, user_id, name, description, created_at, updated_at
                 )
                 VALUES (
                     'default-agent',
-                    'local',
                     'local-user',
                     'Default Agent',
                     'Default account used by tests.',
-                    'content',
-                    'active',
-                    'local-user',
-                    'local-user',
                     now(),
                     now()
                 )
                 ON CONFLICT (id) DO UPDATE
-                SET tenant_id = EXCLUDED.tenant_id,
-                    owner_user_id = EXCLUDED.owner_user_id,
-                    name = EXCLUDED.name,
+                SET name = EXCLUDED.name,
                     description = EXCLUDED.description,
-                    agent_type = EXCLUDED.agent_type,
-                    status = EXCLUDED.status,
                     updated_at = EXCLUDED.updated_at
                 """
             )
@@ -150,9 +142,8 @@ def reset_database() -> None:
             text(
                 """
                 INSERT INTO agentversion (
-                    id, agent_id, version, topic_scoring_prompt, content_prompt, graph_name,
-                    tools_config,
-                    memory_config, created_by_user_id, created_at
+                    id, agent_id, version, topic_scoring_prompt, content_prompt,
+                    hotspot_sources, created_at
                 )
                 VALUES (
                     'default-agent-v1',
@@ -160,16 +151,13 @@ def reset_database() -> None:
                     1,
                     'Score test topics from 0 to 100.',
                     'Create concise test content.',
-                    'default',
-                    '{"hotspot_sources":["douyin","weibo"]}'::jsonb,
-                    '{}'::jsonb,
-                    'local-user',
+                    '["douyin","weibo"]'::jsonb,
                     now()
                 )
                 ON CONFLICT (id) DO UPDATE
                 SET topic_scoring_prompt = EXCLUDED.topic_scoring_prompt,
                     content_prompt = EXCLUDED.content_prompt,
-                    tools_config = EXCLUDED.tools_config
+                    hotspot_sources = EXCLUDED.hotspot_sources
                 """
             )
         )

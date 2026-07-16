@@ -19,7 +19,6 @@ AuthContextDep = Annotated[AuthContext, Depends(authenticate_request)]
 class RequestContext:
     request_id: str | None
     user_id: str
-    tenant_id: str
     conversation_id: str | None
 
 
@@ -30,7 +29,6 @@ def get_request_session(request: Request) -> Iterator[Session]:
 
 def get_current_user(request: Request, auth: AuthContextDep) -> AuthContext:
     request.state.user_id = auth.user_id
-    request.state.tenant_id = auth.tenant_id
     request.state.conversation_id = _conversation_id_from_path(request)
     return auth
 
@@ -53,7 +51,6 @@ def get_request_context(request: Request, auth: CurrentUserDep) -> RequestContex
     return RequestContext(
         request_id=getattr(request.state, "request_id", None),
         user_id=auth.user_id,
-        tenant_id=auth.tenant_id,
         conversation_id=getattr(request.state, "conversation_id", None),
     )
 

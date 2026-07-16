@@ -12,12 +12,10 @@ class AppUser(SQLModel, table=True):
     __tablename__ = "appuser"
     __table_args__ = (
         UniqueConstraint("email_normalized", name="ux_appuser_email_normalized"),
-        UniqueConstraint("tenant_id", name="ux_appuser_tenant_id"),
         Index("ix_appuser_role_status", "role", "status"),
     )
 
     id: str = Field(default_factory=lambda: new_id("usr"), primary_key=True)
-    tenant_id: str = Field(default_factory=lambda: new_id("ten"), index=True)
     email: str
     email_normalized: str = Field(index=True)
     password_hash: str
@@ -77,7 +75,6 @@ class ModelUsage(SQLModel, table=True):
 
     id: str = Field(default_factory=lambda: new_id("use"), primary_key=True)
     call_id: str = Field(index=True)
-    tenant_id: str = Field(index=True)
     user_id: str = Field(index=True, foreign_key="appuser.id")
     session_id: str | None = Field(default=None, index=True)
     execution_id: str | None = Field(default=None, index=True)

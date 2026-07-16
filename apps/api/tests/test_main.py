@@ -1,8 +1,8 @@
 import pytest
+from api.app import _normalize_origins, app, create_app
 from client import ApiClient as TestClient
 from core.config import Settings
 from db.session import get_engine
-from main import _normalize_origins, app, create_app
 from models.schemas import AgentVersionCreate
 from pydantic import ValidationError
 from sqlalchemy import inspect
@@ -27,8 +27,8 @@ def test_ready_endpoint_reflects_lifespan_state():
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "database": True,
-        "alembic_version": "202607150002",
-        "alembic_head": "202607150002",
+        "alembic_version": "202607150001",
+        "alembic_head": "202607150001",
         "database_revision_current": True,
         "checkpoint": True,
         "redis": True,
@@ -95,17 +95,17 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
         def start(self):
             pass
 
-    monkeypatch.setattr("main.AgentService", DummyAgentService)
+    monkeypatch.setattr("api.app.AgentService", DummyAgentService)
     monkeypatch.setattr(
-        "main.init_database",
+        "api.app.init_database",
         lambda settings: initialized_settings.append(settings),
     )
-    monkeypatch.setattr("main.close_database", lambda: None)
+    monkeypatch.setattr("api.app.close_database", lambda: None)
 
     def fail_get_settings():
         raise AssertionError("lifespan should use app.state.settings")
 
-    monkeypatch.setattr("main.get_settings", fail_get_settings)
+    monkeypatch.setattr("api.app.get_settings", fail_get_settings)
 
     with TestClient(created_app) as client:
         response = client.get("/api/ready")
@@ -213,18 +213,18 @@ def test_development_frontend_origins_validate_final_list():
     assert "http://127.0.0.1:5173" in settings.server.frontend_origins
 
 
-def test_agent_version_tools_config_validates_hotspot_sources():
+def test_agent_version_validates_hotspot_sources():
     payload = AgentVersionCreate(
         content_prompt="Create concise content.",
-        tools_config={"hotspot_sources": ["Weibo", "weibo", "douyin"]},
+        hotspot_sources=["Weibo", "weibo", "douyin"],
     )
 
-    assert payload.tools_config["hotspot_sources"] == ["weibo", "douyin"]
+    assert payload.hotspot_sources == ["weibo", "douyin"]
 
     with pytest.raises(ValidationError):
         AgentVersionCreate(
             content_prompt="Create concise content.",
-            tools_config={"hotspot_sources": ["weibo", "cb"]},
+            hotspot_sources=["weibo", "cb"],
         )
 
 
@@ -234,26 +234,22 @@ def test_chat_schema_uses_conversation_driven_contract():
 
     assert "agentrun" not in table_names
     assert "agentrunevent" not in table_names
-    assert {"agentinvocation", "agentexecution", "agentevent", "toolexecution"}.issubset(
+    assert {"agentinvocation", "agentexecution", "toolexecution"}.issubset(
         table_names
     )
+    assert "agentevent" not in table_names
 
     session_columns = {column["name"] for column in inspector.get_columns("chatsession")}
     message_columns = {column["name"] for column in inspector.get_columns("chatmessage")}
     execution_columns = {column["name"] for column in inspector.get_columns("agentexecution")}
 
-    assert {"agent_id", "langgraph_thread_id", "status", "title_source", "pinned_at"}.issubset(
+    assert {"agent_id", "agent_version_id", "langgraph_thread_id", "user_id"}.issubset(
         session_columns
     )
-    assert {
-        "invocation_id",
-        "parent_message_id",
-        "payload",
-        "model_name",
-        "input_tokens",
-        "output_tokens",
-        "latency_ms",
-    }.issubset(message_columns)
+    assert {"invocation_id", "session_id", "role", "message_type", "content"}.issubset(
+        message_columns
+    )
+    assert not {"parent_message_id", "payload", "model_name", "input_tokens"} & message_columns
     assert {
         "invocation_id",
         "trace_id",

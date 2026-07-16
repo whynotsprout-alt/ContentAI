@@ -22,7 +22,6 @@ rmSync(resolve(outputDir, 'verify-web-failure.png'), { force: true });
 const fixedNow = '2026-07-15T09:52:00.000Z';
 const authUser = {
   id: 'admin-1',
-  tenant_id: 'tenant-1',
   email: 'admin@contentai.test',
   role: 'admin',
   status: 'active',
@@ -38,21 +37,14 @@ const agentVersion = {
   version: 3,
   topic_scoring_prompt: '从受众相关性、事实强度、传播潜力、差异化角度和内容风险五个维度评分。',
   content_prompt: '先给结论，再解释原因；区分事实、判断和不确定信息。',
-  graph_name: 'default',
-  tools_config: { hotspot_sources: ['36kr', 'cls', 'yicai', 'bilibili', 'xiaohongshu'] },
-  memory_config: {}
+  hotspot_sources: ['36kr', 'cls', 'yicai', 'bilibili', 'xiaohongshu']
 };
 
 const agent = {
   id: 'agent-finance',
-  tenant_id: 'tenant-1',
-  owner_user_id: authUser.id,
   name: '高百烈说财经',
   description: '把商业新闻、品牌动作和消费现象转化为清晰判断。',
-  agent_type: 'content',
-  status: 'active',
-  current_version: agentVersion,
-  versions: [agentVersion]
+  current_version: agentVersion
 };
 
 const workbenchSessionSummary = {
@@ -112,7 +104,6 @@ const workbenchSession = {
 
 const targetUser = {
   id: 'user-creator',
-  tenant_id: 'tenant-1',
   email: 'creator@contentai.test',
   role: 'user',
   status: 'active',

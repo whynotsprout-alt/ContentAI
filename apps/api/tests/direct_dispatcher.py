@@ -21,18 +21,17 @@ class _DirectPostExecutionDispatcher:
 
 
 class DirectDispatcher:
-    """Synchronous execution dispatcher intended only for dependency-injected tests."""
+    """Synchronous dispatcher used only by the test application."""
 
     def __init__(self, service: AgentService) -> None:
         self.service = service
         self.service.runner.post_service.dispatcher = _DirectPostExecutionDispatcher(service)
 
     def dispatch(self, execution_id: str, request_id: str | None = None) -> None:
-        worker_id = f"direct:{uuid4()}"
         claimed = claim_execution(
             self.service,
             execution_id,
-            worker_id,
+            f"direct:{uuid4()}",
             create_attempt=False,
             use_lease=False,
         )
@@ -49,6 +48,3 @@ class DirectDispatcher:
                 continue_from_checkpoint=claimed.continue_from_checkpoint,
                 request_id=request_id,
             )
-
-
-__all__ = ["DirectDispatcher"]

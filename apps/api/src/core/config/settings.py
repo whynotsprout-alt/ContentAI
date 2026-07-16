@@ -14,13 +14,12 @@ from core.config.logging import LoggingSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
 from core.config.server import ServerSettings
-from core.paths import PROJECT_ROOT
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 LOCAL_FRONTEND_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 POSTGRES_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+psycopg2"}
-_settings_env_file = PROJECT_ROOT / ".env"
+_settings_env_file = Path(".env")
 
 
 class Env(StrEnum):
@@ -31,14 +30,13 @@ class Env(StrEnum):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=".env",
         env_prefix="CONTENTAI_",
         env_nested_delimiter="__",
         extra="ignore",
     )
 
     def __init__(self, **values) -> None:
-        values.setdefault("_env_file", _settings_env_file)
         super().__init__(**values)
 
     env: Env = Env.development
@@ -60,6 +58,7 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        _ = settings_cls
         return init_settings, env_settings, dotenv_settings, file_secret_settings
 
     @model_validator(mode="after")
@@ -147,10 +146,6 @@ class Settings(BaseSettings):
 
         if not isinstance(logging.getLevelName(self.logging.level.upper()), int):
             raise ValueError("CONTENTAI_LOGGING__LEVEL must be a standard logging level.")
-        if self.logging.max_bytes < 1:
-            raise ValueError("CONTENTAI_LOGGING__MAX_BYTES must be at least 1.")
-        if self.logging.backup_count < 1:
-            raise ValueError("CONTENTAI_LOGGING__BACKUP_COUNT must be at least 1.")
 
     def _validate_agent(self) -> None:
         if self.agent.context_max_messages < 1:

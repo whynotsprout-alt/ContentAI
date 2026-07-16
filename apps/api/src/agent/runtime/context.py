@@ -15,7 +15,6 @@ class SharedRuntimeContext(TypedDict):
     conversation_id: str
     user_id: str
     agent_id: str
-    tenant_id: str
     permissions: list[str]
     api_keys: dict[str, str]
 
@@ -69,7 +68,6 @@ class ToolRuntimeContext:
     conversation_id: str
     session_id: str
     agent_id: str
-    tenant_id: str
     user_id: str
     agent_version_id: str = ""
     permissions: list[str] = field(default_factory=lambda: ["*"])
@@ -112,7 +110,6 @@ class ToolRuntimeContext:
             "conversation_id": self.conversation_id,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
-            "tenant_id": self.tenant_id,
             "permissions": list(self.permissions),
             "api_keys": dict(self.api_keys),
         }

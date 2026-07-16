@@ -24,7 +24,6 @@ from models.schemas import (
     ChatUserMessageResponse,
     CreateSessionRequest,
     CreateSessionResponse,
-    ExecutionResponse,
     MessageListRequest,
     StreamEventV3,
     UserReplyRequest,
@@ -229,7 +228,7 @@ def replay_run_events(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     after_sequence: int | None = Query(default=None, ge=0),
 ) -> StreamingResponse:
-    execution = service.get_execution(session, execution_id, auth)
+    execution = service.get_execution_status(session, execution_id, auth)
     cursor = (
         after_sequence
         if after_sequence is not None
@@ -249,18 +248,6 @@ def replay_run_events(
     )
 
 
-@router.get("/runs/{execution_id}", response_model=ExecutionResponse)
-@translate_service_errors
-def get_run(
-    execution_id: str,
-    session: SessionDep,
-    auth: CurrentUserDep,
-    request_context: RequestContextDep,
-    service: ConversationServiceDep,
-) -> ExecutionResponse:
-    return service.get_execution(session, execution_id, auth)
-
-
 @router.get("/runs/{execution_id}/status", response_model=ChatExecutionResponse)
 @translate_service_errors
 def get_run_status(
@@ -273,7 +260,7 @@ def get_run_status(
     return service.get_execution_status(session, execution_id, auth)
 
 
-@router.post("/runs/{execution_id}/cancel", response_model=ExecutionResponse)
+@router.post("/runs/{execution_id}/cancel", response_model=ChatExecutionResponse)
 @translate_service_errors
 def cancel_run(
     execution_id: str,
@@ -281,11 +268,11 @@ def cancel_run(
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
-) -> ExecutionResponse:
+) -> ChatExecutionResponse:
     return service.cancel_execution(session, execution_id, auth)
 
 
-@router.post("/runs/{execution_id}/resume", response_model=ExecutionResponse)
+@router.post("/runs/{execution_id}/resume", response_model=ChatExecutionResponse)
 @translate_service_errors
 def resume_run(
     execution_id: str,
@@ -295,7 +282,7 @@ def resume_run(
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
-) -> ExecutionResponse:
+) -> ChatExecutionResponse:
     _enforce_llm_rate_limit(request, auth)
     return service.resume_execution(
         session,

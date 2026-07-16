@@ -15,22 +15,22 @@ from langchain_core.tools import BaseTool
 
 
 class AgentModel(Protocol):
-    def invoke(self, input: Any) -> Any: ...
-    def stream(self, input: Any) -> Any: ...
-    async def ainvoke(self, input: Any, **kwargs: Any) -> Any: ...
+    def invoke(self, _input: Any) -> Any: ...
+    def stream(self, _input: Any) -> Any: ...
+    async def ainvoke(self, _input: Any, **kwargs: Any) -> Any: ...
 
 
 class AgentGraph(Protocol):
     def stream(
         self,
-        input: Any,
+        _input: Any,
         config: Mapping[str, Any] | None = None,
         stream_mode: Sequence[str] | None = None,
     ) -> Any: ...
 
-    async def ainvoke(self, input: Any, **kwargs: Any) -> Any: ...
+    async def ainvoke(self, _input: Any, **kwargs: Any) -> Any: ...
 
-    def invoke(self, input: Any, **kwargs: Any) -> Any: ...
+    def invoke(self, _input: Any, **kwargs: Any) -> Any: ...
 
 
 class Checkpointer(Protocol):
@@ -145,7 +145,6 @@ class RuntimeContainer:
         agent_id: str,
         session_id: str,
         conversation_id: str | None = None,
-        tenant_id: str | None = None,
         execution_id: str | None = None,
     ) -> AgentRuntime:
         tools = self.get_tools(tool_permissions)
@@ -157,8 +156,6 @@ class RuntimeContainer:
         }
         if conversation_id is not None:
             configurable["conversation_id"] = conversation_id
-        if tenant_id is not None:
-            configurable["tenant_id"] = tenant_id
         if execution_id is not None:
             configurable["execution_id"] = execution_id
         return AgentRuntime(

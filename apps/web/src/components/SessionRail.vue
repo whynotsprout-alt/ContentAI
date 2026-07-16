@@ -45,7 +45,7 @@ function relativeDate(value: string) {
 function statusLabel(value: string | null) {
   if (value === 'pending') return '排队中';
   if (value === 'running') return '生成中';
-  if (value === 'waiting_input' || value === 'interrupted') return '待确认';
+  if (value === 'waiting_input') return '待确认';
   if (value === 'failed') return '失败';
   if (value === 'cancelled') return '已停止';
   return '';

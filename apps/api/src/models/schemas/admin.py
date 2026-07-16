@@ -8,8 +8,7 @@ from pydantic import Field
 
 
 class AdminUserUpdate(InputSchemaBase):
-    status: Literal["active", "disabled"] | None = None
-    role: Literal["user", "admin"] | None = None
+    role: Literal["user", "admin"]
 
 
 class AdminSessionSummary(SchemaBase):
@@ -18,7 +17,6 @@ class AdminSessionSummary(SchemaBase):
     user_email: str
     agent_id: str
     title: str
-    status: str
     message_count: int = 0
     latest_execution_status: str | None = None
     updated_at: datetime

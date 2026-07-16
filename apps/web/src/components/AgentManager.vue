@@ -117,8 +117,7 @@ function startNewAgent() {
 }
 
 function selectedSources(agent: AgentProfileDetail) {
-  const raw = agent.current_version?.tools_config?.hotspot_sources;
-  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : [];
+  return agent.current_version?.hotspot_sources ?? [];
 }
 
 async function edit(agentId: string) {
@@ -157,9 +156,9 @@ function toggleSource(sourceId: string) {
 
 function payload(): AgentProfilePayload {
   return {
-    name: form.value.name.trim(), description: form.value.positioning.trim(), agent_type: 'content', status: 'active',
-    topic_scoring_prompt: form.value.scoring.trim(), content_prompt: form.value.content.trim(), graph_name: 'default',
-    tools_config: { hotspot_sources: form.value.sources }, memory_config: {}
+    name: form.value.name.trim(), description: form.value.positioning.trim(),
+    topic_scoring_prompt: form.value.scoring.trim(), content_prompt: form.value.content.trim(),
+    hotspot_sources: form.value.sources
   };
 }
 
@@ -183,16 +182,13 @@ async function save() {
     if (mode.value === 'create') {
       agent = await store.createAgent(body);
     } else {
-      const current = await api.agent(editingId.value);
       await store.updateAgent(editingId.value, {
-        name: body.name, description: body.description, agent_type: current.agent_type, status: current.status
+        name: body.name, description: body.description
       });
       agent = await store.createAgentVersion(editingId.value, {
         topic_scoring_prompt: body.topic_scoring_prompt,
         content_prompt: body.content_prompt,
-        graph_name: current.current_version?.graph_name ?? 'default',
-        tools_config: { ...(current.current_version?.tools_config ?? {}), hotspot_sources: body.tools_config.hotspot_sources },
-        memory_config: { ...(current.current_version?.memory_config ?? {}) }
+        hotspot_sources: body.hotspot_sources
       });
     }
     mode.value = 'edit';

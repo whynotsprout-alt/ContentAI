@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
 from db.session import get_engine
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
-from main import create_app
 from models.chat import ChatMessage, ChatSession
 from models.enums import MessageRole
 from models.user import AppUser, ModelUsage
@@ -15,7 +15,7 @@ from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
 
 
-def local_auth_app():
+def auth_app():
     return create_app(
         Settings(
             env="test",
@@ -24,6 +24,7 @@ def local_auth_app():
             },
             auth={
                 "mail_backend": "console",
+                "require_email_verification": True,
                 "bootstrap_admin_emails": ["admin@example.com"],
                 "public_base_url": "http://testserver",
             },
@@ -48,7 +49,7 @@ def _login(client: TestClient, email: str, password: str):
 
 
 def test_local_registration_verification_login_and_password_reset():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         _register_and_verify(client, app, "person@example.com", "correct horse battery")
         login_headers = _login(client, "person@example.com", "correct horse battery")
@@ -93,7 +94,7 @@ def test_local_registration_can_skip_email_verification_for_development():
 
 
 def test_admin_user_listing_usage_and_disable():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         _register_and_verify(client, app, "member@example.com", "member password 123")
         _register_and_verify(client, app, "admin@example.com", "admin password 123")
@@ -106,7 +107,6 @@ def test_admin_user_listing_usage_and_disable():
             session.add(
                 ModelUsage(
                     call_id="usage-test-call",
-                    tenant_id=member.tenant_id,
                     user_id=member.id,
                     session_id="session-test",
                     execution_id="execution-test",
@@ -136,7 +136,7 @@ def test_admin_user_listing_usage_and_disable():
 
 
 def test_disabled_pending_user_cannot_reactivate_with_old_verification_link():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         registered = client.post(
             "/api/auth/register",
@@ -172,7 +172,7 @@ def test_disabled_pending_user_cannot_reactivate_with_old_verification_link():
 
 
 def test_admin_can_view_session_messages_after_audit_is_recorded():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         _register_and_verify(client, app, "member@example.com", "member password 123")
         _register_and_verify(client, app, "admin@example.com", "admin password 123")
@@ -185,8 +185,7 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
             chat = ChatSession(
                 agent_id="default-agent",
                 agent_version_id="default-agent-v1",
-                tenant_id=member.tenant_id,
-                owner_user_id=member.id,
+                user_id=member.id,
                 title="Session for audit",
             )
             session.add(chat)
@@ -201,8 +200,8 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
             session.add(
                 ChatMessage(
                     session_id=chat.id,
-                    role=MessageRole.tool,
-                    content='{"internal": "tool result"}',
+                    role=MessageRole.assistant,
+                    content="This is the visible assistant response.",
                 )
             )
             session.commit()
@@ -212,7 +211,7 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
 
         assert response.status_code == 200
         messages = response.json()["messages"]
-        assert len(messages) == 1
+        assert len(messages) == 2
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Please keep this message visible to administrators."
         assert "executions" not in response.json()
@@ -221,7 +220,7 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
 
 
 def test_non_admin_cannot_access_admin_api_and_csrf_is_required():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         _register_and_verify(client, app, "member@example.com", "member password 123")
         _login(client, "member@example.com", "member password 123")
@@ -230,7 +229,7 @@ def test_non_admin_cannot_access_admin_api_and_csrf_is_required():
 
 
 def test_local_users_cannot_access_each_others_content_accounts():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app) as client:
         _register_and_verify(client, app, "first@example.com", "first password 123")
         first_headers = _login(client, "first@example.com", "first password 123")
@@ -240,12 +239,9 @@ def test_local_users_cannot_access_each_others_content_accounts():
             json={
                 "name": "Private content account",
                 "description": "Only the first user can access this.",
-                "agent_type": "content",
-                "status": "active",
+                "topic_scoring_prompt": "Score private topics.",
                 "content_prompt": "Create private test content.",
-                "graph_name": "default",
-                "tools_config": {"hotspot_sources": ["weibo"]},
-                "memory_config": {},
+                "hotspot_sources": ["weibo"],
             },
         )
         assert created.status_code == 201
@@ -258,7 +254,7 @@ def test_local_users_cannot_access_each_others_content_accounts():
 
 
 def test_model_usage_callback_is_exact_and_idempotent():
-    app = local_auth_app()
+    app = auth_app()
     with TestClient(app):
         with Session(get_engine(app.state.settings)) as session:
             user = AppUser(
@@ -271,7 +267,6 @@ def test_model_usage_callback_is_exact_and_idempotent():
             session.commit()
             session.refresh(user)
             context = UsageContext(
-                tenant_id=user.tenant_id,
                 user_id=user.id,
                 session_id="session-usage",
                 execution_id="execution-usage",

@@ -23,8 +23,8 @@ $Port = if ($DotEnv.ContainsKey("CONTENTAI_API_PORT")) { $DotEnv["CONTENTAI_API_
 $Reload = if ($DotEnv.ContainsKey("CONTENTAI_API_RELOAD")) { $DotEnv["CONTENTAI_API_RELOAD"] } else { "false" }
 if ($Reload -eq "true") {
   $ApiSrc = Join-Path $Root "apps/api/src"
-  & $VenvPython -m uvicorn main:app --host 127.0.0.1 --port $Port --reload --reload-dir $ApiSrc
+  & $VenvPython -m uvicorn api.app:app --host 127.0.0.1 --port $Port --reload --reload-dir $ApiSrc
 } else {
-  & $VenvPython -m uvicorn main:app --host 127.0.0.1 --port $Port
+  & $VenvPython -m uvicorn api.app:app --host 127.0.0.1 --port $Port
 }
 

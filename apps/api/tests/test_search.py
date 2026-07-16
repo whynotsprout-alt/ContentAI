@@ -55,8 +55,6 @@ def fake_settings(*, metaso: str = "metaso-key", anspire: str = "anspire-key") -
         env=Env.test,
         search=SimpleNamespace(
             metaso_api_key=SecretStr(metaso),
-            metaso_search_api_key=SecretStr(""),
-            metaso_key=SecretStr(""),
             anspire_api_key=SecretStr(anspire),
             search_cache_ttl_seconds=300,
         ),

@@ -68,7 +68,7 @@ def _invoke_model_with_stream_retry(
                     "status": "retrying",
                     "attempt": attempt,
                     "max_attempts": MODEL_STREAM_MAX_ATTEMPTS,
-                    "reason": "model_stream_interrupted",
+                    "reason": "model_stream_disconnected",
                 },
                 config=config,
             )
@@ -263,7 +263,6 @@ def _runtime_context(config: RunnableConfig | None) -> dict[str, Any]:
     if not isinstance(configurable, dict):
         return {}
     keys = (
-        "tenant_id",
         "user_id",
         "agent_id",
         "session_id",

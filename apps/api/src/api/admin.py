@@ -127,7 +127,6 @@ def update_user(
             session,
             actor_user_id=auth.user_id,
             user_id=user_id,
-            status=payload.status,
             role=payload.role,
             request_id=request_context.request_id or "",
         )

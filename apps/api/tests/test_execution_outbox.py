@@ -8,7 +8,6 @@ from agent.runtime.execution_services import AgentPostExecutionService
 from core.config import Settings, get_settings
 from db.session import get_engine
 from memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
-from models.agent import AgentVersion
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -40,14 +39,12 @@ def _seed_execution(
     worker_id: str | None = None,
 ) -> None:
     user_id = f"user-{execution_id}"
-    tenant_id = f"tenant-{execution_id}"
     session_id = f"session-{execution_id}"
     invocation_id = f"invocation-{execution_id}"
     with Session(get_engine(settings)) as session:
         session.add(
             AppUser(
                 id=user_id,
-                tenant_id=tenant_id,
                 email=f"{execution_id}@example.test",
                 email_normalized=f"{execution_id}@example.test",
                 password_hash="test-hash",
@@ -55,13 +52,13 @@ def _seed_execution(
                 email_verified_at=utcnow(),
             )
         )
+        session.flush()
         session.add(
             ChatSession(
                 id=session_id,
                 agent_id="default-agent",
                 agent_version_id="default-agent-v1",
-                tenant_id=tenant_id,
-                owner_user_id=user_id,
+                user_id=user_id,
             )
         )
         session.flush()
@@ -70,8 +67,7 @@ def _seed_execution(
                 id=invocation_id,
                 session_id=session_id,
                 agent_id="default-agent",
-                tenant_id=tenant_id,
-                created_by_user_id=user_id,
+                user_id=user_id,
             )
         )
         session.flush()
@@ -278,27 +274,6 @@ def test_worker_ownership_fence_rejects_stale_lease_holder() -> None:
                 execution,
                 expected_worker_id="worker-old",
             )
-
-
-def test_worker_preserves_explicit_empty_tool_permissions() -> None:
-    settings = _settings()
-    execution_id = "execution-no-tools"
-    _seed_execution(settings, execution_id=execution_id)
-    with Session(get_engine(settings)) as session:
-        version = session.get(AgentVersion, "default-agent-v1")
-        assert version is not None
-        version.tools_config = {**version.tools_config, "allowed_tools": []}
-        session.add(version)
-        session.commit()
-
-    claimed = claim_execution(
-        SimpleNamespace(settings=settings),
-        execution_id,
-        "worker-no-tools",
-    )
-
-    assert claimed is not None
-    assert claimed.auth.tool_permissions == ()
 
 
 def test_dispatcher_reclaims_expired_publishing_row(

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from models.enums import MemoryOwnerType, MemorySourceType
+from models.enums import MemorySourceType
 from models.schemas.base import SchemaBase
 from pydantic import Field
 
@@ -9,7 +9,6 @@ from pydantic import Field
 class MemoryItem(SchemaBase):
     key: str
     kind: str = "semantic"
-    owner_type: MemoryOwnerType
     content: str
     payload: dict[str, Any] = Field(default_factory=dict)
     confidence: float = 1.0

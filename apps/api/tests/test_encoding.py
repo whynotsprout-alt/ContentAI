@@ -1,4 +1,6 @@
-from core.paths import PROJECT_ROOT
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 MOJIBAKE_TOKENS = (
     "鎵",

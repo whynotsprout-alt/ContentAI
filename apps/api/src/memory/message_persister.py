@@ -36,7 +36,6 @@ class MessagePersister:
                     invocation_id=invocation_id,
                     execution_id=execution_id,
                     content=content,
-                    metadata={"execution_id": execution_id, "invocation_id": invocation_id},
                     event_writer=event_writer,
                     emit_delta=not streamed_assistant_text,
                     commit=False,
@@ -57,7 +56,6 @@ class MessagePersister:
         invocation_id: str,
         execution_id: str,
         content: str,
-        metadata: dict[str, Any],
         event_writer: Any,
         emit_delta: bool = True,
         commit: bool = True,
@@ -66,23 +64,14 @@ class MessagePersister:
         response = validate_assistant_response(
             content=content,
             message_type="markdown",
-            metadata={
-                key: value
-                for key, value in metadata.items()
-                if isinstance(value, str | int | float | bool) or value is None
-            },
+            metadata={},
         )
-        message_metadata = metadata.copy()
-        structured_response = response.model_dump()
-        message_metadata["structured_response"] = structured_response
         db_session.add(
             ChatMessage(
                 session_id=session_id,
                 invocation_id=invocation_id,
                 role=MessageRole.assistant,
                 message_type=MessageType.markdown,
-                message_metadata=message_metadata,
-                payload={"structured_response": structured_response},
                 content=response.content,
             )
         )

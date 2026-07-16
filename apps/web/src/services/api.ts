@@ -3,14 +3,9 @@ export const API_BASE = configuredApiBase.trim().replace(/\/$/, '');
 
 export interface AgentProfile {
   id: string;
-  tenant_id: string;
-  owner_user_id: string;
   name: string;
   description: string;
-  agent_type: string;
-  status: string;
   current_version: AgentVersion | null;
-  versions?: AgentVersion[];
 }
 
 export interface AgentVersion {
@@ -19,45 +14,34 @@ export interface AgentVersion {
   version: number;
   topic_scoring_prompt: string;
   content_prompt: string;
-  graph_name: string;
-  tools_config: Record<string, unknown>;
-  memory_config: Record<string, unknown>;
+  hotspot_sources: string[];
 }
 
 export interface AgentProfilePayload {
   name: string;
   description: string;
-  agent_type?: string;
-  status?: string;
   topic_scoring_prompt: string;
   content_prompt: string;
-  graph_name?: string;
-  tools_config: Record<string, unknown>;
-  memory_config?: Record<string, unknown>;
+  hotspot_sources: string[];
 }
 
 export interface AgentProfileUpdatePayload {
   name?: string;
   description?: string;
-  agent_type?: string;
-  status?: string;
 }
 
 export interface AgentVersionPayload {
   topic_scoring_prompt: string;
   content_prompt: string;
-  graph_name?: string;
-  tools_config: Record<string, unknown>;
-  memory_config?: Record<string, unknown>;
+  hotspot_sources: string[];
 }
 
-export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
-export type MessageType = 'text' | 'markdown' | 'json';
+export type MessageRole = 'user' | 'assistant';
+export type MessageType = 'text' | 'markdown';
 export type ExecutionStatus =
   | 'pending'
   | 'running'
   | 'waiting_input'
-  | 'interrupted'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -117,7 +101,6 @@ export interface SendMessageRequest {
 export interface ChatExecutionInfo {
   id: string;
   session_id: string;
-  user_message_id?: string | null;
   status: ExecutionStatus;
   error?: { code: string; message: string; retryable: boolean } | null;
   interrupt_payload?: Record<string, unknown>;
@@ -364,7 +347,6 @@ export const api = {
   },
   executionEvents: (runId: string, afterSequence = 0) =>
     new FetchEventStream(`${API_BASE}/api/chat/runs/${runId}/events?after_sequence=${afterSequence}`),
-  run: (runId: string) => request<ChatExecutionInfo>(`/api/chat/runs/${runId}`),
   runStatus: (runId: string) => request<ChatExecutionInfo>(`/api/chat/runs/${runId}/status`),
   resumeRun: (runId: string, payload: { agent_id: string; message: string }) =>
     request<ChatExecutionInfo>(`/api/chat/runs/${runId}/resume`, {
@@ -377,7 +359,6 @@ export const api = {
 
 export interface CurrentUser {
   id: string;
-  tenant_id: string;
   email: string;
   role: 'user' | 'admin';
   status: string;
@@ -412,7 +393,6 @@ export interface AdminSessionSummary {
   user_email: string;
   agent_id: string;
   title: string;
-  status: string;
   message_count: number;
   latest_execution_status: string | null;
   updated_at: string;
@@ -490,10 +470,10 @@ export const adminApi = {
     request<{ message: string }>(`/api/admin/users/${userId}/password-reset`, {
       method: 'POST'
     }),
-  updateUser: (userId: string, payload: { status?: 'active' | 'disabled'; role?: 'user' | 'admin' }) =>
+  updateUser: (userId: string, role: 'user' | 'admin') =>
     request<AdminUser>(`/api/admin/users/${userId}`, {
       method: 'PATCH',
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ role })
     }),
   sessions: (userId: string, page = 1, pageSize = 30) =>
     request<{ items: AdminSessionSummary[]; page: number; page_size: number; total: number }>(

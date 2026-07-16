@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from core.alembic import build_alembic_config
 from core.config import Settings, get_settings
-from core.paths import PROJECT_ROOT
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine
@@ -57,7 +56,7 @@ def check_database_connection(settings: Settings | None = None) -> None:
 
 
 def assert_database_at_alembic_head(settings: Settings | None = None) -> None:
-    alembic_config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    alembic_config = build_alembic_config()
     script = ScriptDirectory.from_config(alembic_config)
     expected_heads = set(script.get_heads())
     if len(expected_heads) != 1:

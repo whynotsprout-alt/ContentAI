@@ -40,14 +40,12 @@ def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
         tool_permissions=("remember",),
         user_id="user-a",
         agent_id="agent-a",
-        tenant_id="tenant-a",
         session_id="thread-a",
     )
     second = container.create_runtime(
         tool_permissions=("remember",),
         user_id="user-b",
         agent_id="agent-b",
-        tenant_id="tenant-b",
         session_id="thread-b",
     )
 

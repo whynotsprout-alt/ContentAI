@@ -3,10 +3,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from alembic.config import Config
 from alembic.script import ScriptDirectory
+from core.alembic import build_alembic_config
 from core.config import Env, Settings
-from core.paths import PROJECT_ROOT
 from db.session import get_engine
 from models.base import utcnow
 from models.chat import ExecutionOutbox
@@ -91,7 +90,7 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
 
 @lru_cache(maxsize=1)
 def expected_alembic_head() -> str:
-    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config = build_alembic_config()
     return str(ScriptDirectory.from_config(config).get_current_head())
 
 

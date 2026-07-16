@@ -5,7 +5,9 @@ from uuid import uuid4
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    # PostgreSQL models currently use TIMESTAMP WITHOUT TIME ZONE. Store UTC
+    # consistently so values loaded from the database remain comparable.
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def json_dumps(value: Any) -> str:

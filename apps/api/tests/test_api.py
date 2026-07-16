@@ -6,6 +6,7 @@ from typing import Any
 import services.conversation_service as conversation_service_module
 from agent.runtime.checkpoint import RuntimePersistence
 from agent.runtime.container import RuntimeContainer
+from api.app import create_app
 from api.chat import _stream_channel, _stream_exception_payload
 from api.chat import router as chat_router
 from auth_helpers import auth_headers, default_test_auth_context, resolve_test_auth_context
@@ -13,21 +14,14 @@ from client import ApiClient as TestClient
 from core.config import Settings, get_settings
 from core.security import authenticate_request
 from db.session import get_engine
+from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
-from main import create_app
 from models.agent import AgentProfile, AgentVersion
 from models.chat import AgentExecution, AgentInvocation, ChatMessage, ChatSession, ExecutionOutbox
-from models.enums import (
-    MemoryOwnerType,
-    MemoryScope,
-    MessageRole,
-    MessageType,
-    RunStatus,
-)
+from models.enums import MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
-from models.user import AdminAuditLog
+from models.user import AdminAuditLog, AppUser
 from services.agent_service import AgentService
-from services.direct_dispatcher import DirectDispatcher
 from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
 from sqlalchemy import text
 from sqlmodel import Session, select
@@ -48,15 +42,9 @@ def account_payload(
     return {
         "name": name,
         "description": description,
-        "agent_type": "content",
-        "status": "active",
         "topic_scoring_prompt": topic_prompt,
         "content_prompt": creation_prompt,
-        "graph_name": "default",
-        "tools_config": {
-            "hotspot_sources": ["douyin", "weibo"] if hotspot_sources is None else hotspot_sources
-        },
-        "memory_config": {},
+        "hotspot_sources": ["douyin", "weibo"] if hotspot_sources is None else hotspot_sources,
     }
 
 
@@ -225,7 +213,7 @@ def test_account_crud_contract():
             created.json()["current_version"]["topic_scoring_prompt"]
             == payload["topic_scoring_prompt"]
         )
-        assert created.json()["current_version"]["tools_config"]["hotspot_sources"] == [
+        assert created.json()["current_version"]["hotspot_sources"] == [
             "douyin",
             "weibo",
         ]
@@ -243,98 +231,122 @@ def test_account_crud_contract():
             json={
                 "topic_scoring_prompt": "Prioritize relevance and evidence quality.",
                 "content_prompt": payload["content_prompt"],
-                "graph_name": "default",
-                "tools_config": {"hotspot_sources": ["xiaohongshu"]},
-                "memory_config": {},
+                "hotspot_sources": ["xiaohongshu"],
             },
         )
         assert version.status_code == 201
         assert (
             version.json()["topic_scoring_prompt"] == "Prioritize relevance and evidence quality."
         )
-        assert version.json()["tools_config"]["hotspot_sources"] == ["xiaohongshu"]
+        assert version.json()["hotspot_sources"] == ["xiaohongshu"]
 
         deleted = client.delete(f"/api/agents/{account_id}")
         assert deleted.status_code == 204
         assert client.get(f"/api/agents/{account_id}").status_code == 404
 
 
-def test_account_names_are_unique_within_tenant_only():
+def test_account_names_are_unique_per_user():
     payload = account_payload(
         name="Shared Account",
-        description="Account for tenant uniqueness tests.",
+        description="Account for user uniqueness tests.",
     )
+
+    with Session(get_engine()) as session:
+        session.add(
+            AppUser(
+                id="other-user",
+                email="other@test.invalid",
+                email_normalized="other@test.invalid",
+                password_hash="test-only-password-hash",
+                status="active",
+                email_verified_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
 
     with TestClient(auth_test_app()) as client:
         created = client.post(
             "/api/agents",
-            headers=auth_headers(tenant_id="tenant_a"),
+            headers=auth_headers(user_id="local-user"),
             json=payload,
         )
         duplicate = client.post(
             "/api/agents",
-            headers=auth_headers(tenant_id="tenant_a"),
+            headers=auth_headers(user_id="local-user"),
             json=payload,
         )
-        other_tenant = client.post(
+        other_user = client.post(
             "/api/agents",
-            headers=auth_headers(tenant_id="tenant_b"),
+            headers=auth_headers(user_id="other-user"),
             json=payload,
         )
 
     assert created.status_code == 201
     assert duplicate.status_code == 409
-    assert other_tenant.status_code == 201
+    assert other_user.status_code == 201
 
     with Session(get_engine()) as session:
         rows = session.exec(
-            select(AgentProfile.tenant_id).where(AgentProfile.name == payload["name"])
+            select(AgentProfile.user_id).where(AgentProfile.name == payload["name"])
         ).all()
-    assert sorted(rows) == ["tenant_a", "tenant_b"]
+    assert sorted(rows) == ["local-user", "other-user"]
 
 
-def test_accounts_are_isolated_by_tenant():
+def test_accounts_are_isolated_by_user():
     payload = account_payload(
-        name="Tenant A Account",
-        description="Tenant-scoped account.",
+        name="User Account",
+        description="User-scoped account.",
         hotspot_sources=["weibo"],
     )
+
+    with Session(get_engine()) as session:
+        session.add(
+            AppUser(
+                id="other-user",
+                email="other@test.invalid",
+                email_normalized="other@test.invalid",
+                password_hash="test-only-password-hash",
+                status="active",
+                email_verified_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
 
     with TestClient(auth_test_app()) as client:
         created = client.post(
             "/api/agents",
-            headers=auth_headers(tenant_id="tenant_a"),
+            headers=auth_headers(user_id="local-user"),
             json=payload,
         )
         assert created.status_code == 201
         account_id = created.json()["id"]
 
-        tenant_a_list = client.get("/api/agents", headers=auth_headers(tenant_id="tenant_a"))
-        tenant_b_list = client.get("/api/agents", headers=auth_headers(tenant_id="tenant_b"))
-        tenant_b_get = client.get(
+        owner_list = client.get("/api/agents", headers=auth_headers(user_id="local-user"))
+        other_list = client.get("/api/agents", headers=auth_headers(user_id="other-user"))
+        other_get = client.get(
             f"/api/agents/{account_id}",
-            headers=auth_headers(tenant_id="tenant_b"),
+            headers=auth_headers(user_id="other-user"),
         )
-        tenant_b_update = client.patch(
+        other_update = client.patch(
             f"/api/agents/{account_id}",
-            headers=auth_headers(tenant_id="tenant_b"),
+            headers=auth_headers(user_id="other-user"),
             json={"name": "Blocked Rename"},
         )
-        tenant_b_delete = client.delete(
+        other_delete = client.delete(
             f"/api/agents/{account_id}",
-            headers=auth_headers(tenant_id="tenant_b"),
+            headers=auth_headers(user_id="other-user"),
         )
 
-    assert [account["id"] for account in tenant_a_list.json()] == [account_id]
-    assert tenant_b_list.json() == []
-    assert tenant_b_get.status_code == 404
-    assert tenant_b_update.status_code == 404
-    assert tenant_b_delete.status_code == 404
+    assert account_id in [account["id"] for account in owner_list.json()]
+    assert other_list.json() == []
+    assert other_get.status_code == 404
+    assert other_update.status_code == 404
+    assert other_delete.status_code == 404
 
 
 def test_account_put_not_allowed():
     payload = account_payload(
-        name="Legacy Put Test",
+        name="Removed Put Test",
         description="Account for method compatibility tests.",
     )
 
@@ -370,7 +382,7 @@ def test_patch_account_partial_updates_are_supported():
     assert partial.status_code == 200
     assert partial.json()["name"] == "Original Account Updated"
     assert partial.json()["description"] == payload["description"]
-    assert partial.json()["current_version"]["tools_config"]["hotspot_sources"] == [
+    assert partial.json()["current_version"]["hotspot_sources"] == [
         "douyin",
         "weibo",
     ]
@@ -398,9 +410,7 @@ def test_patch_account_multiple_fields_update():
             json={
                 "topic_scoring_prompt": payload["topic_scoring_prompt"],
                 "content_prompt": payload["content_prompt"],
-                "graph_name": "default",
-                "tools_config": {"hotspot_sources": ["xiaohongshu", "weibo"]},
-                "memory_config": {},
+                "hotspot_sources": ["xiaohongshu", "weibo"],
             },
         )
 
@@ -408,7 +418,7 @@ def test_patch_account_multiple_fields_update():
     assert multi.json()["description"] == "Updated positioning."
     assert multi.json()["name"] == payload["name"]
     assert version.status_code == 201
-    assert version.json()["tools_config"]["hotspot_sources"] == ["xiaohongshu", "weibo"]
+    assert version.json()["hotspot_sources"] == ["xiaohongshu", "weibo"]
 
 
 def test_patch_nonexistent_account_returns_404():
@@ -422,7 +432,7 @@ def test_patch_nonexistent_account_returns_404():
 
 
 def test_account_updated_at_is_touched_by_orm_update_event():
-    old_updated_at = datetime(2020, 1, 1, tzinfo=UTC)
+    old_updated_at = datetime(2020, 1, 1)
 
     with Session(get_engine()) as session:
         session.execute(
@@ -448,7 +458,7 @@ def test_account_hotspot_sources_are_stored_as_jsonb():
     with Session(get_engine()) as session:
         source_type = session.execute(
             text(
-                "SELECT pg_typeof(tools_config)::text "
+                "SELECT pg_typeof(hotspot_sources)::text "
                 "FROM agentversion WHERE id = 'default-agent-v1'"
             )
         ).scalar_one()
@@ -461,8 +471,7 @@ def test_account_delete_rejects_referenced_account():
         chat = ChatSession(
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -492,7 +501,7 @@ def test_account_rejects_empty_or_unknown_hotspot_sources():
             "/api/agents",
             json={
                 **payload,
-                "tools_config": {"hotspot_sources": ["unknown"]},
+                "hotspot_sources": ["unknown"],
             },
         )
         assert unknown_sources.status_code == 422
@@ -510,14 +519,9 @@ def test_auth_filters_agents_by_allowed_agent_ids():
         session.add(
             AgentProfile(
                 id="other-agent",
-                tenant_id="local",
-                owner_user_id="local-user",
+                user_id="local-user",
                 name="Other Account",
                 description="Other account",
-                agent_type="content",
-                status="active",
-                created_by_user_id="local-user",
-                updated_by_user_id="local-user",
             )
         )
         session.add(
@@ -526,10 +530,7 @@ def test_auth_filters_agents_by_allowed_agent_ids():
                 agent_id="other-agent",
                 version=1,
                 content_prompt="Test",
-                graph_name="default",
-                tools_config={"hotspot_sources": ["weibo"]},
-                memory_config={},
-                created_by_user_id="local-user",
+                hotspot_sources=["weibo"],
             )
         )
 
@@ -539,7 +540,6 @@ def test_auth_filters_agents_by_allowed_agent_ids():
         listed = client.get(
             "/api/agents",
             headers=auth_headers(
-                tenant_id="local",
                 user_id="local-user",
                 agents=["default-agent"],
             ),
@@ -548,7 +548,6 @@ def test_auth_filters_agents_by_allowed_agent_ids():
         forbidden = client.get(
             "/api/agents/other-agent",
             headers=auth_headers(
-                tenant_id="local",
                 user_id="local-user",
                 agents=["default-agent"],
             ),
@@ -561,11 +560,11 @@ def test_auth_filters_agents_by_allowed_agent_ids():
     assert forbidden.status_code == 403
 
 
-def test_auth_blocks_cross_tenant_chat_access():
+def test_auth_blocks_cross_user_chat_access():
     with TestClient(auth_test_app()) as client:
         created = client.post(
             "/api/chat/sessions",
-            headers=auth_headers(tenant_id="local", user_id="local-user"),
+            headers=auth_headers(user_id="local-user"),
             json={"agent_id": "default-agent"},
         )
 
@@ -575,7 +574,7 @@ def test_auth_blocks_cross_tenant_chat_access():
 
         blocked = client.get(
             f"/api/chat/sessions/{session_id}",
-            headers=auth_headers(tenant_id="tenant_b", user_id="local-user"),
+            headers=auth_headers(user_id="other-user"),
         )
 
     assert blocked.status_code == 404
@@ -596,7 +595,7 @@ def test_run_routes_are_public_api():
     assert cancelled.status_code == 404
 
 
-def test_legacy_post_sse_routes_are_removed():
+def test_removed_post_sse_routes_stay_unavailable():
     route_paths = {getattr(route, "path", "") for route in chat_router.routes}
 
     assert "/chat/sessions/{session_id}/messages/stream" not in route_paths
@@ -615,8 +614,7 @@ def test_lightweight_run_status_exposes_queue_stages():
             invocation = AgentInvocation(
                 session_id=chat["session_id"],
                 agent_id="default-agent",
-                tenant_id="local",
-                created_by_user_id="local-user",
+                user_id="local-user",
             )
             session.add(invocation)
             session.flush()
@@ -814,9 +812,12 @@ def test_completed_turn_extracts_long_term_memory_with_model_judgement():
 
         payload = wait_for_terminal_session(client, session["session_id"])
 
-    assert any(
-        item["content"] == "stable memory" for item in payload["memory"]["long_term_memories"]
-    )
+    assert payload["latest_execution"]["status"] == "completed"
+    with Session(get_engine()) as db_session:
+        memories = db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.agent_id == "default-agent")
+        ).all()
+    assert any(item.content == "stable memory" for item in memories)
 
 
 def test_memory_extraction_filters_low_confidence_and_sensitive_candidates():
@@ -850,7 +851,11 @@ def test_memory_extraction_filters_low_confidence_and_sensitive_candidates():
 
         payload = wait_for_terminal_session(client, session["session_id"])
 
-    assert payload["memory"]["long_term_memories"] == []
+    assert payload["latest_execution"]["status"] == "completed"
+    with Session(get_engine()) as db_session:
+        assert db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.agent_id == "default-agent")
+        ).all() == []
 
 
 def test_chat_session_title_is_generated_by_model():
@@ -976,7 +981,7 @@ def test_stream_recovery_errors_keep_stable_degradation_codes() -> None:
     )
 
 
-def test_session_message_count_excludes_tool_results_and_non_rendered_types():
+def test_session_message_count_includes_persisted_conversation_messages():
     with TestClient(app) as client:
         created = client.post("/api/chat/sessions", json={"agent_id": "default-agent"})
         assert created.status_code == 200
@@ -997,18 +1002,6 @@ def test_session_message_count_excludes_tool_results_and_non_rendered_types():
                     message_type=MessageType.markdown,
                     content="visible assistant message",
                 ),
-                ChatMessage(
-                    session_id=session_id,
-                    role=MessageRole.tool,
-                    message_type=MessageType.tool_result,
-                    content="hidden tool result",
-                ),
-                ChatMessage(
-                    session_id=session_id,
-                    role=MessageRole.assistant,
-                    message_type=MessageType.reasoning,
-                    content="hidden reasoning",
-                ),
             ]
         )
         session.commit()
@@ -1025,16 +1018,6 @@ def test_session_message_count_excludes_tool_results_and_non_rendered_types():
 
 
 def test_waiting_input_run_can_be_resumed():
-    with Session(get_engine()) as session:
-        version = session.get(AgentVersion, "default-agent-v1")
-        assert version is not None
-        version.tools_config = {
-            **version.tools_config,
-            "confirmation_required_tools": ["remember"],
-        }
-        session.add(version)
-        session.commit()
-
     install_fake_model(
         FakeModel(
             [
@@ -1116,8 +1099,7 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
         chat = ChatSession(
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -1127,8 +1109,7 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id="default-agent",
-            tenant_id="local",
-            created_by_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(invocation)
@@ -1145,10 +1126,6 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
         session.add(message)
 
         session.flush()
-
-        invocation.user_message_id = message.id
-
-        session.add(invocation)
 
         session.add(
             AgentExecution(
@@ -1207,8 +1184,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
             title="Deletable session",
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -1218,8 +1194,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id="default-agent",
-            tenant_id="local",
-            created_by_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(invocation)
@@ -1235,17 +1210,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
         session.add(message)
 
-        session.add(
-            ChatMessage(
-                session_id=chat.id,
-                role=MessageRole.system,
-                content="legacy unbound session message",
-            )
-        )
-
         session.flush()
-
-        invocation.user_message_id = message.id
 
         execution = AgentExecution(
             invocation_id=invocation.id,
@@ -1259,12 +1224,8 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
         session.add(
             MemoryRecord(
-                tenant_id=chat.tenant_id,
-                user_id=chat.owner_user_id,
-                owner_type=MemoryOwnerType.session,
-                agent_id=chat.agent_id,
+                user_id=chat.user_id,
                 session_id=chat.id,
-                memory_scope=MemoryScope.short_term,
                 memory_key="summary",
                 kind="summary",
                 content="summary",
@@ -1367,7 +1328,6 @@ def test_chat_session_is_hard_deleted_with_related_rows():
             session.exec(
                 select(MemoryRecord).where(
                     MemoryRecord.session_id == session_id,
-                    MemoryRecord.memory_scope == MemoryScope.short_term,
                 )
             ).first()
             is None
@@ -1410,8 +1370,7 @@ def test_chat_session_delete_keeps_rows_when_persistence_cleanup_fails(monkeypat
             title="cleanup failure",
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -1444,8 +1403,7 @@ def test_chat_session_delete_rejects_active_run():
             title="Running session",
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -1455,8 +1413,7 @@ def test_chat_session_delete_rejects_active_run():
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id="default-agent",
-            tenant_id="local",
-            created_by_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(invocation)
@@ -1527,15 +1484,23 @@ def test_chat_run_can_call_memory_tool():
         assert response.status_code == 202
 
         payload = wait_for_terminal_session(client, session["session_id"])
+        assert payload["latest_execution"]["status"] == "waiting_input"
+        resumed = client.post(
+            f"/api/chat/runs/{response.json()['execution_id']}/resume",
+            json={"agent_id": "default-agent", "message": "approve"},
+        )
+        assert resumed.status_code == 200
+        payload = wait_for_terminal_session(client, session["session_id"])
 
     assert payload["latest_execution"]["status"] == "completed"
 
     assert all(message["role"] in {"user", "assistant"} for message in payload["messages"])
 
-    assert any(
-        item["content"] == "prefers concise replies"
-        for item in payload["memory"]["long_term_memories"]
-    )
+    with Session(get_engine()) as db_session:
+        memories = db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.agent_id == "default-agent")
+        ).all()
+    assert any(item.content == "prefers concise replies" for item in memories)
 
 
 def test_running_run_can_be_cancel_requested():
@@ -1543,8 +1508,7 @@ def test_running_run_can_be_cancel_requested():
         chat = ChatSession(
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
-            tenant_id="local",
-            owner_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(chat)
@@ -1554,8 +1518,7 @@ def test_running_run_can_be_cancel_requested():
         invocation = AgentInvocation(
             session_id=chat.id,
             agent_id="default-agent",
-            tenant_id="local",
-            created_by_user_id="local-user",
+            user_id="local-user",
         )
 
         session.add(invocation)

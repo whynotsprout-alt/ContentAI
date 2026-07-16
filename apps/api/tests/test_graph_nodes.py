@@ -46,7 +46,7 @@ def test_agent_node_does_not_emit_assistant_delta_directly():
     assert [name for name, _ in writer.events] == ["agent_node", "agent_node"]
 
 
-def test_agent_node_retries_interrupted_model_stream_before_returning_result(
+def test_agent_node_retries_disconnected_model_stream_before_returning_result(
     monkeypatch: pytest.MonkeyPatch,
 ):
     model = _FlakyStreamModel(failures=2)

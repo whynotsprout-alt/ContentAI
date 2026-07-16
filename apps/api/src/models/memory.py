@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from models.base import new_id, utcnow
-from models.enums import MemoryKind, MemoryOwnerType, MemoryScope, MemorySourceType
+from models.enums import MemoryKind, MemorySourceType
 from sqlalchemy import CheckConstraint, Column, Index, event, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
@@ -12,66 +12,52 @@ from sqlmodel import Field, SQLModel
 
 class MemoryRecord(SQLModel, table=True):
     __tablename__ = "memoryrecord"
-
     __table_args__ = (
         Index(
             "ix_memoryrecord_lookup",
-            "tenant_id",
             "user_id",
-            "owner_type",
             "agent_id",
-            "memory_scope",
+            "session_id",
             "kind",
             "updated_at",
         ),
         Index(
-            "ux_memoryrecord_active_user_long_term",
-            "tenant_id",
-            "user_id",
-            "memory_key",
-            unique=True,
-            postgresql_where=text(
-                "memory_scope = 'long_term' AND owner_type = 'user' AND deleted_at IS NULL"
-            ),
-        ),
-        Index(
-            "ux_memoryrecord_active_agent_long_term",
-            "tenant_id",
+            "ux_memoryrecord_active_agent",
             "user_id",
             "agent_id",
             "memory_key",
             unique=True,
-            postgresql_where=text(
-                "memory_scope = 'long_term' AND owner_type = 'agent' AND deleted_at IS NULL"
-            ),
+            postgresql_where=text("agent_id IS NOT NULL AND deleted_at IS NULL"),
         ),
         Index(
             "ux_memoryrecord_active_session",
-            "tenant_id",
             "user_id",
             "session_id",
             "memory_key",
             unique=True,
-            postgresql_where=text("owner_type = 'session' AND deleted_at IS NULL"),
+            postgresql_where=text("session_id IS NOT NULL AND deleted_at IS NULL"),
         ),
         CheckConstraint(
-            "owner_type IN ('user', 'agent', 'session')",
-            name="ck_memoryrecord_owner_type",
-        ),
-        CheckConstraint(
-            "source_type IN "
-            "('manual', 'user_message', 'turn_summary', 'summary', 'tool', 'system')",
-            name="ck_memoryrecord_source_type",
+            "(agent_id IS NOT NULL AND session_id IS NULL) OR "
+            "(agent_id IS NULL AND session_id IS NOT NULL)",
+            name="ck_memoryrecord_owner",
         ),
     )
 
     id: str = Field(default_factory=lambda: new_id("mem"), primary_key=True)
-    tenant_id: str = Field(index=True)
-    user_id: str = Field(index=True)
-    owner_type: MemoryOwnerType = Field(index=True)
-    agent_id: str | None = Field(default=None, index=True)
-    session_id: str | None = Field(default=None, index=True)
-    memory_scope: MemoryScope = Field(default=MemoryScope.long_term, index=True)
+    user_id: str = Field(index=True, foreign_key="appuser.id", ondelete="CASCADE")
+    agent_id: str | None = Field(
+        default=None,
+        index=True,
+        foreign_key="agentprofile.id",
+        ondelete="CASCADE",
+    )
+    session_id: str | None = Field(
+        default=None,
+        index=True,
+        foreign_key="chatsession.id",
+        ondelete="CASCADE",
+    )
     memory_key: str = Field(index=True)
     kind: MemoryKind = Field(default=MemoryKind.semantic, index=True)
     payload: dict[str, Any] = Field(

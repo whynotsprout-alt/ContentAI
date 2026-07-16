@@ -26,7 +26,7 @@ from models.chat import (
     ChatMessage,
     ChatSession,
 )
-from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, RunStatus, SessionStatus
+from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, MessageRole, RunStatus
 from services.execution_resume import mark_resume_consumed
 from sqlmodel import Session, select
 
@@ -57,11 +57,10 @@ class AgentRunner:
         resume_value: Any = None,
         resume_request_id: str | None = None,
         continue_from_checkpoint: bool = False,
-        auth: AuthContext | None = None,
+        auth: AuthContext,
         request_id: str | None = None,
         thread_id: str | None = None,
     ) -> None:
-        auth = auth or AuthContext(user_id="local-user", tenant_id="local")
         tool_permissions = tuple(tool_permissions)
         loaded = self._load_execution_context(db_session, execution_id, auth, thread_id=thread_id)
         if loaded is None:
@@ -221,11 +220,10 @@ class AgentRunner:
             select(AgentExecution, AgentInvocation, ChatSession, ChatMessage)
             .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)
             .join(ChatSession, AgentInvocation.session_id == ChatSession.id)
-            .join(ChatMessage, AgentInvocation.user_message_id == ChatMessage.id)
+            .join(ChatMessage, ChatMessage.invocation_id == AgentInvocation.id)
             .where(AgentExecution.id == execution_id)
-            .where(ChatSession.tenant_id == auth.tenant_id)
-            .where(ChatSession.owner_user_id == auth.user_id)
-            .where(ChatSession.status != SessionStatus.deleted)
+            .where(ChatSession.user_id == auth.user_id)
+            .where(ChatMessage.role == MessageRole.user)
         )
         if agent_filter is not None:
             statement = statement.where(ChatSession.agent_id.in_(agent_filter))
