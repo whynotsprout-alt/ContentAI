@@ -42,14 +42,6 @@ function relativeDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(timestamp);
 }
 
-function statusLabel(value: string | null) {
-  if (value === 'pending') return '排队中';
-  if (value === 'running') return '生成中';
-  if (value === 'waiting_input') return '待确认';
-  if (value === 'failed') return '失败';
-  if (value === 'cancelled') return '已停止';
-  return '';
-}
 </script>
 
 <template>
@@ -88,9 +80,6 @@ function statusLabel(value: string | null) {
           <span class="session-title">{{ displayTitle(session) }}</span>
           <span class="session-meta">
             {{ session.message_count }} 条消息 · {{ relativeDate(session.updated_at) }}
-          </span>
-          <span v-if="statusLabel(session.latest_execution_status)" class="session-state">
-            {{ statusLabel(session.latest_execution_status) }}
           </span>
         </button>
         <button
