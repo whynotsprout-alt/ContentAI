@@ -20,10 +20,10 @@ tools/setup.ps1
 
 ## 本地开发
 
-完整容器环境最接近生产：
+完整容器环境最接近生产；开发时叠加 loopback 端口 override：
 
 ```powershell
-tools/restart.ps1
+docker compose -f compose.yaml -f compose.dev.yaml up --detach --build --wait
 ```
 
 如需分别启动前后端开发服务器，先保证 `.env` 指向可用 PostgreSQL 与 Redis，再在不同终端运行：
@@ -49,6 +49,11 @@ tools/test.ps1
 # Ruff + 后端测试 + Web production build
 tools/review.ps1
 
+# 启动、验证并清理隔离测试 PostgreSQL
+tools/test-deps.ps1 up
+tools/review.ps1
+tools/test-deps.ps1 down
+
 # 只在 Web 目录执行前端测试
 Push-Location apps/web
 npm.cmd test
@@ -57,10 +62,12 @@ Pop-Location
 
 后端测试环境必须使用独立名称中含 `test` 的 PostgreSQL 数据库，并设置 `CONTENTAI_ENV=test`；应用配置会拒绝把测试运行到非测试数据库。
 
+`tools/test-deps.ps1` 创建名为 `contentai-test-deps` 的隔离 Compose 项目，只使用一次性的 PostgreSQL volume。它仅用于本地验证的测试依赖，绝不能用于生产服务。
+
 ## 代码组织约定
 
-- Python import 根为 `apps/api/src`；不要恢复 `backend/src` 兼容路径。
+- Python import 根为 `apps/api/src`；应用入口是 `api.app:app`。
 - Web 源码、构建配置和测试都位于 `apps/web`；不要把生成的 `dist/` 或 `node_modules/` 加入版本控制。
-- 新业务 schema 迁移放入 `apps/api/alembic/versions`；LangGraph checkpoint/store 不进入 Alembic 自动生成结果。
+- 当前只保留 `apps/api/src/contentai_migrations/versions/202607150001_initial_schema.py` 单一初始迁移；LangGraph checkpoint/store 不进入 Alembic 自动生成结果。
 - 面向用户的内容只能通过 Assistant 消息交付，不新增研究包、稿件或工作流阶段模型。
 - 文件修改后优先运行与改动范围相符的检查；涉及构建、路径或容器时运行 `tools/review.ps1` 与 `docker compose config --quiet`。
