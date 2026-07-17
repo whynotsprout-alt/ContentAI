@@ -6,8 +6,11 @@ from models.chat import (
     AgentInvocation,
     ChatMessage,
     ChatSession,
+    CheckpointDeletionOutbox,
     ExecutionOutbox,
     ExecutionResumeRequest,
+    ServiceHeartbeat,
+    SideEffectReceipt,
     ToolExecution,
 )
 from models.enums import (
@@ -22,7 +25,7 @@ from models.enums import (
 )
 from models.memory import MemoryRecord
 from models.research import ResearchPackage
-from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage, UserActionToken
+from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
 
 __all__ = [
     "AgentProfile",
@@ -35,14 +38,16 @@ __all__ = [
     "AgentInvocation",
     "ChatMessage",
     "ChatSession",
+    "CheckpointDeletionOutbox",
     "ExecutionOutbox",
     "ExecutionResumeRequest",
+    "ServiceHeartbeat",
+    "SideEffectReceipt",
     "MemoryRecord",
     "ResearchPackage",
     "AppUser",
     "AuthSession",
     "ModelUsage",
-    "UserActionToken",
     "MemoryKind",
     "MemorySourceType",
     "MessageRole",

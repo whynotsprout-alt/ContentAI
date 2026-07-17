@@ -16,18 +16,6 @@ class LoginRequest(InputSchemaBase):
     password: str = Field(min_length=1, max_length=128)
 
 
-class EmailRequest(InputSchemaBase):
-    email: EmailStr
-
-
-class TokenRequest(InputSchemaBase):
-    token: str = Field(min_length=20, max_length=500)
-
-
-class ResetPasswordRequest(TokenRequest):
-    password: str = Field(min_length=10, max_length=128)
-
-
 class ChangePasswordRequest(InputSchemaBase):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=10, max_length=128)
@@ -49,6 +37,8 @@ class CurrentUserResponse(SchemaBase):
     password_changed_at: datetime
     created_at: datetime
     last_login_at: datetime | None = None
+    must_change_password: bool = False
+    temporary_password_expires_at: datetime | None = None
 
 
 class MessageResponse(SchemaBase):

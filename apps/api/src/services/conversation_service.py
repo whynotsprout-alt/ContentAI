@@ -621,6 +621,7 @@ class ConversationService:
 
         execution = AgentExecution(
             invocation_id=invocation.id,
+            session_id=chat.id,
             agent_version_id=chat.agent_version_id,
         )
         session.add(execution)

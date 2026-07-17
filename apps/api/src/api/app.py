@@ -166,7 +166,6 @@ def _rate_limit_rule(method: str, path: str) -> RateLimitRule | None:
     if path in {
         "/api/auth/login",
         "/api/auth/register",
-        "/api/auth/forgot-password",
     }:
         return RateLimitRule(limit=10, window_seconds=60)
     return None

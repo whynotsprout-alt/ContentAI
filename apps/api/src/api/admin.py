@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated
 
 from api.dependencies import AdminServiceDep, CurrentAdminDep, RequestContextDep, SessionDep
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from models.schemas import (
     AdminSessionDetail,
     AdminSessionListResponse,
@@ -10,7 +10,7 @@ from models.schemas import (
     AdminUserListResponse,
     AdminUserSummary,
     AdminUserUpdate,
-    MessageResponse,
+    TemporaryPasswordResponse,
 )
 from services.auth_service import AuthServiceError
 
@@ -93,12 +93,28 @@ def enable_user(
         _raise_admin_error(exc)
 
 
-@router.post("/users/{user_id}/password-reset", response_model=MessageResponse)
-def password_reset(
+@router.post(
+    "/users/{user_id}/temporary-password",
+    response_model=TemporaryPasswordResponse,
+)
+def temporary_password(
     user_id: str,
-) -> MessageResponse:
-    _ = user_id
-    raise HTTPException(status_code=410, detail="Password reset has been retired.")
+    response: Response,
+    service: AdminServiceDep,
+    session: SessionDep,
+    auth: CurrentAdminDep,
+    request_context: RequestContextDep,
+) -> TemporaryPasswordResponse:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return service.issue_temporary_password(
+            session,
+            actor_user_id=auth.user_id,
+            user_id=user_id,
+            request_id=request_context.request_id or "",
+        )
+    except AuthServiceError as exc:
+        _raise_admin_error(exc)
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserSummary)

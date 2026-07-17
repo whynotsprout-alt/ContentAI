@@ -129,6 +129,7 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
         session.flush()
         execution = AgentExecution(
             invocation_id=invocation.id,
+            session_id=chat.id,
             agent_version_id="default-agent-v1",
         )
         session.add(execution)

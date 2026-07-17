@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from models.base import new_id, utcnow
-from sqlalchemy import Column, Index, UniqueConstraint
+from sqlalchemy import Column, DateTime, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -21,13 +21,27 @@ class AppUser(SQLModel, table=True):
     password_hash: str
     role: str = Field(default="user", index=True)
     status: str = Field(default="active", index=True)
-    email_verified_at: datetime | None = Field(default=None, index=True)
-    password_changed_at: datetime = Field(default_factory=utcnow)
+    email_verified_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    password_changed_at: datetime = Field(
+        default_factory=utcnow, sa_type=DateTime(timezone=True)
+    )
+    must_change_password: bool = Field(default=False)
+    temporary_password_expires_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
     failed_login_count: int = 0
-    locked_until: datetime | None = Field(default=None, index=True)
-    last_login_at: datetime | None = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow, index=True)
-    updated_at: datetime = Field(default_factory=utcnow)
+    locked_until: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    last_login_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    created_at: datetime = Field(
+        default_factory=utcnow, index=True, sa_type=DateTime(timezone=True)
+    )
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 
 class AuthSession(SQLModel, table=True):
@@ -43,26 +57,12 @@ class AuthSession(SQLModel, table=True):
     csrf_hash: str
     user_agent: str = ""
     ip_address: str = ""
-    expires_at: datetime = Field(index=True)
-    revoked_at: datetime | None = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
-    last_seen_at: datetime = Field(default_factory=utcnow)
-
-
-class UserActionToken(SQLModel, table=True):
-    __tablename__ = "useractiontoken"
-    __table_args__ = (
-        UniqueConstraint("token_hash", name="ux_useractiontoken_token_hash"),
-        Index("ix_useractiontoken_user_purpose", "user_id", "purpose", "created_at"),
+    expires_at: datetime = Field(index=True, sa_type=DateTime(timezone=True))
+    revoked_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
     )
-
-    id: str = Field(default_factory=lambda: new_id("uat"), primary_key=True)
-    user_id: str = Field(index=True, foreign_key="appuser.id")
-    purpose: str = Field(index=True)
-    token_hash: str = Field(index=True)
-    expires_at: datetime = Field(index=True)
-    used_at: datetime | None = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    last_seen_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 
 class ModelUsage(SQLModel, table=True):
@@ -87,7 +87,9 @@ class ModelUsage(SQLModel, table=True):
     output_tokens: int = 0
     total_tokens: int = 0
     usage_available: bool = Field(default=False, index=True)
-    created_at: datetime = Field(default_factory=utcnow, index=True)
+    created_at: datetime = Field(
+        default_factory=utcnow, index=True, sa_type=DateTime(timezone=True)
+    )
 
 
 class AdminAuditLog(SQLModel, table=True):
@@ -106,4 +108,6 @@ class AdminAuditLog(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column(JSONB, nullable=False),
     )
-    created_at: datetime = Field(default_factory=utcnow, index=True)
+    created_at: datetime = Field(
+        default_factory=utcnow, index=True, sa_type=DateTime(timezone=True)
+    )

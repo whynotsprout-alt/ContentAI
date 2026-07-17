@@ -4,7 +4,7 @@ from typing import Annotated
 
 from core.security import AuthContext, authenticate_request
 from db.session import get_engine
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from services.admin_service import AdminService
 from services.agent_service import AgentService
 from services.auth_service import AuthService
@@ -28,6 +28,18 @@ def get_request_session(request: Request) -> Iterator[Session]:
 
 
 def get_current_user(request: Request, auth: AuthContextDep) -> AuthContext:
+    if auth.must_change_password and request.url.path not in {
+        "/api/auth/me",
+        "/api/auth/logout",
+        "/api/auth/change-password",
+    }:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PASSWORD_CHANGE_REQUIRED",
+                "message": "Change the temporary password before continuing.",
+            },
+        )
     request.state.user_id = auth.user_id
     request.state.conversation_id = _conversation_id_from_path(request)
     return auth

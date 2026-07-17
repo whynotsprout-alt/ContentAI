@@ -4,13 +4,9 @@ EXPECTED_API_OPERATIONS = {
     ("GET", "/api/health"),
     ("GET", "/api/ready"),
     ("POST", "/api/auth/register"),
-    ("POST", "/api/auth/verify-email"),
-    ("POST", "/api/auth/resend-verification"),
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
     ("GET", "/api/auth/me"),
-    ("POST", "/api/auth/forgot-password"),
-    ("POST", "/api/auth/reset-password"),
     ("POST", "/api/auth/change-password"),
     ("GET", "/api/agents"),
     ("GET", "/api/agents/{agent_id}"),
@@ -31,7 +27,7 @@ EXPECTED_API_OPERATIONS = {
     ("GET", "/api/admin/users/{user_id}"),
     ("POST", "/api/admin/users/{user_id}/enable"),
     ("POST", "/api/admin/users/{user_id}/disable"),
-    ("POST", "/api/admin/users/{user_id}/password-reset"),
+    ("POST", "/api/admin/users/{user_id}/temporary-password"),
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/users/{user_id}/sessions"),
     ("GET", "/api/admin/sessions/{session_id}"),
@@ -49,5 +45,5 @@ def test_openapi_matches_documented_business_api() -> None:
         if method in {"get", "post", "patch", "delete", "put"}
     }
 
-    assert len(EXPECTED_API_OPERATIONS) == 35
+    assert len(EXPECTED_API_OPERATIONS) == 31
     assert actual == EXPECTED_API_OPERATIONS

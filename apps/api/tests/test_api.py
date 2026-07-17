@@ -431,7 +431,7 @@ def test_patch_nonexistent_account_returns_404():
 
 
 def test_account_updated_at_is_touched_by_orm_update_event():
-    old_updated_at = datetime(2020, 1, 1)
+    old_updated_at = datetime(2020, 1, 1, tzinfo=UTC)
 
     with Session(get_engine()) as session:
         session.execute(
@@ -619,6 +619,7 @@ def test_lightweight_run_status_exposes_queue_stages():
             session.flush()
             execution = AgentExecution(
                 invocation_id=invocation.id,
+                session_id=chat["session_id"],
                 agent_version_id="default-agent-v1",
                 status=RunStatus.pending,
             )
@@ -1129,6 +1130,7 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
         session.add(
             AgentExecution(
                 invocation_id=invocation.id,
+                session_id=chat.id,
                 agent_version_id="default-agent-v1",
                 status=RunStatus.waiting_input,
             )
@@ -1213,6 +1215,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
         execution = AgentExecution(
             invocation_id=invocation.id,
+            session_id=chat.id,
             agent_version_id="default-agent-v1",
             status=RunStatus.completed,
         )
@@ -1422,6 +1425,7 @@ def test_chat_session_delete_rejects_active_run():
         session.add(
             AgentExecution(
                 invocation_id=invocation.id,
+                session_id=chat.id,
                 agent_version_id="default-agent-v1",
                 status=RunStatus.running,
             )
@@ -1526,6 +1530,7 @@ def test_running_run_can_be_cancel_requested():
 
         execution = AgentExecution(
             invocation_id=invocation.id,
+            session_id=chat.id,
             agent_version_id="default-agent-v1",
             status=RunStatus.running,
         )

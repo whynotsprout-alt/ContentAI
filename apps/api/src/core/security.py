@@ -22,6 +22,7 @@ class AuthContext:
     role: str = "user"
     status: str = "active"
     session_id: str | None = None
+    must_change_password: bool = False
     allowed_agent_ids: tuple[str, ...] = (AGENT_WILDCARD,)
     tool_permissions: tuple[str, ...] = (TOOL_WILDCARD,)
 
@@ -86,4 +87,5 @@ def _authenticate_local_request(request: Request, settings: Settings) -> AuthCon
             role=user.role,
             status=user.status,
             session_id=auth_session.id,
+            must_change_password=user.must_change_password,
         )

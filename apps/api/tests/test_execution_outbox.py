@@ -8,6 +8,7 @@ from agent.runtime.execution_services import AgentPostExecutionService
 from core.config import Settings, get_settings
 from db.session import get_engine
 from memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
+from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -41,6 +42,8 @@ def _seed_execution(
     user_id = f"user-{execution_id}"
     session_id = f"session-{execution_id}"
     invocation_id = f"invocation-{execution_id}"
+    agent_id = f"agent-{execution_id}"
+    version_id = f"version-{execution_id}"
     with Session(get_engine(settings)) as session:
         session.add(
             AppUser(
@@ -53,11 +56,22 @@ def _seed_execution(
             )
         )
         session.flush()
+        session.add(AgentProfile(id=agent_id, user_id=user_id, name=f"Agent {execution_id}"))
+        session.flush()
+        session.add(
+            AgentVersion(
+                id=version_id,
+                agent_id=agent_id,
+                version=1,
+                content_prompt="Create test content.",
+            )
+        )
+        session.flush()
         session.add(
             ChatSession(
                 id=session_id,
-                agent_id="default-agent",
-                agent_version_id="default-agent-v1",
+                agent_id=agent_id,
+                agent_version_id=version_id,
                 user_id=user_id,
             )
         )
@@ -66,7 +80,7 @@ def _seed_execution(
             AgentInvocation(
                 id=invocation_id,
                 session_id=session_id,
-                agent_id="default-agent",
+                agent_id=agent_id,
                 user_id=user_id,
             )
         )
@@ -75,7 +89,8 @@ def _seed_execution(
             AgentExecution(
                 id=execution_id,
                 invocation_id=invocation_id,
-                agent_version_id="default-agent-v1",
+                session_id=session_id,
+                agent_version_id=version_id,
                 status=status,
                 attempt_count=attempt_count,
                 lease_expires_at=lease_expires_at,

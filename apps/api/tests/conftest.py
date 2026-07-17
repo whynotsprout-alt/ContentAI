@@ -83,9 +83,10 @@ def reset_database() -> None:
                     checkpoints,
                     modelusage,
                     adminauditlog,
-                    useractiontoken,
                     authsession,
-                    appuser,
+                    sideeffectreceipt,
+                    checkpointdeletionoutbox,
+                    serviceheartbeat,
                     executionoutbox,
                     executionresumerequest,
                     toolexecution,
@@ -97,7 +98,8 @@ def reset_database() -> None:
                     chatsession,
                     memoryrecord,
                     agentversion,
-                    agentprofile
+                    agentprofile,
+                    appuser
                 RESTART IDENTITY CASCADE
                 """
             )

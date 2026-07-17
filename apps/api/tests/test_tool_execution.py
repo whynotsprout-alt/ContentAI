@@ -34,6 +34,7 @@ def _seed_execution(execution_id: str) -> None:
             AgentExecution(
                 id=execution_id,
                 invocation_id=invocation.id,
+                session_id=chat.id,
                 agent_version_id="default-agent-v1",
                 status=RunStatus.running,
             )

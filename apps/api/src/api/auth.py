@@ -69,18 +69,6 @@ def register(
     return MessageResponse(message="Registration successful. You can sign in now.")
 
 
-@router.post("/verify-email", response_model=MessageResponse)
-def verify_email(
-) -> MessageResponse:
-    raise HTTPException(status_code=410, detail="Email verification has been retired.")
-
-
-@router.post("/resend-verification", response_model=MessageResponse)
-def resend_verification(
-) -> MessageResponse:
-    raise HTTPException(status_code=410, detail="Email verification has been retired.")
-
-
 @router.post("/login", response_model=CurrentUserResponse)
 def login(
     payload: LoginRequest,
@@ -132,18 +120,6 @@ def me(
     return service.to_response(user)
 
 
-@router.post("/forgot-password", response_model=MessageResponse)
-def forgot_password(
-) -> MessageResponse:
-    raise HTTPException(status_code=410, detail="Password reset has been retired.")
-
-
-@router.post("/reset-password", response_model=MessageResponse)
-def reset_password(
-) -> MessageResponse:
-    raise HTTPException(status_code=410, detail="Password reset has been retired.")
-
-
 @router.post("/change-password", response_model=MessageResponse)
 def change_password(
     payload: ChangePasswordRequest,
@@ -154,13 +130,20 @@ def change_password(
     session: SessionDep,
 ) -> MessageResponse:
     try:
-        service.change_password(
+        issued = service.change_password(
             session,
             user_id=auth.user_id,
             current_password=payload.current_password,
             new_password=payload.new_password,
+            user_agent=request.headers.get("user-agent", ""),
+            ip_address=request.client.host if request.client else "",
         )
     except AuthServiceError as exc:
         _raise_auth_error(exc)
-    _clear_auth_cookies(response, request)
-    return MessageResponse(message="密码已修改，请重新登录")
+    _set_auth_cookies(
+        response,
+        request,
+        session_token=issued.session_token,
+        csrf_token=issued.csrf_token,
+    )
+    return MessageResponse(message="密码已修改")

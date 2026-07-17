@@ -232,18 +232,7 @@ class Settings(BaseSettings):
             raise ValueError("CONTENTAI_AUTH__SESSION_DAYS must be at least 1.")
         if self.auth.login_max_failures < 1 or self.auth.login_lock_minutes < 1:
             raise ValueError("Auth login lock settings must be positive.")
-        self.auth.bootstrap_admin_emails = list(
-            dict.fromkeys(
-                email.strip().lower() for email in self.auth.bootstrap_admin_emails if email.strip()
-            )
-        )
         self.auth.bootstrap_admin_email = self.auth.bootstrap_admin_email.strip().lower()
-        if self.auth.bootstrap_admin_email:
-            self.auth.bootstrap_admin_emails = list(
-                dict.fromkeys(
-                    [*self.auth.bootstrap_admin_emails, self.auth.bootstrap_admin_email]
-                )
-            )
         bootstrap_password = self.auth.bootstrap_admin_password.get_secret_value().strip()
         if bool(self.auth.bootstrap_admin_email) != bool(bootstrap_password):
             missing = (
@@ -253,10 +242,6 @@ class Settings(BaseSettings):
             )
             raise ValueError(f"{missing} is required when configuring a bootstrap administrator.")
         if self.env == Env.production:
-            if not self.auth.bootstrap_admin_emails:
-                raise ValueError(
-                    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS is required in production."
-                )
             if not self.auth.bootstrap_admin_email:
                 raise ValueError(
                     "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL is required in production."

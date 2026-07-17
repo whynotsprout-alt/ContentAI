@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -9,9 +10,10 @@ from core.config import Settings
 from db.session import get_engine
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from models.agent import AgentProfile, AgentVersion
 from models.chat import ChatMessage, ChatSession
 from models.enums import MessageRole
-from models.user import AppUser, ModelUsage, UserActionToken
+from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
 from pydantic import ValidationError
 from services.auth_service import AuthService
 from services.usage_service import ModelUsageCallback, UsageContext
@@ -26,7 +28,8 @@ def auth_app():
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
             },
             auth={
-                "bootstrap_admin_emails": ["admin@example.com"],
+                "bootstrap_admin_email": "admin@example.com",
+                "bootstrap_admin_password": "admin password 123",
             },
         )
     )
@@ -46,7 +49,7 @@ def _login(client: TestClient, email: str, password: str):
     return {"X-CSRF-Token": csrf}
 
 
-def test_local_registration_login_and_retired_password_reset_routes():
+def test_local_registration_login_and_removed_password_reset_routes():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "person@example.com", "correct horse battery")
@@ -54,14 +57,12 @@ def test_local_registration_login_and_retired_password_reset_routes():
         assert client.get("/api/auth/me").json()["email"] == "person@example.com"
 
         forgot = client.post("/api/auth/forgot-password", json={"email": "person@example.com"})
-        assert forgot.status_code == 410
+        assert forgot.status_code == 404
         reset = client.post(
             "/api/auth/reset-password",
             json={"token": "retired-token", "password": "a different secure password"},
         )
-        assert reset.status_code == 410
-        with Session(get_engine(app.state.settings)) as session:
-            assert session.exec(select(UserActionToken)).all() == []
+        assert reset.status_code == 404
         assert client.post("/api/auth/logout", headers=login_headers).status_code == 204
 
 
@@ -123,7 +124,6 @@ def test_startup_bootstraps_an_active_admin_once():
             "bootstrap_admin_password": "bootstrap password 123",
         },
     )
-    assert settings.auth.bootstrap_admin_emails == ["bootstrap-admin@example.com"]
     app = create_app(settings)
 
     with TestClient(app) as client:
@@ -192,7 +192,6 @@ def test_admin_user_listing_usage_and_disable():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "member@example.com", "member password 123")
-        _register(client, "admin@example.com", "admin password 123")
         admin_headers = _login(client, "admin@example.com", "admin password 123")
 
         with Session(get_engine(app.state.settings)) as session:
@@ -222,12 +221,13 @@ def test_admin_user_listing_usage_and_disable():
         assert item["total_tokens"] == 150
         assert "password_hash" not in item
 
-        password_reset = client.post(
-            f"/api/admin/users/{member_id}/password-reset",
-            headers=admin_headers,
+        assert (
+            client.post(
+                f"/api/admin/users/{member_id}/password-reset",
+                headers=admin_headers,
+            ).status_code
+            == 404
         )
-        assert password_reset.status_code == 410
-
         disabled = client.post(
             f"/api/admin/users/{member_id}/disable",
             headers=admin_headers,
@@ -236,30 +236,176 @@ def test_admin_user_listing_usage_and_disable():
         assert disabled.json()["status"] == "disabled"
 
 
-def test_verification_endpoints_are_retired_without_side_effects():
+def test_public_registration_never_consumes_a_legacy_admin_allowlist():
+    settings = Settings(
+        env="test",
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        auth={"bootstrap_admin_emails": ["allowlisted@example.com"]},
+    )
+    with TestClient(create_app(settings)) as client:
+        _register(client, "allowlisted@example.com", "allowlisted password 123")
+
+    with Session(get_engine(settings)) as session:
+        user = session.exec(
+            select(AppUser).where(AppUser.email_normalized == "allowlisted@example.com")
+        ).one()
+        assert user.role == "user"
+    assert not hasattr(settings.auth, "bootstrap_admin_emails")
+
+
+def test_temporary_password_is_one_time_restricts_session_and_rotates_on_change():
+    app = auth_app()
+    with TestClient(app) as client:
+        _register(client, "member@example.com", "member password 123")
+        _login(client, "member@example.com", "member password 123")
+        with Session(get_engine(app.state.settings)) as session:
+            member = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "member@example.com")
+            ).one()
+            member_id = member.id
+            assert len(
+                session.exec(
+                    select(AuthSession).where(
+                        AuthSession.user_id == member_id,
+                        AuthSession.revoked_at.is_(None),
+                    )
+                ).all()
+            ) == 1
+
+        admin_headers = _login(client, "admin@example.com", "admin password 123")
+        issued_at = datetime.now(UTC)
+        response = client.post(
+            f"/api/admin/users/{member_id}/temporary-password",
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        payload = response.json()
+        temporary_password = payload["temporary_password"]
+        expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+        assert len(temporary_password) >= 24
+        assert issued_at + timedelta(hours=23, minutes=59) <= expires_at
+        assert expires_at <= issued_at + timedelta(hours=24, minutes=1)
+
+        with Session(get_engine(app.state.settings)) as session:
+            member = session.get(AppUser, member_id)
+            assert member is not None
+            assert member.must_change_password is True
+            assert member.temporary_password_expires_at == expires_at
+            assert all(
+                item.revoked_at is not None
+                for item in session.exec(
+                    select(AuthSession).where(AuthSession.user_id == member_id)
+                ).all()
+            )
+            audit = session.exec(
+                select(AdminAuditLog)
+                .where(AdminAuditLog.target_user_id == member_id)
+                .where(AdminAuditLog.action == "user.temporary_password_issued")
+            ).one()
+            assert temporary_password not in repr(audit.detail)
+
+        temporary_headers = _login(client, "member@example.com", temporary_password)
+        me = client.get("/api/auth/me")
+        assert me.status_code == 200
+        assert me.json()["must_change_password"] is True
+        assert me.json()["temporary_password_expires_at"] == payload["expires_at"]
+        restricted = client.get("/api/agents")
+        assert restricted.status_code == 403
+        assert restricted.json()["detail"]["code"] == "PASSWORD_CHANGE_REQUIRED"
+
+        changed = client.post(
+            "/api/auth/change-password",
+            headers=temporary_headers,
+            json={
+                "current_password": temporary_password,
+                "new_password": "member permanent password 456",
+            },
+        )
+        assert changed.status_code == 200
+        assert client.get("/api/auth/me").json()["must_change_password"] is False
+        assert client.get("/api/agents").status_code == 200
+        with Session(get_engine(app.state.settings)) as session:
+            member = session.get(AppUser, member_id)
+            assert member is not None
+            assert member.temporary_password_expires_at is None
+            active_sessions = session.exec(
+                select(AuthSession).where(
+                    AuthSession.user_id == member_id,
+                    AuthSession.revoked_at.is_(None),
+                )
+            ).all()
+            assert len(active_sessions) == 1
+
+        assert client.post(
+            "/api/auth/login",
+            json={"email": "member@example.com", "password": temporary_password},
+        ).status_code == 401
+
+
+def test_temporary_password_rejects_disabled_target_and_admin_self_reset():
+    app = auth_app()
+    with TestClient(app) as client:
+        _register(client, "disabled@example.com", "disabled password 123")
+        admin_headers = _login(client, "admin@example.com", "admin password 123")
+        with Session(get_engine(app.state.settings)) as session:
+            disabled = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "disabled@example.com")
+            ).one()
+            disabled.status = "disabled"
+            admin = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "admin@example.com")
+            ).one()
+            session.add(disabled)
+            session.commit()
+            disabled_id = disabled.id
+            admin_id = admin.id
+
+        assert client.post(
+            f"/api/admin/users/{disabled_id}/temporary-password",
+            headers=admin_headers,
+        ).status_code == 409
+        assert client.post(
+            f"/api/admin/users/{admin_id}/temporary-password",
+            headers=admin_headers,
+        ).status_code == 409
+
+def test_verification_endpoints_are_removed():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "person@example.com", "correct horse battery")
-        assert client.post("/api/auth/verify-email", json={"token": "old-token"}).status_code == 410
+        assert client.post("/api/auth/verify-email", json={"token": "old-token"}).status_code == 404
         assert client.post(
             "/api/auth/resend-verification", json={"email": "person@example.com"}
-        ).status_code == 410
+        ).status_code == 404
 
 
 def test_admin_can_view_session_messages_after_audit_is_recorded():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "member@example.com", "member password 123")
-        _register(client, "admin@example.com", "admin password 123")
         admin_headers = _login(client, "admin@example.com", "admin password 123")
 
         with Session(get_engine(app.state.settings)) as session:
             member = session.exec(
                 select(AppUser).where(AppUser.email_normalized == "member@example.com")
             ).one()
+            agent = AgentProfile(user_id=member.id, name="Member agent")
+            session.add(agent)
+            session.flush()
+            version = AgentVersion(
+                agent_id=agent.id,
+                version=1,
+                content_prompt="Create member content.",
+            )
+            session.add(version)
+            session.flush()
             chat = ChatSession(
-                agent_id="default-agent",
-                agent_version_id="default-agent-v1",
+                agent_id=agent.id,
+                agent_version_id=version.id,
                 user_id=member.id,
                 title="Session for audit",
             )

@@ -1,6 +1,7 @@
+from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
 
 class SchemaBase(BaseModel):
@@ -15,6 +16,14 @@ class SchemaBase(BaseModel):
                 raise ValueError("string cannot be blank or whitespace")
             return trimmed
         return value
+
+    @field_serializer("*", when_used="json")
+    def serialize_utc_datetimes(self, value: Any) -> Any:
+        if not isinstance(value, datetime):
+            return value
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("API datetimes must be timezone-aware")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 class InputSchemaBase(SchemaBase):

@@ -5,7 +5,7 @@ from typing import Any
 
 from models.base import new_id, utcnow
 from models.enums import MemoryKind, MemorySourceType
-from sqlalchemy import CheckConstraint, Column, Index, event, text
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKeyConstraint, Index, event, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -42,6 +42,18 @@ class MemoryRecord(SQLModel, table=True):
             "(agent_id IS NULL AND session_id IS NOT NULL)",
             name="ck_memoryrecord_owner",
         ),
+        ForeignKeyConstraint(
+            ["agent_id", "user_id"],
+            ["agentprofile.id", "agentprofile.user_id"],
+            name="fk_memoryrecord_agent_owner",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "user_id"],
+            ["chatsession.id", "chatsession.user_id"],
+            name="fk_memoryrecord_session_owner",
+            ondelete="CASCADE",
+        ),
     )
 
     id: str = Field(default_factory=lambda: new_id("mem"), primary_key=True)
@@ -73,11 +85,17 @@ class MemoryRecord(SQLModel, table=True):
     source_execution_id: str | None = Field(default=None, index=True)
     version: int = Field(default=1)
     access_count: int = Field(default=0)
-    last_accessed_at: datetime | None = Field(default=None, index=True)
-    expires_at: datetime | None = Field(default=None, index=True)
-    deleted_at: datetime | None = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
+    last_accessed_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    expires_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    deleted_at: datetime | None = Field(
+        default=None, index=True, sa_type=DateTime(timezone=True)
+    )
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
     def touch_updated_at(self, at: datetime | None = None) -> None:
         self.updated_at = utcnow() if at is None else at

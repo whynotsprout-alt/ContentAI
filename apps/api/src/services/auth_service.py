@@ -47,13 +47,12 @@ class AuthService:
         ).first()
         if existing is not None:
             raise AuthServiceError("该邮箱已注册", status_code=409)
-        role = "admin" if normalized in self.settings.auth.bootstrap_admin_emails else "user"
         now = utcnow()
         user = AppUser(
             email=normalized,
             email_normalized=normalized,
             password_hash=self.password_hash.hash(password),
-            role=role,
+            role="user",
             status="active",
             email_verified_at=now,
         )
@@ -110,6 +109,12 @@ class AuthService:
             raise AuthServiceError("邮箱或密码错误", status_code=401)
         if user.status == "disabled":
             raise AuthServiceError("账号已被禁用", status_code=403)
+        if (
+            user.must_change_password
+            and user.temporary_password_expires_at is not None
+            and user.temporary_password_expires_at <= now
+        ):
+            raise AuthServiceError("Temporary password has expired.", status_code=401)
         if user.status == "pending_verification" or user.email_verified_at is None:
             user.email_verified_at = now
             user.status = "active"
@@ -119,19 +124,15 @@ class AuthService:
         user.last_login_at = now
         user.updated_at = now
         session.add(user)
-        session_token = secrets.token_urlsafe(48)
-        csrf_token = secrets.token_urlsafe(32)
-        auth_session = AuthSession(
-            user_id=user.id,
-            token_hash=self.token_hash(session_token),
-            csrf_hash=self.token_hash(csrf_token),
-            user_agent=user_agent[:1000],
-            ip_address=ip_address[:120],
-            expires_at=now + timedelta(days=self.settings.auth.session_days),
+        issued = self._issue_session(
+            session,
+            user=user,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            now=now,
         )
-        session.add(auth_session)
         session.commit()
-        return IssuedSession(user=user, session_token=session_token, csrf_token=csrf_token)
+        return issued
 
     def logout(self, session: Session, session_id: str | None) -> None:
         if not session_id:
@@ -149,17 +150,29 @@ class AuthService:
         user_id: str,
         current_password: str,
         new_password: str,
-    ) -> None:
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> IssuedSession:
         user = session.get(AppUser, user_id)
         if user is None or not self.password_hash.verify(current_password, user.password_hash):
             raise AuthServiceError("当前密码错误", status_code=400)
         now = utcnow()
         user.password_hash = self.password_hash.hash(new_password)
         user.password_changed_at = now
+        user.must_change_password = False
+        user.temporary_password_expires_at = None
         user.updated_at = now
         session.add(user)
         self.revoke_all_sessions(session, user.id, commit=False)
+        issued = self._issue_session(
+            session,
+            user=user,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            now=now,
+        )
         session.commit()
+        return issued
 
     def revoke_all_sessions(self, session: Session, user_id: str, *, commit: bool = True) -> None:
         now = utcnow()
@@ -180,6 +193,33 @@ class AuthService:
             select(AppUser).where(AppUser.email_normalized == self.normalize_email(email))
         ).first()
 
+    def _issue_session(
+        self,
+        session: Session,
+        *,
+        user: AppUser,
+        user_agent: str,
+        ip_address: str,
+        now,
+    ) -> IssuedSession:
+        session_token = secrets.token_urlsafe(48)
+        csrf_token = secrets.token_urlsafe(32)
+        session.add(
+            AuthSession(
+                user_id=user.id,
+                token_hash=self.token_hash(session_token),
+                csrf_hash=self.token_hash(csrf_token),
+                user_agent=user_agent[:1000],
+                ip_address=ip_address[:120],
+                expires_at=now + timedelta(days=self.settings.auth.session_days),
+            )
+        )
+        return IssuedSession(
+            user=user,
+            session_token=session_token,
+            csrf_token=csrf_token,
+        )
+
     @staticmethod
     def to_response(user: AppUser) -> CurrentUserResponse:
         return CurrentUserResponse(
@@ -191,4 +231,6 @@ class AuthService:
             password_changed_at=user.password_changed_at,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
+            must_change_password=user.must_change_password,
+            temporary_password_expires_at=user.temporary_password_expires_at,
         )

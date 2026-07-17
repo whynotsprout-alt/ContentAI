@@ -37,6 +37,7 @@ def seed_execution() -> tuple[str, str]:
         execution = AgentExecution(
             id="execution-research-persistence",
             invocation_id=invocation.id,
+            session_id=chat.id,
             agent_version_id=chat.agent_version_id,
         )
         session.add(execution)

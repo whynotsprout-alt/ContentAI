@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from models.agent import AgentProfile
+from models.base import utcnow
 from models.chat import (
     AgentExecution,
     AgentInvocation,
@@ -18,9 +20,10 @@ from models.schemas.admin import (
     AdminSessionSummary,
     AdminUsageBucket,
     AdminUsageResponse,
+    TemporaryPasswordResponse,
 )
 from models.schemas.auth import AdminUserListResponse, AdminUserSummary
-from models.user import AdminAuditLog, AppUser, ModelUsage, UserActionToken
+from models.user import AdminAuditLog, AppUser, ModelUsage
 from services.auth_service import AuthService, AuthServiceError
 from sqlalchemy import func, text
 from sqlmodel import Session, select
@@ -130,6 +133,48 @@ class AdminService:
         session.commit()
         session.refresh(user)
         return self.user_summary(session, user)
+
+    def issue_temporary_password(
+        self,
+        session: Session,
+        *,
+        actor_user_id: str,
+        user_id: str,
+        request_id: str = "",
+    ) -> TemporaryPasswordResponse:
+        user = session.exec(
+            select(AppUser).where(AppUser.id == user_id).with_for_update()
+        ).first()
+        if user is None:
+            raise AuthServiceError("用户不存在", status_code=404)
+        if user.id == actor_user_id:
+            raise AuthServiceError("管理员不能为自己设置临时密码", status_code=409)
+        if user.status == "disabled":
+            raise AuthServiceError("不能为已禁用用户设置临时密码", status_code=409)
+
+        temporary_password = secrets.token_urlsafe(18)
+        now = utcnow()
+        expires_at = now + timedelta(hours=24)
+        user.password_hash = self.auth_service.password_hash.hash(temporary_password)
+        user.must_change_password = True
+        user.temporary_password_expires_at = expires_at
+        user.password_changed_at = now
+        user.updated_at = now
+        session.add(user)
+        self.auth_service.revoke_all_sessions(session, user.id, commit=False)
+        self._audit(
+            session,
+            actor_user_id=actor_user_id,
+            target_user_id=user.id,
+            action="user.temporary_password_issued",
+            request_id=request_id,
+            detail={"expires_at": expires_at.isoformat().replace("+00:00", "Z")},
+        )
+        session.commit()
+        return TemporaryPasswordResponse(
+            temporary_password=temporary_password,
+            expires_at=expires_at,
+        )
 
     def list_user_sessions(
         self,
@@ -324,19 +369,7 @@ class AdminService:
 
     @staticmethod
     def _disable_user_runtime(session: Session, user_id: str) -> None:
-        from models.base import utcnow
-
         now = utcnow()
-        tokens = session.exec(
-            select(UserActionToken).where(
-                UserActionToken.user_id == user_id,
-                UserActionToken.used_at.is_(None),
-            )
-        ).all()
-        for token in tokens:
-            token.used_at = now
-            session.add(token)
-
         executions = session.exec(
             select(AgentExecution)
             .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)

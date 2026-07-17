@@ -11,6 +11,11 @@ class AdminUserUpdate(InputSchemaBase):
     role: Literal["user", "admin"]
 
 
+class TemporaryPasswordResponse(SchemaBase):
+    temporary_password: str
+    expires_at: datetime
+
+
 class AdminSessionSummary(SchemaBase):
     session_id: str
     user_id: str
