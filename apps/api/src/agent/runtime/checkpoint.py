@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, MutableMapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -23,13 +24,34 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         self.delegate = delegate
 
     @staticmethod
-    def _physical(config: dict[str, Any]) -> dict[str, Any]:
+    def _execution_id(config: dict[str, Any] | None) -> str:
+        if not isinstance(config, dict):
+            raise ValueError("Checkpoint access requires an execution_id.")
+        configurable = config.get("configurable")
+        if not isinstance(configurable, dict):
+            raise ValueError("Checkpoint access requires an execution_id.")
+        execution_id = str(configurable.get("execution_id") or "").strip()
+        checkpoint_ns = str(configurable.get("checkpoint_ns") or "").strip()
+        if not execution_id:
+            raise ValueError("Checkpoint access requires an execution_id.")
+        if execution_id and checkpoint_ns and checkpoint_ns != execution_id:
+            raise ValueError("checkpoint_ns must match execution_id when both are provided.")
+        return execution_id
+
+    @classmethod
+    def _physical(
+        cls,
+        config: dict[str, Any],
+        *,
+        expected_execution_id: str | None = None,
+    ) -> dict[str, Any]:
+        execution_id = cls._execution_id(config)
+        if expected_execution_id is not None and execution_id != expected_execution_id:
+            raise ValueError("Checkpoint config crosses execution_id boundaries.")
         mapped = deepcopy(config)
         configurable = mapped.setdefault("configurable", {})
-        execution_id = configurable.get("execution_id") or configurable.get("checkpoint_ns")
-        if execution_id:
-            configurable["execution_id"] = str(execution_id)
-            configurable["checkpoint_ns"] = str(execution_id)
+        configurable["execution_id"] = execution_id
+        configurable["checkpoint_ns"] = execution_id
         return mapped
 
     @staticmethod
@@ -42,11 +64,8 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         mapped = deepcopy(config)
         configurable = mapped.setdefault("configurable", {})
         requested_configurable = requested.get("configurable", {})
-        execution_id = requested_configurable.get("execution_id") or requested_configurable.get(
-            "checkpoint_ns"
-        )
-        if execution_id:
-            configurable["execution_id"] = str(execution_id)
+        execution_id = ExecutionScopedCheckpointer._execution_id(requested)
+        configurable["execution_id"] = execution_id
         configurable["checkpoint_ns"] = str(requested_configurable.get("checkpoint_ns") or "")
         return mapped
 
@@ -73,11 +92,17 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         before: dict[str, Any] | None = None,
         limit: int | None = None,
     ) -> Iterator[CheckpointTuple]:
-        requested = config or {"configurable": {}}
+        execution_id = self._execution_id(config)
+        assert config is not None
+        requested = config
         values = self.delegate.list(
-            self._physical(requested) if config is not None else None,
+            self._physical(requested),
             filter=filter,
-            before=self._physical(before) if before is not None else None,
+            before=(
+                self._physical(before, expected_execution_id=execution_id)
+                if before is not None
+                else None
+            ),
             limit=limit,
         )
         for value in values:
@@ -116,18 +141,92 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         )
 
     def delete_thread(self, thread_id: str) -> None:
+        raise ValueError(
+            "Thread-wide deletion is forbidden on an execution-scoped checkpointer."
+        )
+
+    def delete_thread_maintenance(self, thread_id: str) -> None:
+        """Explicit maintenance operation used only when deleting a whole session."""
         self.delegate.delete_thread(thread_id)
 
     def delete_namespace(self, thread_id: str, checkpoint_ns: str) -> None:
+        thread_id = str(thread_id).strip()
+        checkpoint_ns = str(checkpoint_ns).strip()
+        if not thread_id or not checkpoint_ns:
+            raise ValueError("Namespace deletion requires thread_id and execution_id.")
+        delegate_delete_namespace = getattr(self.delegate, "delete_namespace", None)
+        if callable(delegate_delete_namespace):
+            delegate_delete_namespace(thread_id, checkpoint_ns)
+            return
         cursor_factory = getattr(self.delegate, "_cursor", None)
-        if not callable(cursor_factory):
+        if callable(cursor_factory):
+            with cursor_factory(pipeline=True) as cursor:
+                for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                    cursor.execute(
+                        f"DELETE FROM {table} WHERE thread_id = %s AND checkpoint_ns = %s",
+                        (thread_id, checkpoint_ns),
+                    )
+            return
+        storage = getattr(self.delegate, "storage", None)
+        writes = getattr(self.delegate, "writes", None)
+        blobs = getattr(self.delegate, "blobs", None)
+        if not all(isinstance(value, MutableMapping) for value in (storage, writes, blobs)):
             raise RuntimeError("Checkpoint saver does not support namespace deletion.")
-        with cursor_factory(pipeline=True) as cursor:
-            for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
-                cursor.execute(
-                    f"DELETE FROM {table} WHERE thread_id = %s AND checkpoint_ns = %s",
-                    (str(thread_id), str(checkpoint_ns)),
-                )
+        thread_storage = storage.get(thread_id)
+        if isinstance(thread_storage, MutableMapping):
+            thread_storage.pop(checkpoint_ns, None)
+            if not thread_storage:
+                storage.pop(thread_id, None)
+        for collection in (writes, blobs):
+            for key in list(collection):
+                if len(key) >= 2 and key[0] == thread_id and key[1] == checkpoint_ns:
+                    del collection[key]
+
+    async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple | None:
+        return await asyncio.to_thread(self.get_tuple, config)
+
+    async def alist(
+        self,
+        config: dict[str, Any] | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        values = await asyncio.to_thread(
+            lambda: list(self.list(config, filter=filter, before=before, limit=limit))
+        )
+        for value in values:
+            yield value
+
+    async def aput(
+        self,
+        config: dict[str, Any],
+        checkpoint: dict[str, Any],
+        metadata: dict[str, Any],
+        new_versions: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.put,
+            config,
+            checkpoint,
+            metadata,
+            new_versions,
+        )
+
+    async def aput_writes(
+        self,
+        config: dict[str, Any],
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        raise ValueError(
+            "Thread-wide deletion is forbidden on an execution-scoped checkpointer."
+        )
 
     def get_next_version(self, current: Any, channel: Any) -> Any:
         return self.delegate.get_next_version(current, channel)
@@ -241,7 +340,9 @@ def checkpoint_interrupts(
 
 
 def clear_thread_persistence(*, thread_id: str, checkpointer: Any) -> None:
-    delete_thread = getattr(checkpointer, "delete_thread", None)
+    delete_thread = getattr(checkpointer, "delete_thread_maintenance", None)
+    if not callable(delete_thread):
+        delete_thread = getattr(checkpointer, "delete_thread", None)
     if not callable(delete_thread):
         raise RuntimeError("LangGraph checkpointer does not support thread deletion.")
     delete_thread(thread_id)

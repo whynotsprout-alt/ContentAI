@@ -152,11 +152,15 @@ class PublicMemoryProposal(SchemaBase):
     content: constr(min_length=1, max_length=8000, strip_whitespace=True)
 
 
-class PublicInterrupt(SchemaBase):
-    interrupt_id: constr(min_length=1, max_length=255, strip_whitespace=True)
+class PublicInterruptAction(SchemaBase):
     tool_name: constr(min_length=1, max_length=255, strip_whitespace=True)
     purpose: constr(min_length=1, max_length=1000, strip_whitespace=True)
     memory: PublicMemoryProposal | None = None
+
+
+class PublicInterrupt(SchemaBase):
+    interrupt_id: constr(min_length=1, max_length=255, strip_whitespace=True)
+    actions: list[PublicInterruptAction] = Field(min_length=1)
 
 
 class UserReplyRequest(InputSchemaBase):

@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    String,
     UniqueConstraint,
     text,
 )
@@ -88,7 +89,7 @@ class AgentInvocation(SQLModel, table=True):
     agent_id: str = Field(index=True, foreign_key="agentprofile.id", ondelete="RESTRICT")
     user_id: str = Field(index=True, foreign_key="appuser.id", ondelete="CASCADE")
     idempotency_key: str | None = Field(default=None)
-    request_sha256: str | None = Field(default=None)
+    request_sha256: str | None = Field(default=None, sa_type=String(64))
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 

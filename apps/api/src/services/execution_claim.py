@@ -95,8 +95,9 @@ def claim_execution(
         continue_from_checkpoint = False
         if resume_request is not None:
             try:
+                checkpointer = service.runtime.get_checkpointer()
                 pending = pending_interrupt_descriptors(
-                    service.runtime.get_checkpointer(),
+                    checkpointer,
                     thread_id=chat.langgraph_thread_id,
                     checkpoint_ns=execution.id,
                 )
@@ -104,20 +105,37 @@ def claim_execution(
                 logger.exception("Checkpoint validation failed for execution %s", execution.id)
                 _fail_execution(session, execution, "CHECKPOINT_VALIDATION_FAILED", now)
                 return None
-            if resume_request.interrupt_id not in pending:
+            if resume_request.interrupt_id in pending:
+                if (
+                    len(resume_request.tool_calls_hash) == 64
+                    and pending[resume_request.interrupt_id] != resume_request.tool_calls_hash
+                ):
+                    resume_request.status = "stale"
+                    resume_request.updated_at = now
+                    session.add(resume_request)
+                    _fail_execution(session, execution, "RUN_INTERRUPT_STALE", now)
+                    return None
+                resume_value = load_resume_value(resume_request)
+            elif resume_request.status == "claimed":
+                checkpoint = checkpointer.get_tuple(
+                    execution_checkpoint_config(
+                        thread_id=chat.langgraph_thread_id,
+                        checkpoint_ns=execution.id,
+                    )
+                )
+                if checkpoint is None:
+                    resume_request.status = "stale"
+                    resume_request.updated_at = now
+                    session.add(resume_request)
+                    _fail_execution(session, execution, "RUN_INTERRUPT_STALE", now)
+                    return None
+                continue_from_checkpoint = True
+            else:
                 resume_request.status = "stale"
                 resume_request.updated_at = now
                 session.add(resume_request)
                 _fail_execution(session, execution, "RUN_INTERRUPT_STALE", now)
                 return None
-            if (
-                pending
-                and len(resume_request.tool_calls_hash) == 64
-                and pending[resume_request.interrupt_id] != resume_request.tool_calls_hash
-            ):
-                _fail_execution(session, execution, "INTERRUPT_TOOL_CALL_MISMATCH", now)
-                return None
-            resume_value = load_resume_value(resume_request)
             resume_request.status = "claimed"
             resume_request.claimed_by = worker_id
             resume_request.claimed_at = now

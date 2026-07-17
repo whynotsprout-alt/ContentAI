@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.security import AuthContext
+from core.security import AGENT_WILDCARD, AuthContext
 from models.chat import ChatSession
 from services.errors import ChatSessionNotFoundError
 from sqlmodel import Session, select
@@ -23,9 +23,19 @@ class ExecutionLineage:
         session_id: str,
         auth: AuthContext,
     ) -> ExecutionLineage:
+        statement = select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == auth.user_id,
+        )
+        if AGENT_WILDCARD not in auth.allowed_agent_ids:
+            allowed_agent_ids = tuple(
+                agent_id for agent_id in auth.allowed_agent_ids if agent_id
+            )
+            if not allowed_agent_ids:
+                raise ChatSessionNotFoundError(session_id)
+            statement = statement.where(ChatSession.agent_id.in_(allowed_agent_ids))
         chat = session.exec(
-            select(ChatSession)
-            .where(ChatSession.id == session_id)
+            statement
             .with_for_update()
             .execution_options(populate_existing=True)
         ).one_or_none()

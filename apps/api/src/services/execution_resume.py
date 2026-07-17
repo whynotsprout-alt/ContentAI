@@ -7,7 +7,7 @@ from typing import Any
 from agent.runtime.checkpoint import checkpoint_interrupts
 from models.base import utcnow
 from models.chat import ExecutionResumeRequest
-from models.schemas.chat import PublicInterrupt, PublicMemoryProposal
+from models.schemas.chat import PublicInterrupt, PublicInterruptAction, PublicMemoryProposal
 from sqlmodel import Session
 
 
@@ -29,10 +29,6 @@ def stable_json_hash(value: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def stored_resume_value(value: Any) -> dict[str, Any]:
-    return {"payload": value}
 
 
 def load_resume_value(request: ExecutionResumeRequest) -> Any:
@@ -112,22 +108,34 @@ def public_interrupt(payload: dict[str, Any] | None) -> PublicInterrupt | None:
     interrupt_id = str(first.get("id") or "").strip()
     value = first.get("value")
     tool_calls = value.get("tool_calls") if isinstance(value, dict) else None
-    call = tool_calls[0] if isinstance(tool_calls, list) and tool_calls else None
-    if not interrupt_id or not isinstance(call, dict):
+    if not interrupt_id or not isinstance(tool_calls, list) or not tool_calls:
         return None
-    tool_name = str(call.get("name") or "unknown_tool").strip() or "unknown_tool"
-    args = call.get("args") if isinstance(call.get("args"), dict) else {}
-    memory = None
-    if tool_name == "remember" and args.get("content"):
-        memory = PublicMemoryProposal(
-            type=str(args.get("kind") or "memory"),
-            content=str(args["content"]),
+    actions: list[PublicInterruptAction] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        tool_name = str(call.get("name") or "unknown_tool").strip() or "unknown_tool"
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        memory = None
+        if tool_name == "remember" and args.get("content"):
+            memory = PublicMemoryProposal(
+                type=str(args.get("kind") or "memory"),
+                content=str(args["content"]),
+            )
+        actions.append(
+            PublicInterruptAction(
+                tool_name=tool_name,
+                purpose=(
+                    "保存一条长期记忆" if tool_name == "remember" else f"运行工具 {tool_name}"
+                ),
+                memory=memory,
+            )
         )
+    if not actions:
+        return None
     return PublicInterrupt(
         interrupt_id=interrupt_id,
-        tool_name=tool_name,
-        purpose="保存一条长期记忆" if tool_name == "remember" else f"运行工具 {tool_name}",
-        memory=memory,
+        actions=actions,
     )
 
 
@@ -139,5 +147,4 @@ __all__ = [
     "pending_interrupt_ids",
     "public_interrupt",
     "stable_json_hash",
-    "stored_resume_value",
 ]

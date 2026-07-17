@@ -15,7 +15,7 @@ from langgraph.types import interrupt
 
 MODEL_STREAM_MAX_ATTEMPTS = 3
 MODEL_STREAM_RETRY_BASE_SECONDS = 0.25
-REJECTED_TOOL_MESSAGE = "宸插彇娑堜繚瀛榒."
+REJECTED_TOOL_MESSAGE = "已取消保存"
 
 
 def build_agent_node(model: Any):

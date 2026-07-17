@@ -6,8 +6,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import services.errors as service_errors
+import services.execution_resume as execution_resume_module
 from agent.graph import nodes as graph_nodes
 from agent.runtime.checkpoint import (
+    ExecutionScopedCheckpointer,
     RuntimePersistence,
     checkpoint_interrupts,
     checkpoint_messages,
@@ -38,7 +41,11 @@ from models.schemas.chat import AgentMessageRequest, ChatRequest, UserReplyReque
 from pydantic import ValidationError
 from services import tasks as tasks_module
 from services.conversation_service import ConversationService
-from services.errors import IdempotencyPayloadMismatchError, RunInterruptStaleError
+from services.errors import (
+    ChatSessionNotFoundError,
+    IdempotencyPayloadMismatchError,
+    RunInterruptStaleError,
+)
 from services.execution_claim import claim_execution
 from services.execution_lineage import ExecutionLineage
 from sqlalchemy import inspect, text
@@ -103,6 +110,12 @@ def test_resume_contract_accepts_only_interrupt_id_and_enum_decision(
     ).model_dump() == {"interrupt_id": "int-1", "decision": "reject"}
 
 
+def test_removed_free_text_resume_compatibility_symbols_stay_unreachable() -> None:
+    assert not hasattr(execution_resume_module, "stored_resume_value")
+    assert not hasattr(service_errors, "ExecutionNotResumableError")
+    assert not hasattr(service_errors, "ExecutionResumeValueRequiredError")
+
+
 def test_runtime_config_uses_execution_scoped_checkpoint_namespace() -> None:
     runtime = _runtime_container().create_runtime(
         tool_permissions=(),
@@ -118,6 +131,106 @@ def test_runtime_config_uses_execution_scoped_checkpoint_namespace() -> None:
     assert configurable["checkpoint_ns"] == "execution-1"
 
 
+def test_execution_scoped_checkpointer_fails_closed_and_isolates_sync_and_async_graphs() -> None:
+    thread_id = "thread-task2-memory-isolation"
+    config_a = execution_checkpoint_config(thread_id=thread_id, checkpoint_ns="execution-a")
+    config_b = execution_checkpoint_config(thread_id=thread_id, checkpoint_ns="execution-b")
+    checkpointer = ExecutionScopedCheckpointer(InMemorySaver())
+
+    def reply_node(state: MessagesState) -> dict[str, Any]:
+        content = str(state["messages"][-1].content)
+        return {"messages": [AIMessage(content=f"reply:{content}")]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("reply", reply_node)
+    builder.add_edge(START, "reply")
+    builder.add_edge("reply", END)
+    graph = builder.compile(checkpointer=checkpointer)
+
+    with pytest.raises(ValueError, match="execution_id"):
+        checkpointer.get_tuple({"configurable": {"thread_id": thread_id}})
+    with pytest.raises(ValueError, match="execution_id"):
+        checkpointer.get_tuple(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        )
+    with pytest.raises(ValueError, match="execution_id"):
+        checkpointer.get_tuple(
+            {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "execution-a",
+                }
+            }
+        )
+    with pytest.raises(ValueError, match="execution_id"):
+        list(checkpointer.list(None))
+    with pytest.raises(ValueError, match="execution_id"):
+        list(
+            graph.stream(
+                {"messages": [("user", "legacy-empty-namespace")]},
+                config={"configurable": {"thread_id": thread_id}},
+            )
+        )
+
+    list(graph.stream({"messages": [("user", "sync-a")]}, config=config_a))
+    assert [message.content for message in checkpoint_messages(
+        checkpointer, thread_id=thread_id, checkpoint_ns="execution-a"
+    )][-1] == "reply:sync-a"
+    assert checkpoint_messages(
+        checkpointer, thread_id=thread_id, checkpoint_ns="execution-b"
+    ) == []
+
+    async def exercise_async_paths() -> None:
+        async for _ in graph.astream(
+            {"messages": [("user", "async-b")]},
+            config=config_b,
+        ):
+            pass
+        tuple_a = await checkpointer.aget_tuple(config_a)
+        tuple_b = await checkpointer.aget_tuple(config_b)
+        assert tuple_a is not None
+        assert tuple_b is not None
+        assert tuple_a.config["configurable"]["execution_id"] == "execution-a"
+        assert tuple_b.config["configurable"]["execution_id"] == "execution-b"
+        assert tuple_a.config["configurable"]["checkpoint_ns"] == "execution-a"
+        assert tuple_b.config["configurable"]["checkpoint_ns"] == "execution-b"
+        assert [message.content for message in checkpoint_messages(
+            checkpointer, thread_id=thread_id, checkpoint_ns="execution-a"
+        )][-1] == "reply:sync-a"
+        assert [message.content for message in checkpoint_messages(
+            checkpointer, thread_id=thread_id, checkpoint_ns="execution-b"
+        )][-1] == "reply:async-b"
+        with pytest.raises(ValueError, match="execution_id"):
+            await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}})
+        with pytest.raises(ValueError, match="execution_id"):
+            await checkpointer.aget_tuple(
+                {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": "execution-a",
+                    }
+                }
+            )
+        with pytest.raises(ValueError, match="execution_id"):
+            async for _ in checkpointer.alist(None):
+                pass
+        with pytest.raises(ValueError, match="execution-scoped"):
+            await checkpointer.adelete_thread(thread_id)
+
+    import asyncio
+
+    asyncio.run(exercise_async_paths())
+    with pytest.raises(ValueError, match="execution-scoped"):
+        checkpointer.delete_thread(thread_id)
+    assert checkpointer.get_tuple(config_a) is not None
+    assert checkpointer.get_tuple(config_b) is not None
+    checkpointer.delete_namespace(thread_id, "execution-a")
+    assert checkpointer.get_tuple(config_a) is None
+    assert checkpointer.get_tuple(config_b) is not None
+    checkpointer.delete_namespace(thread_id, "execution-b")
+    assert checkpointer.get_tuple(config_b) is None
+
+
 def test_human_node_consumes_only_structured_reject(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         graph_nodes,
@@ -129,7 +242,7 @@ def test_human_node_consumes_only_structured_reject(monkeypatch: pytest.MonkeyPa
     result = node({"messages": []})
 
     assert result["human_approved"] is False
-    assert result["messages"][-1].content == "宸插彇娑堜繚瀛榒."
+    assert result["messages"][-1].content == "已取消保存"
 
 
 def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() -> None:
@@ -138,14 +251,24 @@ def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() ->
             "name": "run_interrupt",
             "interrupt": {
                 "interrupt_id": "int-public",
-                "tool_name": "remember",
-                "purpose": "保存一条长期记忆",
-                "memory": {"type": "preference", "content": "简洁回复"},
+                "actions": [
+                    {
+                        "tool_name": "remember",
+                        "purpose": "保存一条长期记忆",
+                        "memory": {"type": "preference", "content": "简洁回复"},
+                        "tool_call_id": "call-secret-1",
+                        "args": {"api_key": "secret-1"},
+                    },
+                    {
+                        "tool_name": "search",
+                        "purpose": "运行工具 search",
+                        "memory": None,
+                        "tool_call_id": "call-secret-2",
+                        "runtime": {"permissions": ["*"]},
+                    },
+                ],
                 "execution_id": "exe-secret",
                 "task_id": "task-secret",
-                "tool_call_id": "call-secret",
-                "args": {"api_key": "secret"},
-                "runtime": {"permissions": ["*"]},
             },
         },
         channel="interrupts",
@@ -155,9 +278,17 @@ def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() ->
         "name": "run_interrupt",
         "interrupt": {
             "interrupt_id": "int-public",
-            "tool_name": "remember",
-            "purpose": "保存一条长期记忆",
-            "memory": {"type": "preference", "content": "简洁回复"},
+            "actions": [
+                {
+                    "tool_name": "remember",
+                    "purpose": "保存一条长期记忆",
+                    "memory": {"type": "preference", "content": "简洁回复"},
+                },
+                {
+                    "tool_name": "search",
+                    "purpose": "运行工具 search",
+                },
+            ],
         },
     }
 
@@ -166,6 +297,7 @@ def test_invocation_request_digest_column_is_present_in_real_postgres() -> None:
     columns = {column["name"] for column in inspect(get_engine()).get_columns("agentinvocation")}
 
     assert "request_sha256" in columns
+    assert AgentInvocation.__table__.c.request_sha256.type.length == 64
 
 
 def test_unclaimed_watchdog_uses_publish_time_not_execution_creation(
@@ -248,6 +380,27 @@ def test_execution_lineage_locks_owned_session_and_derives_all_identity() -> Non
         assert lineage.user_id == "local-user"
         assert lineage.agent_id == "default-agent"
         assert lineage.agent_version_id == "default-agent-v1"
+
+
+def test_execution_lineage_does_not_lock_another_users_session() -> None:
+    with Session(get_engine()) as owner_session:
+        chat = _seed_chat(owner_session, suffix="lineage-other-user")
+
+    with Session(get_engine()) as unauthorized_session:
+        with pytest.raises(ChatSessionNotFoundError):
+            ExecutionLineage.resolve_for_update(
+                unauthorized_session,
+                chat.id,
+                AuthContext(user_id="other-user", allowed_agent_ids=("default-agent",)),
+            )
+
+        with Session(get_engine()) as concurrent_session:
+            locked = concurrent_session.exec(
+                select(ChatSession)
+                .where(ChatSession.id == chat.id)
+                .with_for_update(nowait=True)
+            ).one()
+            assert locked.id == chat.id
 
 
 def test_idempotency_key_is_bound_to_normalized_request_payload() -> None:

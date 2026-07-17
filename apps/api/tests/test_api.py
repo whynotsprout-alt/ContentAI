@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 import services.conversation_service as conversation_service_module
-from agent.runtime.checkpoint import RuntimePersistence
+from agent.runtime.checkpoint import RuntimePersistence, checkpoint_interrupts
 from agent.runtime.container import RuntimeContainer
 from api.app import create_app
 from api.chat import _stream_channel, _stream_exception_payload
@@ -28,6 +28,8 @@ from models.chat import (
     ChatMessage,
     ChatSession,
     ExecutionOutbox,
+    ExecutionResumeRequest,
+    ToolExecution,
 )
 from models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
@@ -1600,10 +1602,15 @@ def test_reject_resumes_original_namespace_without_executing_pending_tool():
         terminal = wait_for_terminal_session(client, chat["session_id"])
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == "宸插彇娑堜繚瀛榒."
+    assert terminal["messages"][-1]["content"] == "已取消保存"
     assert [message["content"] for message in terminal["messages"]].count(
         "已拒绝工具执行。"
     ) == 1
+    assistant_messages = [
+        message for message in terminal["messages"] if message["role"] == "assistant"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["content"] == "已取消保存"
     with Session(get_engine()) as db_session:
         assert db_session.exec(
             select(MemoryRecord).where(MemoryRecord.content == "must not be saved")
@@ -1677,7 +1684,16 @@ def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
                                 "api_key": "secret",
                             },
                             "type": "tool_call",
-                        }
+                        },
+                        {
+                            "id": "call-private-second",
+                            "name": "recall_memory",
+                            "args": {
+                                "query": "second action must be visible",
+                                "access_token": "second-secret",
+                            },
+                            "type": "tool_call",
+                        },
                     ],
                 )
             ]
@@ -1697,18 +1713,98 @@ def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
             json={"interrupt_id": "wrong-id", "decision": "approve"},
         )
 
-    assert set(public_interrupt) == {"interrupt_id", "tool_name", "purpose", "memory"}
-    assert public_interrupt["tool_name"] == "remember"
-    assert public_interrupt["memory"] == {
-        "type": "preference",
-        "content": "public memory content",
-    }
+    assert set(public_interrupt) == {"interrupt_id", "actions"}
+    assert public_interrupt["actions"] == [
+        {
+            "tool_name": "remember",
+            "purpose": "保存一条长期记忆",
+            "memory": {
+                "type": "preference",
+                "content": "public memory content",
+            },
+        },
+        {
+            "tool_name": "recall_memory",
+            "purpose": "运行工具 recall_memory",
+            "memory": None,
+        },
+    ]
     encoded = json.dumps(public_interrupt, ensure_ascii=False)
     assert "call-private-status" not in encoded
+    assert "call-private-second" not in encoded
     assert "api_key" not in encoded
     assert "secret" not in encoded
     assert wrong.status_code == 409
     assert wrong.json()["detail"]["code"] == "RUN_INTERRUPT_STALE"
+
+
+def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt():
+    install_fake_model(
+        FakeModel(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-hash-tamper",
+                            "name": "remember",
+                            "args": {"content": "hash protected memory"},
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        started = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "protect this approval"},
+        )
+        waiting = wait_for_terminal_session(client, chat["session_id"])
+        interrupt_id = waiting["latest_execution"]["interrupt"]["interrupt_id"]
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        try:
+            resumed = client.post(
+                f"/api/chat/runs/{started.json()['execution_id']}/resume",
+                json={"interrupt_id": interrupt_id, "decision": "approve"},
+            )
+        finally:
+            app.state.conversation_service.execution_dispatcher = dispatcher
+        assert resumed.status_code == 200
+
+        with Session(get_engine()) as db_session:
+            request = db_session.exec(
+                select(ExecutionResumeRequest).where(
+                    ExecutionResumeRequest.execution_id == started.json()["execution_id"]
+                )
+            ).one()
+            request.tool_calls_hash = "0" * 64
+            db_session.add(request)
+            db_session.commit()
+
+        claimed = claim_execution(
+            app.state.agent_service,
+            started.json()["execution_id"],
+            "hash-tamper-worker",
+            use_lease=False,
+        )
+
+    assert claimed is None
+    with Session(get_engine()) as db_session:
+        execution = db_session.get(AgentExecution, started.json()["execution_id"])
+        request = db_session.exec(
+            select(ExecutionResumeRequest).where(
+                ExecutionResumeRequest.execution_id == started.json()["execution_id"]
+            )
+        ).one()
+        assert execution is not None
+        assert execution.status == RunStatus.failed
+        assert execution.error == "RUN_INTERRUPT_STALE"
+        assert request.status == "stale"
 
 
 @pytest.mark.parametrize(
@@ -1723,43 +1819,56 @@ def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
 def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
     fault_window: str,
 ):
-    class _CrashBeforeCheckpointModel(FakeModel):
-        def __init__(self) -> None:
-            super().__init__([AIMessage(content="checkpoint final")])
-            self.crashed = False
-
-        def invoke(self, messages: list[Any]) -> AIMessage:
-            self.calls.append(messages)
-            if not self.crashed:
-                self.crashed = True
-                raise SystemExit("fault before first durable graph result")
-            return next(self.responses)
-
     class _CrashPersister(MessagePersister):
         def __init__(self, *, after_flush: bool) -> None:
             self.after_flush = after_flush
-            self.crashed = False
+            self.crashes_remaining = 2
 
         def persist_graph_messages(self, *args: Any, **kwargs: Any) -> ChatMessage | None:
-            if not self.after_flush and not self.crashed:
-                self.crashed = True
+            if not self.after_flush and self.crashes_remaining:
+                self.crashes_remaining -= 1
                 raise SystemExit("fault after END")
             message = super().persist_graph_messages(*args, **kwargs)
-            if self.after_flush and not self.crashed:
-                self.crashed = True
+            if self.after_flush and self.crashes_remaining:
+                self.crashes_remaining -= 1
                 raise SystemExit("fault after Assistant flush")
             return message
 
-    model = (
-        _CrashBeforeCheckpointModel()
-        if fault_window == "before_first_checkpoint"
-        else FakeModel([AIMessage(content="checkpoint final")])
+    class _CountingWriter:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        def emit(self, event_name: str, payload: dict[str, Any]) -> None:
+            self.events.append((event_name, dict(payload)))
+
+    memory_content = f"fault-side-effect-{fault_window}"
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": f"call-{fault_window}",
+                        "name": "remember",
+                        "args": {"content": memory_content, "kind": "preference"},
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="checkpoint final"),
+        ]
     )
     install_fake_model(model)
+    event_writer = _CountingWriter()
 
     with TestClient(app) as client:
         dispatcher = app.state.conversation_service.execution_dispatcher
         app.state.conversation_service.execution_dispatcher = None
+        service = app.state.agent_service
+        original_max_attempts = service.settings.agent.max_execution_attempts
+        original_persister = service.runner.execution_engine.message_persister
+        original_run_turn = service.runner.execution_engine.run_turn
+        service.settings.agent.max_execution_attempts = 6
         try:
             chat = client.post(
                 "/api/chat/sessions", json={"agent_id": "default-agent"}
@@ -1768,19 +1877,48 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                 f"/api/chat/sessions/{chat['session_id']}/messages",
                 json={"message": f"fault window {fault_window}"},
             )
-        finally:
-            app.state.conversation_service.execution_dispatcher = dispatcher
-
-        execution_id = started.json()["execution_id"]
-        service = app.state.agent_service
-        original_persister = service.runner.execution_engine.message_persister
-        if fault_window in {"after_end", "after_assistant_flush"}:
-            service.runner.execution_engine.message_persister = _CrashPersister(
-                after_flush=fault_window == "after_assistant_flush"
+            execution_id = started.json()["execution_id"]
+            initial_claim = claim_execution(
+                service,
+                execution_id,
+                f"fault-setup-{fault_window}",
+                use_lease=False,
             )
+            assert initial_claim is not None
+            with Session(get_engine()) as setup_session:
+                service.runner.run(
+                    setup_session,
+                    execution_id=execution_id,
+                    auth=initial_claim.auth,
+                    tool_permissions=initial_claim.auth.tool_permissions,
+                    event_writer=event_writer,
+                )
+            waiting = client.get(f"/api/chat/runs/{execution_id}/status").json()
+            assert waiting["status"] == "waiting_input"
+            interrupt_id = waiting["interrupt"]["interrupt_id"]
+            resumed = client.post(
+                f"/api/chat/runs/{execution_id}/resume",
+                json={"interrupt_id": interrupt_id, "decision": "approve"},
+            )
+            assert resumed.status_code == 200
 
-        crashed = False
-        try:
+            crashes_before_checkpoint = 2
+
+            def crash_before_checkpoint(**kwargs: Any) -> Any:
+                nonlocal crashes_before_checkpoint
+                if crashes_before_checkpoint:
+                    crashes_before_checkpoint -= 1
+                    raise SystemExit("fault before first resumed checkpoint")
+                return original_run_turn(**kwargs)
+
+            if fault_window == "before_first_checkpoint":
+                service.runner.execution_engine.run_turn = crash_before_checkpoint
+            elif fault_window in {"after_end", "after_assistant_flush"}:
+                service.runner.execution_engine.message_persister = _CrashPersister(
+                    after_flush=fault_window == "after_assistant_flush"
+                )
+
+            real_deliveries = 0
             for delivery in range(3):
                 claimed = claim_execution(
                     service,
@@ -1788,10 +1926,11 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                     f"fault-worker-{delivery}",
                     use_lease=False,
                 )
-                if claimed is None:
-                    continue
+                assert claimed is not None
+                real_deliveries += 1
+                crashed = False
                 with Session(get_engine()) as db_session:
-                    if fault_window == "before_terminal_commit" and delivery == 0:
+                    if fault_window == "before_terminal_commit" and delivery < 2:
                         def crash_before_terminal_commit(session: Any) -> None:
                             execution = session.get(AgentExecution, execution_id)
                             if execution is not None and execution.status == RunStatus.completed:
@@ -1807,18 +1946,19 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                             resume_value=claimed.resume_value,
                             resume_request_id=claimed.resume_request_id,
                             continue_from_checkpoint=claimed.continue_from_checkpoint,
+                            event_writer=event_writer,
                         )
                     except SystemExit:
                         crashed = True
                     finally:
-                        if fault_window == "before_terminal_commit" and delivery == 0:
+                        if fault_window == "before_terminal_commit" and delivery < 2:
                             event.remove(
                                 db_session,
                                 "before_commit",
                                 crash_before_terminal_commit,
                             )
-                if crashed:
-                    service.runner.execution_engine.message_persister = original_persister
+                if delivery < 2:
+                    assert crashed
                     with Session(get_engine()) as recovery_session:
                         execution = recovery_session.get(AgentExecution, execution_id)
                         assert execution is not None
@@ -1838,9 +1978,14 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                                 recovery_session.add(attempt)
                         recovery_session.add(execution)
                         recovery_session.commit()
-                    crashed = False
+                else:
+                    assert not crashed
+            assert real_deliveries == 3
         finally:
+            service.runner.execution_engine.run_turn = original_run_turn
             service.runner.execution_engine.message_persister = original_persister
+            service.settings.agent.max_execution_attempts = original_max_attempts
+            app.state.conversation_service.execution_dispatcher = dispatcher
 
     with Session(get_engine()) as db_session:
         execution = db_session.get(AgentExecution, execution_id)
@@ -1850,12 +1995,61 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                 ChatMessage.role == MessageRole.assistant,
             )
         ).all()
+        resume_requests = db_session.exec(
+            select(ExecutionResumeRequest).where(
+                ExecutionResumeRequest.execution_id == execution_id
+            )
+        ).all()
+        attempts = db_session.exec(
+            select(AgentExecutionAttempt)
+            .where(AgentExecutionAttempt.execution_id == execution_id)
+            .order_by(AgentExecutionAttempt.ordinal)
+        ).all()
+        tool_executions = db_session.exec(
+            select(ToolExecution).where(ToolExecution.execution_id == execution_id)
+        ).all()
+        outboxes = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "execute",
+            )
+        ).all()
+        memories = db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == memory_content)
+        ).all()
         assert execution is not None
         assert execution.status == RunStatus.completed
         assert execution.interrupt_payload == {}
         assert len(assistants) == 1
         assert assistants[0].content == "checkpoint final"
-    assert len(model.calls) == (2 if fault_window == "before_first_checkpoint" else 1)
+        assert len(resume_requests) == 1
+        assert resume_requests[0].status == "consumed"
+        assert resume_requests[0].consumed_at is not None
+        assert len(attempts) == 4
+        assert all(attempt.finished_at is not None for attempt in attempts)
+        assert [attempt.status for attempt in attempts] == [
+            ExecutionAttemptStatus.waiting_input,
+            ExecutionAttemptStatus.lease_lost,
+            ExecutionAttemptStatus.lease_lost,
+            ExecutionAttemptStatus.completed,
+        ]
+        assert len(tool_executions) == 1
+        assert tool_executions[0].status.value == "completed"
+        assert len(memories) == 1
+        assert len(outboxes) == 1
+        chat_row = db_session.get(ChatSession, execution.session_id)
+        assert chat_row is not None
+        checkpoint_thread_id = chat_row.langgraph_thread_id
+    assert checkpoint_interrupts(
+        service.runtime.get_checkpointer(),
+        thread_id=checkpoint_thread_id,
+        checkpoint_ns=execution_id,
+    ) == []
+    event_names = [name for name, _payload in event_writer.events]
+    assert event_names.count("tool_end") == 1
+    assert event_names.count("assistant_message") == 1
+    assert event_names.count("message_finish") == 1
+    assert event_names.count("run_finish") == 1
 
 
 def test_running_run_can_be_cancel_requested():

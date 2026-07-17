@@ -74,14 +74,6 @@ class StreamingDegradedError(ConversationError):
     pass
 
 
-class ExecutionNotResumableError(ConversationError):
-    pass
-
-
-class ExecutionResumeValueRequiredError(ConversationError):
-    pass
-
-
 class IdempotencyPayloadMismatchError(ConversationError):
     pass
 

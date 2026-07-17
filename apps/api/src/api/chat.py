@@ -33,8 +33,6 @@ from services.errors import (
     AgentNotFoundError,
     ChatSessionNotFoundError,
     ExecutionNotFoundError,
-    ExecutionNotResumableError,
-    ExecutionResumeValueRequiredError,
     IdempotencyKeyConflictError,
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
@@ -59,8 +57,6 @@ ServiceHttpError = (
     | ActiveExecutionExistsError
     | ChatSessionNotFoundError
     | ExecutionNotFoundError
-    | ExecutionNotResumableError
-    | ExecutionResumeValueRequiredError
     | IdempotencyKeyConflictError
     | IdempotencyPayloadMismatchError
     | InvalidCursorError
@@ -76,8 +72,6 @@ SERVICE_HTTP_ERRORS = (
     ActiveExecutionExistsError,
     ChatSessionNotFoundError,
     ExecutionNotFoundError,
-    ExecutionNotResumableError,
-    ExecutionResumeValueRequiredError,
     IdempotencyKeyConflictError,
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
@@ -634,18 +628,6 @@ def _http_exception_for_service_error(
                 execution_id=execution_id,
             ),
         )
-    if isinstance(exc, ExecutionResumeValueRequiredError):
-        return HTTPException(
-            status_code=400,
-            detail=_build_service_error_detail(
-                code="EXECUTION_RESUME_VALUE_REQUIRED",
-                message=str(exc),
-                request_id=request_id,
-                session_id=session_id,
-                thread_id=thread_id,
-                execution_id=execution_id,
-            ),
-        )
     if isinstance(exc, IdempotencyPayloadMismatchError):
         return HTTPException(
             status_code=409,
@@ -691,15 +673,11 @@ def _http_exception_for_service_error(
                 execution_id=execution_id,
             ),
         )
-    if isinstance(exc, ActiveExecutionExistsError | ExecutionNotResumableError):
+    if isinstance(exc, ActiveExecutionExistsError):
         return HTTPException(
             status_code=409,
             detail=_build_service_error_detail(
-                code=(
-                    "SESSION_HAS_ACTIVE_EXECUTION"
-                    if isinstance(exc, ActiveExecutionExistsError)
-                    else "EXECUTION_STATE_ERROR"
-                ),
+                code="SESSION_HAS_ACTIVE_EXECUTION",
                 message=str(exc),
                 request_id=request_id,
                 session_id=session_id,
@@ -900,25 +878,42 @@ def _sanitize_public_interrupt(value: Any) -> dict[str, Any] | None:
     if "interrupts" in value:
         sanitized = public_interrupt(value)
         return sanitized.model_dump(exclude_none=True) if sanitized is not None else None
-    if "interrupt_id" in value:
-        source = value
-    else:
+    interrupt_id = value.get("interrupt_id")
+    actions = value.get("actions")
+    if not isinstance(interrupt_id, str) or not interrupt_id or not isinstance(actions, list):
         return None
-    result = {
-        key: source.get(key)
-        for key in ("interrupt_id", "tool_name", "purpose")
-        if isinstance(source.get(key), str) and source.get(key)
-    }
-    memory = source.get("memory")
-    if isinstance(memory, dict):
-        memory_result = {
-            key: memory.get(key)
-            for key in ("type", "content")
-            if isinstance(memory.get(key), str) and memory.get(key)
+    sanitized_actions: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        tool_name = action.get("tool_name")
+        purpose = action.get("purpose")
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if not isinstance(purpose, str) or not purpose:
+            continue
+        sanitized_action: dict[str, Any] = {
+            "tool_name": tool_name,
+            "purpose": purpose,
         }
-        if set(memory_result) == {"type", "content"}:
-            result["memory"] = memory_result
-    return result or None
+        memory = action.get("memory")
+        if isinstance(memory, dict):
+            memory_type = memory.get("type")
+            content = memory.get("content")
+            if (
+                isinstance(memory_type, str)
+                and memory_type
+                and isinstance(content, str)
+                and content
+            ):
+                sanitized_action["memory"] = {
+                    "type": memory_type,
+                    "content": content,
+                }
+        sanitized_actions.append(sanitized_action)
+    if not sanitized_actions:
+        return None
+    return {"interrupt_id": interrupt_id, "actions": sanitized_actions}
 
 
 def _normalize_stream_error_payload(
