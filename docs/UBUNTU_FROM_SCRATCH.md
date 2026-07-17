@@ -1,25 +1,32 @@
-# Ubuntu 从零部署 ContentAI V0.4.3
+# Ubuntu 部署指南（ContentAI v0.4.3）
 
-本文适用于全新 Ubuntu LTS 服务器和全新数据库。部署完成后，会在数据库中创建管理员 `1848714681@qq.cpm`，初始密码为 `WnaFan2026`。
+本文用于在全新的 Ubuntu 22.04 或 24.04 LTS 服务器上部署 ContentAI。生产环境使用 Docker Compose，应用只在本机回环地址暴露 Web 服务，由 Nginx 或 Caddy 负责 HTTPS。
 
-> 注意：邮箱地址按提供内容使用 `.cpm`。如这是笔误，请在部署前把本文和 `.env` 中的地址一并改为正确邮箱。初始密码仅用于首次登录；在服务器对外开放前，请登录后立即修改密码。
+> 本指南仅适用于全新数据库。不要将其直接用于旧版本数据库的原地升级；先完成备份和恢复演练。
 
-## 1. 准备服务器
+## 1. 部署前准备
 
-需要一台可通过 SSH 登录的 Ubuntu LTS 服务器、一个已经解析到该服务器的域名，以及可使用 `sudo` 的账户。防火墙只开放 SSH、HTTP 和 HTTPS：
+准备以下资源：
 
-```bash
+- 可通过 SSH 登录、拥有 `sudo` 权限的 Ubuntu LTS 服务器；
+- 已解析至服务器公网 IP 的域名；
+- 用于模型中继与所选搜索提供方的密钥；
+- 一个强密码的默认管理员账号。
+
+开放 SSH、HTTP、HTTPS，其他端口不对公网开放：
+
+~~~bash
 sudo ufw allow OpenSSH
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw enable
-```
+~~~
 
 ## 2. 安装 Docker Engine 与 Compose
 
-以下命令使用 Docker 官方 Ubuntu APT 仓库。官方安装说明见 <https://docs.docker.com/engine/install/ubuntu/>。
+以下命令使用 Docker 官方 APT 仓库。若已有 Docker Compose v2，可跳到下一节。
 
-```bash
+~~~bash
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -28,79 +35,87 @@ sudo chmod a+r /etc/apt/keyrings/docker.asc
 
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo \"${UBUNTU_CODENAME:-$VERSION_CODENAME}\") stable" | \
+  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
-sudo docker run --rm hello-world
 sudo usermod -aG docker "$USER"
-```
+~~~
 
-重新登录 SSH（或新开一个终端会话）后，确认当前用户可以直接执行 Docker 命令；后续部署命令均以此用户执行：
+重新登录 SSH 后确认：
 
-```bash
+~~~bash
 docker version
 docker compose version
-```
+~~~
 
 ## 3. 下载并校验发布包
 
-```bash
+~~~bash
 cd /tmp
 curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.4.3/contentai-0.4.3-ubuntu.tar.gz
 
-echo '9F901591D57247AF9635938717ED23917C88BF19F345A84D79B14693332D8B65  contentai-0.4.3-ubuntu.tar.gz' | sha256sum -c -
+echo '22CCDF446D3AB3AC563E798CDECDAECEA07E42EFCAB965C9965DD6FF67B8F2A8  contentai-0.4.3-ubuntu.tar.gz' | sha256sum -c -
 
 sudo install -d -m 0755 /opt/contentai
 sudo tar -xzf contentai-0.4.3-ubuntu.tar.gz -C /opt/contentai
 sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.4.3-ubuntu
 cd /opt/contentai/contentai-0.4.3-ubuntu
-```
+~~~
 
-也可从源码部署：
+也可从源码安装：
 
-```bash
-git clone --branch codex/release-v0.4.3 --single-branch https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.4.3
+~~~bash
+git clone --branch codex/release-v0.4.3 --single-branch \
+  https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.4.3
 cd /opt/contentai/contentai-0.4.3
-```
+~~~
 
 ## 4. 配置生产环境
 
-复制模板并限制权限：
+复制模板并限制其读取权限：
 
-```bash
+~~~bash
 cp .env.example .env
 chmod 600 .env
-```
+~~~
 
-编辑 `.env`，至少替换以下值。`POSTGRES_PASSWORD` 与 `CONTENTAI_DATABASE__URL` 中的密码必须完全一致；域名必须使用实际的 HTTPS 地址。
+编辑 `.env`。下列是生产启动所需的最小配置；数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 完全一致。
 
-```dotenv
+~~~dotenv
+# Docker 与数据库
 CONTENTAI_ENV=production
 POSTGRES_DB=contentai
 POSTGRES_USER=contentai
-POSTGRES_PASSWORD=请替换为高强度数据库密码
-CONTENTAI_DATABASE__URL=postgresql+psycopg://contentai:请替换为同一高强度数据库密码@postgres:5432/contentai
-
+POSTGRES_PASSWORD=replace-with-a-long-url-safe-password
+CONTENTAI_DATABASE__URL=postgresql+psycopg://contentai:replace-with-a-long-url-safe-password@postgres:5432/contentai
 WEB_PORT=5180
+
+# 浏览器访问域名（HTTPS 由反向代理终止）
 CONTENTAI_SERVER__FRONTEND_ORIGINS=https://content.example.com
-CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS=["1848714681@qq.cpm"]
 
-CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=请填写实际密钥
-CONTENTAI_SEARCH__TIKHUB_API_KEY=请填写实际密钥
-CONTENTAI_SEARCH__METASO_API_KEY=请填写实际密钥
-CONTENTAI_SEARCH__ANSPIRE_API_KEY=请填写实际密钥
-```
+# 模型中继：生产环境必填
+CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=replace-with-relay-key
 
-其余模型和限流配置按 `.env.example` 的说明补全。不要提交 `.env`。
+# 仅填写实际启用的搜索提供方
+CONTENTAI_SEARCH__TIKHUB_API_KEY=
+CONTENTAI_SEARCH__METASO_API_KEY=
+CONTENTAI_SEARCH__ANSPIRE_API_KEY=
+
+# 首次启动时自动创建；已有同邮箱账号不会被覆盖
+CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-long-unique-password
+~~~
+
+不要配置已下线的邮件验证、SMTP、`PUBLIC_BASE_URL` 或邮件密码重置变量。所有搜索密钥必须是对应服务提供的原始值；Metaso 密钥仅支持 ASCII 字符。
 
 ## 5. 配置 Nginx 与 HTTPS
 
-应用容器只监听 `127.0.0.1:5180`，通过宿主机 Nginx 对外提供 HTTPS。将 `content.example.com` 改为实际域名：
+应用只将 Web 服务绑定到 `127.0.0.1:${WEB_PORT}`。将 `content.example.com` 替换为实际域名：
 
-```bash
+~~~bash
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 
 sudo tee /etc/nginx/sites-available/contentai > /dev/null <<'EOF'
@@ -110,10 +125,12 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:5180;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
     }
 }
 EOF
@@ -123,49 +140,70 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
 sudo certbot --nginx -d content.example.com
-```
+~~~
 
-## 6. 启动服务
+完成后 Certbot 会续期证书；可用 `sudo certbot renew --dry-run` 验证续期。
 
-```bash
+## 6. 启动与验证
+
+~~~bash
+cd /opt/contentai/contentai-0.4.3-ubuntu
 docker compose --env-file .env config --quiet
 bash infra/ubuntu/deploy.sh
 bash infra/ubuntu/health.sh
-```
+~~~
 
-`migration` 显示为 `Exited (0)` 属于正常现象；其余服务应为 `healthy` 或 `Up`。
+`migration` 是一次性容器，显示 `Exited (0)` 属于正常现象。其余服务应为 `healthy` 或 `Up`：
 
-## 7. 创建初始管理员
+~~~bash
+docker compose --env-file .env ps
+curl --fail https://content.example.com/api/ready
+~~~
 
-确认 API 健康后，在服务器本机执行下列命令。应用会将用户写入数据库；由于邮箱已出现在 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS` 中，该用户会以 `admin` 角色创建。
+首次 API 启动会自动创建由 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 指定的已激活管理员。该邮箱若已存在，服务不会更改其密码、角色或状态；因此无需、也不应调用注册接口手工创建默认管理员。
 
-```bash
-curl --fail --show-error --silent \
-  -X POST http://127.0.0.1:5180/api/auth/register \
-  -H 'Content-Type: application/json' \
-  --data '{"email":"1848714681@qq.cpm","password":"WnaFan2026"}'
+使用该账号登录后立即修改初始密码。初始密码应保存在受控的密钥管理系统中，不应写入文档、Shell 历史或版本库。
 
-curl --fail --show-error --silent \
-  -c /tmp/contentai-admin.cookies \
-  -X POST http://127.0.0.1:5180/api/auth/login \
-  -H 'Content-Type: application/json' \
-  --data '{"email":"1848714681@qq.cpm","password":"WnaFan2026"}' | tee /tmp/contentai-admin.json
+## 7. 日志与深度搜索排错
 
-grep -q '"role":"admin"' /tmp/contentai-admin.json && echo '管理员创建成功'
-rm -f /tmp/contentai-admin.cookies /tmp/contentai-admin.json
-```
-
-若注册返回 `409`，说明该邮箱已经存在。本文只面向全新数据库；不要直接修改 `password_hash`。请先确认是否部署到了已有数据，再按既有管理员流程处理。
-
-## 8. 首次登录与日常检查
-
-浏览器打开 `https://content.example.com`，使用上述账号登录，并立即修改初始密码。日常健康检查和日志命令：
-
-```bash
-cd /opt/contentai/contentai-0.4.3-ubuntu
-bash infra/ubuntu/health.sh
+~~~bash
+# API、鉴权、就绪检查与 HTTP 请求
 docker compose --env-file .env logs --tail 200 api
-docker compose --env-file .env logs --follow agent-worker
-```
 
-备份、恢复与升级说明见 [OPERATIONS.md](OPERATIONS.md)。
+# 深度搜索、工具调用、模型执行与队列任务
+docker compose --env-file .env logs --follow agent-worker
+
+# 调度或后台处理问题
+docker compose --env-file .env logs --tail 200 dispatcher background-worker
+~~~
+
+深度搜索的工具调用错误优先查看 `agent-worker`。若浏览器只显示请求失败或 SSE 中断，再查看 `api` 日志。
+
+## 8. 备份、恢复与升级
+
+~~~bash
+# 备份 PostgreSQL，并生成同名 SHA-256 文件
+bash infra/ubuntu/backup.sh /srv/contentai-backups
+
+# 恢复会覆盖数据库，必须显式确认
+CONTENTAI_CONFIRM_RESTORE=yes bash infra/ubuntu/restore.sh \
+  /srv/contentai-backups/contentai-YYYYMMDDTHHMMSSZ.sql.gz
+
+# 升级前自动备份、构建并重启
+bash infra/ubuntu/upgrade.sh
+~~~
+
+在升级前先备份 `.env` 与数据库。将新发布包解压到新的版本目录，复制原有 `.env`，执行 `docker compose --env-file .env config --quiet` 后再运行升级脚本。
+
+## 9. 常见故障
+
+| 现象 | 首要检查 |
+| --- | --- |
+| `migration` 失败 | `.env` 中数据库密码与 URL 是否一致；`docker compose logs migration` |
+| API 不健康 | `bash infra/ubuntu/health.sh` 与 `docker compose logs api` |
+| 深度搜索失败 | `docker compose logs agent-worker`；搜索密钥和模型中继配置 |
+| Web 可打开但 API 失败 | `https://域名/api/ready`、Nginx 配置和 `docker compose logs api` |
+| 默认管理员无法登录 | 确认使用首次部署设置的邮箱；已有同邮箱用户不会被启动逻辑重置 |
+| 事件流中断 | Nginx 的 `proxy_buffering off`、Redis 健康状态与 API 日志 |
+
+更多运行维护说明见 [OPERATIONS.md](OPERATIONS.md)。
