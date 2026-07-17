@@ -188,7 +188,7 @@ class AgentRunner:
             try:
                 clear_execution_persistence(
                     thread_id=chat.langgraph_thread_id,
-                    checkpoint_ns=execution.id,
+                    execution_id=execution.id,
                     checkpointer=self.container.get_checkpointer(),
                 )
             except Exception:  # noqa: BLE001

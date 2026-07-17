@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from typing import Any
 
 from agent.prompts.registry import load_tool_description
 from agent.runtime.context import get_tool_runtime_context
@@ -24,6 +26,30 @@ _MEMORY_TEXT_FIELDS = (
 )
 
 
+@dataclass(frozen=True)
+class NormalizedRememberInput:
+    kind: str
+    content: str
+
+
+def normalize_remember_input(
+    content: Any,
+    kind: Any = "semantic",
+) -> NormalizedRememberInput | None:
+    """Normalize the exact kind/content pair that the remember tool persists."""
+    if not isinstance(content, str):
+        return None
+    if kind is not None and not isinstance(kind, str):
+        return None
+    normalized_content = _normalize_text(_extract_memory_text(content))
+    if not normalized_content:
+        return None
+    return NormalizedRememberInput(
+        kind=_normalize_kind(kind),
+        content=normalized_content[:_MAX_REMEMBER_CONTENT_LENGTH].strip(),
+    )
+
+
 @tool("remember", description=load_tool_description("remember"))
 def remember(content: str, kind: str = "semantic") -> dict[str, str]:
     """Persist runtime memory with content/ kind restrictions."""
@@ -36,12 +62,10 @@ def remember(content: str, kind: str = "semantic") -> dict[str, str]:
     if not context.can_use_tool("remember"):
         return {"error": "Tool is not allowed for this run.", "tool": "remember"}
 
-    normalized_content = _normalize_text(_extract_memory_text(content))
-    if not normalized_content:
+    normalized = normalize_remember_input(content, kind)
+    if normalized is None:
         return {"error": "Content is required for memory storage.", "tool": "remember"}
-    normalized_kind = _normalize_kind(kind)
-    sanitized_content = normalized_content[:_MAX_REMEMBER_CONTENT_LENGTH]
-    if is_sensitive_memory(sanitized_content):
+    if is_sensitive_memory(normalized.content):
         return {
             "error": "Potentially sensitive content is not allowed for memory storage.",
             "tool": "remember",
@@ -50,10 +74,10 @@ def remember(content: str, kind: str = "semantic") -> dict[str, str]:
     try:
         entry = context.long_term_memory.remember(
             context.agent_id,
-            sanitized_content,
+            normalized.content,
             user_id=context.user_id,
             session_id=context.conversation_id,
-            kind=normalized_kind,
+            kind=normalized.kind,
             payload={
                 **_memory_scope_metadata(context),
                 "source": "tool",
@@ -117,9 +141,7 @@ def _extract_memory_text(value: str) -> str:
         return ""
     parsed_candidate = _safe_parse_json(raw)
     if parsed_candidate is not None:
-        extracted = _extract_text_from_payload(parsed_candidate)
-        if extracted:
-            return extracted
+        return _extract_text_from_payload(parsed_candidate)
     return candidate
 
 
@@ -137,20 +159,12 @@ def _extract_text_from_payload(value: object) -> str:
                 normalized = _normalize_text(value[field])
                 if normalized:
                     return normalized
-        for item in value.values():
-            if isinstance(item, str):
-                normalized = _normalize_text(item)
-                if normalized:
-                    return normalized
     if isinstance(value, list):
         for item in value:
-            if isinstance(item, str):
-                normalized = _normalize_text(item)
-                if normalized:
-                    return normalized
-            extracted = _extract_text_from_payload(item)
-            if extracted:
-                return extracted
+            if isinstance(item, dict | list):
+                extracted = _extract_text_from_payload(item)
+                if extracted:
+                    return extracted
     return ""
 
 
@@ -169,3 +183,6 @@ def _memory_scope_metadata(context) -> dict[str, object]:
 def _normalize_kind(value: str | None) -> str:
     normalized = (value or "").strip().lower()
     return normalized if normalized in _ALLOWED_MEMORY_KINDS else MemoryKind.semantic
+
+
+__all__ = ["NormalizedRememberInput", "normalize_remember_input", "recall_memory", "remember"]

@@ -773,6 +773,9 @@ class ConversationService:
         ).one_or_none()
         if locked is None or locked.status != RunStatus.waiting_input:
             raise RunInterruptStaleError("The run interrupt is stale.")
+        safe_interrupt = public_interrupt(locked.interrupt_payload)
+        if safe_interrupt is None or safe_interrupt.interrupt_id != interrupt_id:
+            raise RunInterruptStaleError("The run interrupt is stale.")
         pending_interrupt_id, tool_calls_hash = interrupt_identity(locked.interrupt_payload)
         if not pending_interrupt_id or interrupt_id != pending_interrupt_id:
             raise RunInterruptStaleError("The run interrupt is stale.")

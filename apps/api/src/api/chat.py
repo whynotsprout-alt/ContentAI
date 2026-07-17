@@ -43,7 +43,7 @@ from services.errors import (
     StreamReplayExpiredError,
     StreamReplayGapError,
 )
-from services.execution_resume import public_interrupt
+from services.execution_resume import public_interrupt, public_interrupt_from_projection
 
 router = APIRouter(prefix="/chat")
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -877,43 +877,9 @@ def _sanitize_public_interrupt(value: Any) -> dict[str, Any] | None:
         return None
     if "interrupts" in value:
         sanitized = public_interrupt(value)
-        return sanitized.model_dump(exclude_none=True) if sanitized is not None else None
-    interrupt_id = value.get("interrupt_id")
-    actions = value.get("actions")
-    if not isinstance(interrupt_id, str) or not interrupt_id or not isinstance(actions, list):
-        return None
-    sanitized_actions: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        tool_name = action.get("tool_name")
-        purpose = action.get("purpose")
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        if not isinstance(purpose, str) or not purpose:
-            continue
-        sanitized_action: dict[str, Any] = {
-            "tool_name": tool_name,
-            "purpose": purpose,
-        }
-        memory = action.get("memory")
-        if isinstance(memory, dict):
-            memory_type = memory.get("type")
-            content = memory.get("content")
-            if (
-                isinstance(memory_type, str)
-                and memory_type
-                and isinstance(content, str)
-                and content
-            ):
-                sanitized_action["memory"] = {
-                    "type": memory_type,
-                    "content": content,
-                }
-        sanitized_actions.append(sanitized_action)
-    if not sanitized_actions:
-        return None
-    return {"interrupt_id": interrupt_id, "actions": sanitized_actions}
+    else:
+        sanitized = public_interrupt_from_projection(value)
+    return sanitized.model_dump(exclude_none=True) if sanitized is not None else None
 
 
 def _normalize_stream_error_payload(

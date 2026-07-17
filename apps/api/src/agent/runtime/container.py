@@ -160,7 +160,7 @@ class RuntimeContainer:
             configurable.update(
                 execution_checkpoint_config(
                     thread_id=session_id,
-                    checkpoint_ns=execution_id,
+                    execution_id=execution_id,
                 )["configurable"]
             )
         else:

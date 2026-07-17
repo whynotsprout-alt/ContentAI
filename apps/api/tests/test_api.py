@@ -1566,6 +1566,67 @@ def test_chat_run_can_call_memory_tool():
     assert any(item.content == "prefers concise replies" for item in memories)
 
 
+def test_remember_approval_projection_matches_exact_saved_normalization():
+    raw_content = json.dumps(
+        {"content": "  " + ("durable preference " * 100) + "  "},
+        ensure_ascii=False,
+    )
+    install_fake_model(
+        FakeModel(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-normalized-remember",
+                            "name": "remember",
+                            "args": {
+                                "content": raw_content,
+                                "kind": "NOT-AN-ALLOWED-KIND" * 10,
+                            },
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="saved normalized memory"),
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        started = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "remember normalized content"},
+        )
+        waiting = wait_for_terminal_session(client, chat["session_id"])
+        interrupt = waiting["latest_execution"]["interrupt"]
+        projected_memory = interrupt["actions"][0]["memory"]
+        assert projected_memory["type"] == "semantic"
+        assert len(projected_memory["content"]) == 1000
+
+        resumed = client.post(
+            f"/api/chat/runs/{started.json()['execution_id']}/resume",
+            json={
+                "interrupt_id": interrupt["interrupt_id"],
+                "decision": "approve",
+            },
+        )
+        assert resumed.status_code == 200
+        terminal = wait_for_terminal_session(client, chat["session_id"])
+        assert terminal["latest_execution"]["status"] == "completed"
+
+    with Session(get_engine()) as db_session:
+        saved = db_session.exec(
+            select(MemoryRecord).where(
+                MemoryRecord.source_execution_id == started.json()["execution_id"],
+                MemoryRecord.content == projected_memory["content"],
+            )
+        ).all()
+        assert len(saved) == 1
+        assert saved[0].kind == projected_memory["type"]
+
+
 def test_reject_resumes_original_namespace_without_executing_pending_tool():
     install_fake_model(
         FakeModel(
@@ -1668,6 +1729,75 @@ def test_cancel_waiting_interrupt_makes_resume_stale_and_executes_no_tool():
         assert outbox.status == "cancelled"
 
 
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [{"name": "x" * 256, "args": {"token": "secret-long-name"}}],
+        [{"name": "remember", "args": {"kind": "preference", "api_key": "secret"}}],
+        [{"name": {"malformed": True}, "args": {"password": "secret"}}],
+    ],
+)
+def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_works(
+    tool_calls: list[Any],
+):
+    with Session(get_engine()) as db_session:
+        chat = ChatSession(
+            agent_id="default-agent",
+            agent_version_id="default-agent-v1",
+            user_id="local-user",
+        )
+        db_session.add(chat)
+        db_session.flush()
+        invocation = AgentInvocation(
+            session_id=chat.id,
+            agent_id=chat.agent_id,
+            user_id=chat.user_id,
+        )
+        db_session.add(invocation)
+        db_session.flush()
+        execution = AgentExecution(
+            invocation_id=invocation.id,
+            session_id=chat.id,
+            agent_version_id=chat.agent_version_id,
+            status=RunStatus.waiting_input,
+            interrupt_payload={
+                "interrupts": [
+                    {
+                        "id": "int-unsafe-status",
+                        "value": {
+                            "tool_calls": tool_calls,
+                            "runtime": {
+                                "execution_id": "secret-execution",
+                                "api_key": "secret-runtime",
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+        db_session.add(execution)
+        db_session.commit()
+        execution_id = execution.id
+
+    with TestClient(app) as client:
+        status_response = client.get(f"/api/chat/runs/{execution_id}/status")
+        assert status_response.status_code == 200
+        assert status_response.json()["interrupt"] is None
+        assert "secret" not in json.dumps(status_response.json(), ensure_ascii=False)
+
+        stale = client.post(
+            f"/api/chat/runs/{execution_id}/resume",
+            json={"interrupt_id": "int-unsafe-status", "decision": "approve"},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "RUN_INTERRUPT_STALE"
+
+        cancelled = client.post(f"/api/chat/runs/{execution_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+        assert cancelled.json()["interrupt"] is None
+
+
 def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
     install_fake_model(
         FakeModel(
@@ -1738,7 +1868,10 @@ def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
     assert wrong.json()["detail"]["code"] == "RUN_INTERRUPT_STALE"
 
 
-def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt():
+@pytest.mark.parametrize("tampered_hash", ["", "short", "g" * 64, "0" * 64])
+def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt(
+    tampered_hash: str,
+):
     install_fake_model(
         FakeModel(
             [
@@ -1782,7 +1915,7 @@ def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt():
                     ExecutionResumeRequest.execution_id == started.json()["execution_id"]
                 )
             ).one()
-            request.tool_calls_hash = "0" * 64
+            request.tool_calls_hash = tampered_hash
             db_session.add(request)
             db_session.commit()
 
@@ -2043,7 +2176,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
     assert checkpoint_interrupts(
         service.runtime.get_checkpointer(),
         thread_id=checkpoint_thread_id,
-        checkpoint_ns=execution_id,
+        execution_id=execution_id,
     ) == []
     event_names = [name for name, _payload in event_writer.events]
     assert event_names.count("tool_end") == 1

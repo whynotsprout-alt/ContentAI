@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
@@ -48,6 +49,7 @@ from services.errors import (
 )
 from services.execution_claim import claim_execution
 from services.execution_lineage import ExecutionLineage
+from services.execution_resume import public_interrupt
 from sqlalchemy import inspect, text
 from sqlmodel import Session, select
 
@@ -128,14 +130,16 @@ def test_runtime_config_uses_execution_scoped_checkpoint_namespace() -> None:
 
     configurable = runtime.config["configurable"]
     assert configurable["thread_id"] == "thread-1"
-    assert configurable["checkpoint_ns"] == "execution-1"
+    assert configurable["checkpoint_ns"] == ""
+    assert configurable["execution_id"] == "execution-1"
 
 
 def test_execution_scoped_checkpointer_fails_closed_and_isolates_sync_and_async_graphs() -> None:
     thread_id = "thread-task2-memory-isolation"
-    config_a = execution_checkpoint_config(thread_id=thread_id, checkpoint_ns="execution-a")
-    config_b = execution_checkpoint_config(thread_id=thread_id, checkpoint_ns="execution-b")
-    checkpointer = ExecutionScopedCheckpointer(InMemorySaver())
+    config_a = execution_checkpoint_config(thread_id=thread_id, execution_id="execution-a")
+    config_b = execution_checkpoint_config(thread_id=thread_id, execution_id="execution-b")
+    delegate = InMemorySaver()
+    checkpointer = ExecutionScopedCheckpointer(delegate)
 
     def reply_node(state: MessagesState) -> dict[str, Any]:
         content = str(state["messages"][-1].content)
@@ -173,11 +177,19 @@ def test_execution_scoped_checkpointer_fails_closed_and_isolates_sync_and_async_
         )
 
     list(graph.stream({"messages": [("user", "sync-a")]}, config=config_a))
+    state_a = graph.get_state(config_a)
+    history_a = list(graph.get_state_history(config_a))
+    assert state_a.values["messages"][-1].content == "reply:sync-a"
+    assert history_a
+    assert all(
+        snapshot.config["configurable"]["execution_id"] == "execution-a"
+        for snapshot in history_a
+    )
     assert [message.content for message in checkpoint_messages(
-        checkpointer, thread_id=thread_id, checkpoint_ns="execution-a"
+        checkpointer, thread_id=thread_id, execution_id="execution-a"
     )][-1] == "reply:sync-a"
     assert checkpoint_messages(
-        checkpointer, thread_id=thread_id, checkpoint_ns="execution-b"
+        checkpointer, thread_id=thread_id, execution_id="execution-b"
     ) == []
 
     async def exercise_async_paths() -> None:
@@ -188,17 +200,25 @@ def test_execution_scoped_checkpointer_fails_closed_and_isolates_sync_and_async_
             pass
         tuple_a = await checkpointer.aget_tuple(config_a)
         tuple_b = await checkpointer.aget_tuple(config_b)
+        async_state_b = await graph.aget_state(config_b)
+        async_history_b = [snapshot async for snapshot in graph.aget_state_history(config_b)]
         assert tuple_a is not None
         assert tuple_b is not None
         assert tuple_a.config["configurable"]["execution_id"] == "execution-a"
         assert tuple_b.config["configurable"]["execution_id"] == "execution-b"
-        assert tuple_a.config["configurable"]["checkpoint_ns"] == "execution-a"
-        assert tuple_b.config["configurable"]["checkpoint_ns"] == "execution-b"
+        assert tuple_a.config["configurable"]["checkpoint_ns"] == ""
+        assert tuple_b.config["configurable"]["checkpoint_ns"] == ""
+        assert async_state_b.values["messages"][-1].content == "reply:async-b"
+        assert async_history_b
+        assert all(
+            snapshot.config["configurable"]["execution_id"] == "execution-b"
+            for snapshot in async_history_b
+        )
         assert [message.content for message in checkpoint_messages(
-            checkpointer, thread_id=thread_id, checkpoint_ns="execution-a"
+            checkpointer, thread_id=thread_id, execution_id="execution-a"
         )][-1] == "reply:sync-a"
         assert [message.content for message in checkpoint_messages(
-            checkpointer, thread_id=thread_id, checkpoint_ns="execution-b"
+            checkpointer, thread_id=thread_id, execution_id="execution-b"
         )][-1] == "reply:async-b"
         with pytest.raises(ValueError, match="execution_id"):
             await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}})
@@ -220,6 +240,7 @@ def test_execution_scoped_checkpointer_fails_closed_and_isolates_sync_and_async_
     import asyncio
 
     asyncio.run(exercise_async_paths())
+    assert set(delegate.storage[thread_id]) == {"execution-a", "execution-b"}
     with pytest.raises(ValueError, match="execution-scoped"):
         checkpointer.delete_thread(thread_id)
     assert checkpointer.get_tuple(config_a) is not None
@@ -291,6 +312,115 @@ def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() ->
             ],
         },
     }
+
+
+def test_public_interrupt_normalizes_remember_exactly_like_tool_execution() -> None:
+    content = "  " + ("记 忆 " * 400) + "  "
+    payload = {
+        "interrupts": [
+            {
+                "id": "int-normalized-remember",
+                "value": {
+                    "tool_calls": [
+                        {
+                            "name": "remember",
+                            "args": {
+                                "kind": "NOT-A-REAL-KIND" * 20,
+                                "content": json.dumps(
+                                    {"content": content, "api_key": "nested-secret"},
+                                    ensure_ascii=False,
+                                ),
+                                "runtime": {"token": "secret"},
+                            },
+                            "id": "call-secret",
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    projected = public_interrupt(payload)
+
+    assert projected is not None
+    assert projected.interrupt_id == "int-normalized-remember"
+    assert len(projected.actions) == 1
+    assert projected.actions[0].tool_name == "remember"
+    assert projected.actions[0].memory is not None
+    assert projected.actions[0].memory.type == "semantic"
+    assert len(projected.actions[0].memory.content) <= 1000
+    assert projected.actions[0].memory.content == projected.actions[0].memory.content.strip()
+    assert "secret" not in projected.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [{"name": "x" * 256, "args": {}}],
+        [{"name": "remember", "args": {"kind": "preference"}}],
+        [{"name": {"malformed": True}, "args": {}}],
+        [{"name": "remember", "args": "not-an-object"}],
+        ["not-a-tool-call"],
+        [
+            {
+                "name": "remember",
+                "args": {
+                    "content": '{"provider":"internal","runtime":"opaque"}',
+                    "kind": "semantic",
+                },
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {
+                    "content": '{"content":{"nested":"no"},"api_key":"leak-me"}',
+                    "kind": "semantic",
+                },
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {"content": '"json scalar"', "kind": "semantic"},
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {"content": '["provider-secret"]', "kind": "semantic"},
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {"content": '[42,"scalar-secret"]', "kind": "semantic"},
+            }
+        ],
+    ],
+)
+def test_public_interrupt_is_total_and_fails_closed_for_unsafe_actions(
+    tool_calls: list[Any],
+) -> None:
+    payload = {
+        "interrupts": [
+            {
+                "id": "int-unsafe",
+                "value": {
+                    "tool_calls": tool_calls,
+                    "runtime": {"api_key": "top-secret"},
+                },
+            }
+        ]
+    }
+
+    assert public_interrupt(payload) is None
+    projected = _public_stream_data(
+        {"name": "run_interrupt", "interrupt": payload},
+        channel="interrupts",
+    )
+    assert projected == {"name": "run_interrupt", "interrupt": None}
+    assert "secret" not in json.dumps(projected, ensure_ascii=False)
 
 
 def test_invocation_request_digest_column_is_present_in_real_postgres() -> None:
@@ -607,7 +737,7 @@ def test_real_postgres_checkpoint_namespace_hides_old_interrupt_from_new_executi
     graph = graph_builder.compile(checkpointer=checkpointer)
     old_config = execution_checkpoint_config(
         thread_id=thread_id,
-        checkpoint_ns=old_execution_id,
+        execution_id=old_execution_id,
     )
 
     try:
@@ -616,22 +746,22 @@ def test_real_postgres_checkpoint_namespace_hides_old_interrupt_from_new_executi
         assert checkpoint_interrupts(
             checkpointer,
             thread_id=thread_id,
-            checkpoint_ns=old_execution_id,
+            execution_id=old_execution_id,
         )
         assert checkpoint_interrupts(
             checkpointer,
             thread_id=thread_id,
-            checkpoint_ns=new_execution_id,
+            execution_id=new_execution_id,
         ) == []
     finally:
         clear_execution_persistence(
             thread_id=thread_id,
-            checkpoint_ns=old_execution_id,
+            execution_id=old_execution_id,
             checkpointer=checkpointer,
         )
         clear_execution_persistence(
             thread_id=thread_id,
-            checkpoint_ns=new_execution_id,
+            execution_id=new_execution_id,
             checkpointer=checkpointer,
         )
         persistence.close()
@@ -707,7 +837,7 @@ def test_end_checkpoint_is_recoverable_without_replaying_graph_side_effect() -> 
     graph_builder.add_edge(START, "final")
     graph_builder.add_edge("final", END)
     graph = graph_builder.compile(checkpointer=checkpointer)
-    config = execution_checkpoint_config(thread_id=thread_id, checkpoint_ns=execution_id)
+    config = execution_checkpoint_config(thread_id=thread_id, execution_id=execution_id)
 
     try:
         list(graph.stream({"messages": []}, config=config))
@@ -716,14 +846,14 @@ def test_end_checkpoint_is_recoverable_without_replaying_graph_side_effect() -> 
             recovered = checkpoint_messages(
                 checkpointer,
                 thread_id=thread_id,
-                checkpoint_ns=execution_id,
+                execution_id=execution_id,
             )
             assert recovered[-1].content == "durable final answer"
         assert side_effects == ["called"]
     finally:
         clear_execution_persistence(
             thread_id=thread_id,
-            checkpoint_ns=execution_id,
+            execution_id=execution_id,
             checkpointer=checkpointer,
         )
         persistence.close()

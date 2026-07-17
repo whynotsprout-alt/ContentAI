@@ -235,13 +235,13 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
 def execution_checkpoint_config(
     *,
     thread_id: str,
-    checkpoint_ns: str,
+    execution_id: str,
     checkpoint_id: str | None = None,
 ) -> dict[str, dict[str, str]]:
     configurable = {
         "thread_id": thread_id,
-        "checkpoint_ns": checkpoint_ns,
-        "execution_id": checkpoint_ns,
+        "checkpoint_ns": "",
+        "execution_id": execution_id,
     }
     if checkpoint_id is not None:
         configurable["checkpoint_id"] = checkpoint_id
@@ -303,10 +303,10 @@ def checkpoint_messages(
     checkpointer: Any,
     *,
     thread_id: str,
-    checkpoint_ns: str,
+    execution_id: str,
 ) -> list[BaseMessage]:
     checkpoint = checkpointer.get_tuple(
-        execution_checkpoint_config(thread_id=thread_id, checkpoint_ns=checkpoint_ns)
+        execution_checkpoint_config(thread_id=thread_id, execution_id=execution_id)
     )
     if checkpoint is None:
         return []
@@ -319,11 +319,11 @@ def checkpoint_interrupts(
     checkpointer: Any,
     *,
     thread_id: str,
-    checkpoint_ns: str,
+    execution_id: str,
 ) -> list[Any]:
     """Return the pending interrupt tasks from the latest durable checkpoint."""
     checkpoint = checkpointer.get_tuple(
-        execution_checkpoint_config(thread_id=thread_id, checkpoint_ns=checkpoint_ns)
+        execution_checkpoint_config(thread_id=thread_id, execution_id=execution_id)
     )
     if checkpoint is None:
         return []
@@ -351,12 +351,12 @@ def clear_thread_persistence(*, thread_id: str, checkpointer: Any) -> None:
 def clear_execution_persistence(
     *,
     thread_id: str,
-    checkpoint_ns: str,
+    execution_id: str,
     checkpointer: Any,
 ) -> None:
     delete_namespace = getattr(checkpointer, "delete_namespace", None)
     if callable(delete_namespace):
-        delete_namespace(thread_id, checkpoint_ns)
+        delete_namespace(thread_id, execution_id)
         return
     cursor_factory = getattr(checkpointer, "_cursor", None)
     if not callable(cursor_factory):
@@ -365,7 +365,7 @@ def clear_execution_persistence(
         for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
             cursor.execute(
                 f"DELETE FROM {table} WHERE thread_id = %s AND checkpoint_ns = %s",
-                (str(thread_id), str(checkpoint_ns)),
+                (str(thread_id), str(execution_id)),
             )
 
 

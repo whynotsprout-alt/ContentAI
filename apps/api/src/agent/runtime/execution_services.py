@@ -402,7 +402,7 @@ class AgentExecutionEngine:
         durable_messages = checkpoint_messages(
             runtime.checkpointer,
             thread_id=chat.langgraph_thread_id,
-            checkpoint_ns=execution.id,
+            execution_id=execution.id,
         )
         if durable_messages:
             new_messages = durable_messages

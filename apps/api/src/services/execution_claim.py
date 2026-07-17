@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -99,16 +100,17 @@ def claim_execution(
                 pending = pending_interrupt_descriptors(
                     checkpointer,
                     thread_id=chat.langgraph_thread_id,
-                    checkpoint_ns=execution.id,
+                    execution_id=execution.id,
                 )
             except Exception:
                 logger.exception("Checkpoint validation failed for execution %s", execution.id)
                 _fail_execution(session, execution, "CHECKPOINT_VALIDATION_FAILED", now)
                 return None
             if resume_request.interrupt_id in pending:
+                stored_hash = resume_request.tool_calls_hash
                 if (
-                    len(resume_request.tool_calls_hash) == 64
-                    and pending[resume_request.interrupt_id] != resume_request.tool_calls_hash
+                    re.fullmatch(r"[0-9a-fA-F]{64}", stored_hash) is None
+                    or pending[resume_request.interrupt_id] != stored_hash
                 ):
                     resume_request.status = "stale"
                     resume_request.updated_at = now
@@ -120,7 +122,7 @@ def claim_execution(
                 checkpoint = checkpointer.get_tuple(
                     execution_checkpoint_config(
                         thread_id=chat.langgraph_thread_id,
-                        checkpoint_ns=execution.id,
+                        execution_id=execution.id,
                     )
                 )
                 if checkpoint is None:
@@ -146,7 +148,7 @@ def claim_execution(
                 checkpoint = service.runtime.get_checkpointer().get_tuple(
                     execution_checkpoint_config(
                         thread_id=chat.langgraph_thread_id,
-                        checkpoint_ns=execution.id,
+                        execution_id=execution.id,
                     )
                 )
             except Exception:
