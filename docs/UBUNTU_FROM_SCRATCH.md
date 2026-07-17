@@ -86,9 +86,7 @@ CONTENTAI_DATABASE__URL=postgresql+psycopg://contentai:请替换为同一高强�
 
 WEB_PORT=5180
 CONTENTAI_SERVER__FRONTEND_ORIGINS=https://content.example.com
-CONTENTAI_AUTH__PUBLIC_BASE_URL=https://content.example.com
 CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS=["1848714681@qq.cpm"]
-CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION=false
 
 CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=请填写实际密钥
 CONTENTAI_SEARCH__TIKHUB_API_KEY=请填写实际密钥
@@ -96,7 +94,7 @@ CONTENTAI_SEARCH__METASO_API_KEY=请填写实际密钥
 CONTENTAI_SEARCH__ANSPIRE_API_KEY=请填写实际密钥
 ```
 
-其余模型、SMTP 和限流配置按 `.env.example` 的说明补全。不要提交 `.env`。
+其余模型和限流配置按 `.env.example` 的说明补全。不要提交 `.env`。
 
 ## 5. 配置 Nginx 与 HTTPS
 

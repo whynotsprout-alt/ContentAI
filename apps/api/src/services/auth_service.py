@@ -8,12 +8,9 @@ from datetime import timedelta
 from core.config import Settings
 from models.base import utcnow
 from models.schemas.auth import CurrentUserResponse
-from models.user import AppUser, AuthSession, UserActionToken
+from models.user import AppUser, AuthSession
 from pwdlib import PasswordHash
-from services.mailer import Mailer
 from sqlmodel import Session, select
-
-RESET_PURPOSE = "reset_password"
 
 
 class AuthServiceError(RuntimeError):
@@ -30,9 +27,8 @@ class IssuedSession:
 
 
 class AuthService:
-    def __init__(self, settings: Settings, mailer: Mailer) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.mailer = mailer
         self.password_hash = PasswordHash.recommended()
         self.dummy_hash = self.password_hash.hash("contentai-dummy-password")
 
@@ -125,32 +121,6 @@ class AuthService:
             session.add(auth_session)
             session.commit()
 
-    def forgot_password(self, session: Session, *, email: str) -> None:
-        user = self.get_user_by_email(session, email)
-        if user is None or user.status == "disabled":
-            return
-        raw = self.issue_action_token(session, user=user, purpose=RESET_PURPOSE)
-        self.send_password_reset(user, raw)
-
-    def reset_password(self, session: Session, *, token: str, password: str) -> AppUser:
-        record, user = self.consume_action_token(
-            session,
-            token=token,
-            purpose=RESET_PURPOSE,
-        )
-        now = utcnow()
-        user.password_hash = self.password_hash.hash(password)
-        user.password_changed_at = now
-        user.failed_login_count = 0
-        user.locked_until = None
-        user.updated_at = now
-        record.used_at = now
-        session.add(record)
-        session.add(user)
-        self.revoke_all_sessions(session, user.id, commit=False)
-        session.commit()
-        return user
-
     def change_password(
         self,
         session: Session,
@@ -170,53 +140,6 @@ class AuthService:
         self.revoke_all_sessions(session, user.id, commit=False)
         session.commit()
 
-    def issue_action_token(self, session: Session, *, user: AppUser, purpose: str) -> str:
-        now = utcnow()
-        for item in session.exec(
-            select(UserActionToken).where(
-                UserActionToken.user_id == user.id,
-                UserActionToken.purpose == purpose,
-                UserActionToken.used_at.is_(None),
-            )
-        ).all():
-            item.used_at = now
-            session.add(item)
-        raw = secrets.token_urlsafe(48)
-        lifetime = timedelta(minutes=self.settings.auth.reset_minutes)
-        session.add(
-            UserActionToken(
-                user_id=user.id,
-                purpose=purpose,
-                token_hash=self.token_hash(raw),
-                expires_at=now + lifetime,
-            )
-        )
-        session.commit()
-        return raw
-
-    def consume_action_token(
-        self,
-        session: Session,
-        *,
-        token: str,
-        purpose: str,
-    ) -> tuple[UserActionToken, AppUser]:
-        record = session.exec(
-            select(UserActionToken).where(
-                UserActionToken.token_hash == self.token_hash(token),
-                UserActionToken.purpose == purpose,
-            )
-        ).first()
-        now = utcnow()
-        if record is None or record.used_at is not None or record.expires_at <= now:
-            raise AuthServiceError("链接无效或已过期", status_code=400)
-        user = session.get(AppUser, record.user_id)
-        if user is None:
-            raise AuthServiceError("链接无效或已过期", status_code=400)
-        if user.status == "disabled":
-            raise AuthServiceError("Account is disabled", status_code=403)
-        return record, user
-
     def revoke_all_sessions(self, session: Session, user_id: str, *, commit: bool = True) -> None:
         now = utcnow()
         rows = session.exec(
@@ -235,14 +158,6 @@ class AuthService:
         return session.exec(
             select(AppUser).where(AppUser.email_normalized == self.normalize_email(email))
         ).first()
-
-    def send_password_reset(self, user: AppUser, token: str) -> None:
-        link = f"{self.settings.auth.public_base_url.rstrip('/')}/reset-password?token={token}"
-        self.mailer.send(
-            recipient=user.email,
-            subject="重置你的 ContentAI 密码",
-            text=f"请在 {self.settings.auth.reset_minutes} 分钟内打开以下链接重置密码：\n{link}",
-        )
 
     @staticmethod
     def to_response(user: AppUser) -> CurrentUserResponse:

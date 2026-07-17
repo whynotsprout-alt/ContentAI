@@ -55,7 +55,6 @@ def test_startup_registers_only_runtime_services():
         "agent_service",
         "catalog_service",
         "conversation_service",
-        "mailer",
         "auth_service",
         "admin_service",
         "rate_limiter",

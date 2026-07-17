@@ -13,11 +13,11 @@ tar -xzf contentai-0.4.2-ubuntu.tar.gz
 cd contentai-0.4.2-ubuntu
 cp .env.example .env
 chmod 600 .env
-# 编辑 .env：数据库密码、HTTPS 域名、模型与搜索密钥；如需投递密码重置邮件，再配置 SMTP
+# 编辑 .env：数据库密码、模型与搜索密钥
 bash infra/ubuntu/deploy.sh
 ```
 
-生产配置必须通过 `docker compose config --quiet`。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 与 `CONTENTAI_AUTH__PUBLIC_BASE_URL` 必须使用实际 HTTPS 域名。
+生产配置必须通过 `docker compose config --quiet`。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 必须使用实际的前端来源。
 
 ## 健康检查
 

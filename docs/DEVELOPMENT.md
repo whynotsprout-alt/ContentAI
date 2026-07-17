@@ -7,7 +7,7 @@
 - Docker Desktop（推荐，用于 PostgreSQL、Redis 和完整环境）
 - 从 `.env.example` 复制出本地 `.env`，并填入实际的模型与搜索服务密钥
 
-`.env` 是本地密钥文件，不应提交。生产环境还必须配置 HTTPS `CONTENTAI_AUTH__PUBLIC_BASE_URL`、管理员邮箱、前端来源和搜索中继密钥；`CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION` 必须保持 `false`。SMTP 仅在需要投递密码重置邮件时配置，不是注册或登录的启动前置条件。
+`.env` 是本地密钥文件，不应提交。生产环境还必须配置管理员邮箱、前端来源和搜索中继密钥。邮箱验证和邮件密码重置功能当前均已停用，不需要配置邮件服务。
 
 ## 初始化
 

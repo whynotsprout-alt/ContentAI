@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import agent.workflows.deep_research as deep_research
+import httpx
 import pytest
 
 
@@ -24,6 +25,19 @@ class StructuredModel:
     async def ainvoke(self, messages: Any, config: Any = None) -> Any:
         self.calls.append((messages, config))
         return self.response
+
+
+class RetryingStructuredModel(StructuredModel):
+    def __init__(self, responses: list[Any]) -> None:
+        super().__init__(None)
+        self.responses = responses
+
+    async def ainvoke(self, messages: Any, config: Any = None) -> Any:
+        self.calls.append((messages, config))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class Gateway:
@@ -193,6 +207,90 @@ def test_one_provider_and_one_result_still_generates_a_package(monkeypatch):
 
     assert result.valid_source_count == 1
     assert "Conclusion" in result.content
+
+
+def test_research_retries_invalid_structured_model_response(monkeypatch):
+    known_source = source_id("https://one.example/a")
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Only",
+                    "url": "https://one.example/a",
+                    "summary": "usable",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result("anspire", [], ok=False),
+    )
+    try:
+        deep_research.DeepResearchPackage.model_validate(
+            {"core_conclusion": "plain text instead of an object"}
+        )
+    except Exception as exc:  # Pydantic emits the same validation error as the provider adapter.
+        validation_error = exc
+    else:  # pragma: no cover - protects the test fixture itself.
+        raise AssertionError("Expected invalid structured model response to fail validation")
+    model = RetryingStructuredModel(
+        [
+            validation_error,
+            deep_research.DeepResearchPackage(
+                core_conclusion=deep_research.ResearchConclusion(
+                    text="Conclusion after retry",
+                    source_ids=[known_source],
+                ),
+            ),
+        ]
+    )
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Retry structured response",
+        model_gateway=Gateway(model),
+    )
+
+    assert result.package_data["core_conclusion"]["text"] == "Conclusion after retry"
+    assert len(model.calls) == 2
+
+
+def test_research_retries_recoverable_model_connection_error(monkeypatch):
+    known_source = source_id("https://one.example/a")
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Only",
+                    "url": "https://one.example/a",
+                    "summary": "usable",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result("anspire", [], ok=False),
+    )
+    model = RetryingStructuredModel(
+        [
+            httpx.ConnectError("Connection error."),
+            deep_research.DeepResearchPackage(
+                core_conclusion=deep_research.ResearchConclusion(
+                    text="Conclusion after reconnect",
+                    source_ids=[known_source],
+                ),
+            ),
+        ]
+    )
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Retry connection",
+        model_gateway=Gateway(model),
+    )
+
+    assert result.package_data["core_conclusion"]["text"] == "Conclusion after reconnect"
+    assert len(model.calls) == 2
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest
 from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
@@ -11,7 +10,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from models.chat import ChatMessage, ChatSession
 from models.enums import MessageRole
-from models.user import AppUser, ModelUsage
+from models.user import AppUser, ModelUsage, UserActionToken
 from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
 
@@ -24,9 +23,7 @@ def auth_app():
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
             },
             auth={
-                "mail_backend": "console",
                 "bootstrap_admin_emails": ["admin@example.com"],
-                "public_base_url": "http://testserver",
             },
         )
     )
@@ -46,25 +43,23 @@ def _login(client: TestClient, email: str, password: str):
     return {"X-CSRF-Token": csrf}
 
 
-def test_local_registration_login_and_password_reset():
+def test_local_registration_login_and_retired_password_reset_routes():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "person@example.com", "correct horse battery")
-        assert app.state.mailer.outbox == []
         login_headers = _login(client, "person@example.com", "correct horse battery")
         assert client.get("/api/auth/me").json()["email"] == "person@example.com"
 
         forgot = client.post("/api/auth/forgot-password", json={"email": "person@example.com"})
-        assert forgot.status_code == 200
-        token = app.state.mailer.outbox[-1].text.split("token=", 1)[1].strip()
+        assert forgot.status_code == 410
         reset = client.post(
             "/api/auth/reset-password",
-            json={"token": token, "password": "a different secure password"},
+            json={"token": "retired-token", "password": "a different secure password"},
         )
-        assert reset.status_code == 200
-        assert client.get("/api/auth/me").status_code == 401
-        assert client.post("/api/auth/logout", headers=login_headers).status_code in {204, 401}
-        _login(client, "person@example.com", "a different secure password")
+        assert reset.status_code == 410
+        with Session(get_engine(app.state.settings)) as session:
+            assert session.exec(select(UserActionToken)).all() == []
+        assert client.post("/api/auth/logout", headers=login_headers).status_code == 204
 
 
 def test_legacy_pending_user_is_activated_after_valid_login():
@@ -95,17 +90,22 @@ def _production_settings(**auth_overrides: object) -> Settings:
         database={"url": "postgresql+psycopg://postgres:postgres@db/contentai"},
         search={"traffic_relay_api_key": "test-relay-key"},
         auth={
-            "public_base_url": "https://content.example.com",
             "bootstrap_admin_emails": ["admin@example.com"],
             **auth_overrides,
         },
     )
 
 
-def test_production_rejects_reenabling_email_verification():
-    assert _production_settings(mail_backend="console").auth.mail_backend == "console"
-    with pytest.raises(ValueError, match="must remain disabled in production"):
-        _production_settings(require_email_verification=True)
+def test_production_ignores_retired_email_settings():
+    settings = _production_settings(
+        public_base_url="http://testserver",
+        require_email_verification=True,
+        mail_backend="smtp",
+    )
+
+    assert not hasattr(settings.auth, "public_base_url")
+    assert not hasattr(settings.auth, "require_email_verification")
+    assert not hasattr(settings.auth, "mail_backend")
 
 
 def test_admin_user_listing_usage_and_disable():
@@ -142,6 +142,12 @@ def test_admin_user_listing_usage_and_disable():
         assert item["total_tokens"] == 150
         assert "password_hash" not in item
 
+        password_reset = client.post(
+            f"/api/admin/users/{member_id}/password-reset",
+            headers=admin_headers,
+        )
+        assert password_reset.status_code == 410
+
         disabled = client.post(
             f"/api/admin/users/{member_id}/disable",
             headers=admin_headers,
@@ -158,7 +164,6 @@ def test_verification_endpoints_are_retired_without_side_effects():
         assert client.post(
             "/api/auth/resend-verification", json={"email": "person@example.com"}
         ).status_code == 410
-        assert app.state.mailer.outbox == []
 
 
 def test_admin_can_view_session_messages_after_audit_is_recorded():

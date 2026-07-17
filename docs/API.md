@@ -19,8 +19,8 @@
 | POST | `/api/auth/login` | 无 | Auth Store | email、password / 当前用户 + Cookie | 登录 |
 | POST | `/api/auth/logout` | 登录 + CSRF | Auth Store | 无 / 204 | 退出并撤销会话 |
 | GET | `/api/auth/me` | 登录 | Auth Store | 无 / 当前用户 | 恢复登录态 |
-| POST | `/api/auth/forgot-password` | 无 | AuthView | email / 提示消息 | 发起密码重置 |
-| POST | `/api/auth/reset-password` | 无 | AuthView | token、password / 提示消息 | 使用令牌重置密码 |
+| POST | `/api/auth/forgot-password` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
+| POST | `/api/auth/reset-password` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
 | POST | `/api/auth/change-password` | 登录 + CSRF | App | current_password、new_password / 提示消息 | 修改当前用户密码 |
 
 ## 内容账号 Agent（6）
@@ -62,7 +62,7 @@ Agent 仅属于当前 `user_id`。创建请求包含 `name`、`description`、`t
 | GET | `/api/admin/users/{user_id}` | 管理员 | AdminUsersView | 无 / 用户详情 | 查看用户 |
 | POST | `/api/admin/users/{user_id}/enable` | 管理员 + CSRF | AdminUsersView | 无 / 用户详情 | 启用用户 |
 | POST | `/api/admin/users/{user_id}/disable` | 管理员 + CSRF | AdminUsersView | 无 / 用户详情 | 禁用用户 |
-| POST | `/api/admin/users/{user_id}/password-reset` | 管理员 + CSRF | AdminUsersView | 无 / 提示消息 | 发送密码重置 |
+| POST | `/api/admin/users/{user_id}/password-reset` | 无（兼容接口） | 无 | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
 | PATCH | `/api/admin/users/{user_id}` | 管理员 + CSRF | AdminUsersView | role / 用户详情 | 升级或降级角色 |
 | GET | `/api/admin/users/{user_id}/sessions` | 管理员 | AdminUsersView | 分页 / 会话摘要 | 查看用户会话 |
 | GET | `/api/admin/sessions/{session_id}` | 管理员 | AdminUsersView | 无 / 审计消息 | 审计会话正文 |

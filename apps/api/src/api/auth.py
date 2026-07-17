@@ -6,11 +6,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from models.schemas import (
     ChangePasswordRequest,
     CurrentUserResponse,
-    EmailRequest,
     LoginRequest,
     MessageResponse,
     RegisterRequest,
-    ResetPasswordRequest,
 )
 from models.user import AppUser
 from services.auth_service import AuthServiceError
@@ -136,27 +134,14 @@ def me(
 
 @router.post("/forgot-password", response_model=MessageResponse)
 def forgot_password(
-    payload: EmailRequest,
-    request: Request,
-    service: AuthServiceDep,
-    session: SessionDep,
 ) -> MessageResponse:
-    service.forgot_password(session, email=str(payload.email))
-    return MessageResponse(message="如果该邮箱可用，我们已发送密码重置邮件")
+    raise HTTPException(status_code=410, detail="Password reset has been retired.")
 
 
 @router.post("/reset-password", response_model=MessageResponse)
 def reset_password(
-    payload: ResetPasswordRequest,
-    request: Request,
-    service: AuthServiceDep,
-    session: SessionDep,
 ) -> MessageResponse:
-    try:
-        service.reset_password(session, token=payload.token, password=payload.password)
-    except AuthServiceError as exc:
-        _raise_auth_error(exc)
-    return MessageResponse(message="密码已重置，请重新登录")
+    raise HTTPException(status_code=410, detail="Password reset has been retired.")
 
 
 @router.post("/change-password", response_model=MessageResponse)

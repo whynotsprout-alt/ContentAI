@@ -129,6 +129,21 @@ def test_provider_results_are_independent_when_one_has_no_key(monkeypatch):
     assert len(anspire["items"]) == 1
 
 
+def test_metaso_rejects_non_ascii_api_key_without_request(monkeypatch):
+    monkeypatch.setattr(
+        search,
+        "get_settings",
+        lambda: fake_settings(metaso="invalid·key", anspire="anspire-key"),
+    )
+    monkeypatch.setattr(search.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(search_integration.asearch_metaso_sources("test topic"))
+
+    assert result["ok"] is False
+    assert result["error"] == "METASO_API_KEY must contain only ASCII characters"
+    assert FakeAsyncClient.calls == []
+
+
 def test_search_result_urls_are_never_requested(monkeypatch):
     result_url = "https://untrusted.example/article"
     FakeAsyncClient.responses = {

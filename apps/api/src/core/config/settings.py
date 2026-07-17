@@ -230,8 +230,6 @@ class Settings(BaseSettings):
     def _validate_auth(self) -> None:
         if self.auth.session_days < 1:
             raise ValueError("CONTENTAI_AUTH__SESSION_DAYS must be at least 1.")
-        if self.auth.reset_minutes < 1:
-            raise ValueError("Password reset token lifetime must be positive.")
         if self.auth.login_max_failures < 1 or self.auth.login_lock_minutes < 1:
             raise ValueError("Auth login lock settings must be positive.")
         self.auth.bootstrap_admin_emails = list(
@@ -239,18 +237,7 @@ class Settings(BaseSettings):
                 email.strip().lower() for email in self.auth.bootstrap_admin_emails if email.strip()
             )
         )
-        if self.auth.mail_backend not in {"console", "smtp"}:
-            raise ValueError("CONTENTAI_AUTH__MAIL_BACKEND must be console or smtp.")
         if self.env == Env.production:
-            if self.auth.require_email_verification:
-                raise ValueError(
-                    "CONTENTAI_AUTH__REQUIRE_EMAIL_VERIFICATION must remain disabled in production."
-                )
-            parsed_base = urlparse(self.auth.public_base_url)
-            if not (parsed_base.scheme == "https" and parsed_base.netloc):
-                raise ValueError(
-                    "CONTENTAI_AUTH__PUBLIC_BASE_URL must be an HTTPS URL in production."
-                )
             if not self.auth.bootstrap_admin_emails:
                 raise ValueError(
                     "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAILS is required in production."

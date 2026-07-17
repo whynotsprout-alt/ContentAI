@@ -55,7 +55,6 @@ def auth_test_app():
             database={
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
             },
-            auth={"require_email_verification": False},
         ),
         runtime=_TEST_RUNTIME,
         execution_dispatcher_factory=DirectDispatcher,

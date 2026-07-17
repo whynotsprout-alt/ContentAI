@@ -96,21 +96,9 @@ def enable_user(
 @router.post("/users/{user_id}/password-reset", response_model=MessageResponse)
 def password_reset(
     user_id: str,
-    service: AdminServiceDep,
-    session: SessionDep,
-    auth: CurrentAdminDep,
-    request_context: RequestContextDep,
 ) -> MessageResponse:
-    try:
-        service.send_password_reset(
-            session,
-            user_id,
-            actor_user_id=auth.user_id,
-            request_id=request_context.request_id or "",
-        )
-    except AuthServiceError as exc:
-        _raise_admin_error(exc)
-    return MessageResponse(message="密码重置邮件已发送")
+    _ = user_id
+    raise HTTPException(status_code=410, detail="Password reset has been retired.")
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserSummary)

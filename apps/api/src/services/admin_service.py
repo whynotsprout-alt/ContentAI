@@ -21,7 +21,7 @@ from models.schemas.admin import (
 )
 from models.schemas.auth import AdminUserListResponse, AdminUserSummary
 from models.user import AdminAuditLog, AppUser, ModelUsage, UserActionToken
-from services.auth_service import RESET_PURPOSE, AuthService, AuthServiceError
+from services.auth_service import AuthService, AuthServiceError
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
@@ -100,36 +100,6 @@ class AdminService:
         session.commit()
         session.refresh(user)
         return self.user_summary(session, user)
-
-    def send_password_reset(
-        self,
-        session: Session,
-        user_id: str,
-        *,
-        actor_user_id: str | None = None,
-        request_id: str = "",
-    ) -> None:
-        user = session.get(AppUser, user_id)
-        if user is None:
-            raise AuthServiceError("用户不存在", status_code=404)
-        if user.status == "disabled":
-            raise AuthServiceError("不能为已禁用的用户重置密码", status_code=409)
-        raw = self.auth_service.issue_action_token(
-            session,
-            user=user,
-            purpose=RESET_PURPOSE,
-        )
-        self.auth_service.send_password_reset(user, raw)
-        if actor_user_id:
-            self._audit(
-                session,
-                actor_user_id=actor_user_id,
-                target_user_id=user.id,
-                action="user.password_reset_sent",
-                request_id=request_id,
-                detail={},
-            )
-            session.commit()
 
     def update_user(
         self,

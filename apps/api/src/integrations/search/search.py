@@ -79,6 +79,12 @@ async def search_metaso_sources(
     result_size = _cap_size(size)
     settings = get_settings()
     api_key = _metaso_api_key(settings)
+    if api_key and not api_key.isascii():
+        return _provider_error(
+            "metaso",
+            METASO_ENDPOINT,
+            "METASO_API_KEY must contain only ASCII characters",
+        )
     return await _cached_provider_search(
         provider="metaso",
         query=query,

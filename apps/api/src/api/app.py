@@ -16,7 +16,6 @@ from services.agent_service import AgentService
 from services.auth_service import AuthService
 from services.catalog_service import CatalogService
 from services.conversation_service import ConversationService, ExecutionDispatcher
-from services.mailer import Mailer
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +57,7 @@ def _register_services(app: FastAPI) -> None:
         execution_dispatcher=execution_dispatcher,
     )
     app.state.conversation_service = conversation_service
-    app.state.mailer = Mailer(app.state.settings)
-    app.state.auth_service = AuthService(app.state.settings, app.state.mailer)
+    app.state.auth_service = AuthService(app.state.settings)
     app.state.admin_service = AdminService(app.state.auth_service)
     app.state.rate_limiter = RedisRateLimiter(app.state.settings)
 
