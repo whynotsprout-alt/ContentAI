@@ -1,4 +1,4 @@
-param([string]$Version = "0.4.2")
+param([string]$Version = "0.4.3")
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path

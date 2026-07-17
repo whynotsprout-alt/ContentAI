@@ -179,6 +179,7 @@ def test_bootstrap_does_not_change_an_existing_user():
 def test_bootstrap_admin_requires_email_and_password_together():
     with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN_PASSWORD"):
         Settings(
+            _env_file=None,
             env="test",
             database={
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"

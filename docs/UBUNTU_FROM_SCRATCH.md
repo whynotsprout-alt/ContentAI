@@ -1,4 +1,4 @@
-# Ubuntu 从零部署 ContentAI V0.4.2
+# Ubuntu 从零部署 ContentAI V0.4.3
 
 本文适用于全新 Ubuntu LTS 服务器和全新数据库。部署完成后，会在数据库中创建管理员 `1848714681@qq.cpm`，初始密码为 `WnaFan2026`。
 
@@ -49,21 +49,21 @@ docker compose version
 
 ```bash
 cd /tmp
-curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.4.2/contentai-0.4.2-ubuntu.tar.gz
+curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.4.3/contentai-0.4.3-ubuntu.tar.gz
 
-echo '8D6961B5801162C7937BF6BFBB6438C1B6C3376F30D1672BBE8D5BB92E85F0EF  contentai-0.4.2-ubuntu.tar.gz' | sha256sum -c -
+echo '9F901591D57247AF9635938717ED23917C88BF19F345A84D79B14693332D8B65  contentai-0.4.3-ubuntu.tar.gz' | sha256sum -c -
 
 sudo install -d -m 0755 /opt/contentai
-sudo tar -xzf contentai-0.4.2-ubuntu.tar.gz -C /opt/contentai
-sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.4.2-ubuntu
-cd /opt/contentai/contentai-0.4.2-ubuntu
+sudo tar -xzf contentai-0.4.3-ubuntu.tar.gz -C /opt/contentai
+sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.4.3-ubuntu
+cd /opt/contentai/contentai-0.4.3-ubuntu
 ```
 
 也可从源码部署：
 
 ```bash
-git clone --branch codex/release-v0.4.2 --single-branch https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.4.2
-cd /opt/contentai/contentai-0.4.2
+git clone --branch codex/release-v0.4.3 --single-branch https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.4.3
+cd /opt/contentai/contentai-0.4.3
 ```
 
 ## 4. 配置生产环境
@@ -162,7 +162,7 @@ rm -f /tmp/contentai-admin.cookies /tmp/contentai-admin.json
 浏览器打开 `https://content.example.com`，使用上述账号登录，并立即修改初始密码。日常健康检查和日志命令：
 
 ```bash
-cd /opt/contentai/contentai-0.4.2-ubuntu
+cd /opt/contentai/contentai-0.4.3-ubuntu
 bash infra/ubuntu/health.sh
 docker compose --env-file .env logs --tail 200 api
 docker compose --env-file .env logs --follow agent-worker

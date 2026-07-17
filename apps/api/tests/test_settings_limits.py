@@ -1,4 +1,3 @@
-import pytest
 from core.config import Settings
 from core.config.llm import DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS
 
@@ -16,12 +15,14 @@ def test_default_prompt_budget_and_recent_message_window():
     assert settings.agent.context_max_messages == 40
 
 
-def test_removed_auth_modes_are_rejected():
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        Settings(
-            env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
-            auth={"mode": "disabled"},
-        )
+def test_retired_auth_modes_are_ignored():
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        auth={"mode": "disabled"},
+    )
+
+    assert not hasattr(settings.auth, "mode")

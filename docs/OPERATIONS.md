@@ -9,8 +9,8 @@
 ## 首次部署
 
 ```bash
-tar -xzf contentai-0.4.2-ubuntu.tar.gz
-cd contentai-0.4.2-ubuntu
+tar -xzf contentai-0.4.3-ubuntu.tar.gz
+cd contentai-0.4.3-ubuntu
 cp .env.example .env
 chmod 600 .env
 # 编辑 .env：数据库密码、搜索密钥与默认管理员初始密码
@@ -61,7 +61,7 @@ bash infra/ubuntu/upgrade.sh
 在 Windows 开发机根目录执行：
 
 ```powershell
-tools/package-ubuntu.ps1 -Version 0.4.2
+tools/package-ubuntu.ps1 -Version 0.4.3
 ```
 
 输出为 `dist/contentai-<version>-ubuntu.tar.gz`，只包含运行源码、Compose、镜像配置、环境模板、单一迁移、Ubuntu 脚本、锁定依赖和必要文档；不包含 `.env`、测试、缓存、依赖目录、日志或开发产物。

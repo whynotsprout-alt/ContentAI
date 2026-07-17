@@ -195,6 +195,7 @@ def test_test_env_requires_test_database():
 def test_production_requires_auth_frontend_origins_and_traffic_relay_key():
     with pytest.raises(ValidationError):
         Settings(
+            _env_file=None,
             env="production",
             database={
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai",
