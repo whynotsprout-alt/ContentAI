@@ -120,9 +120,11 @@ class MessageListRequest(InputSchemaBase):
         if not created_at_raw or not message_id:
             raise ValueError("Cursor format is invalid")
         try:
-            datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError("Cursor timestamp is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("Cursor timestamp must be timezone-aware")
         return normalized
 
     @model_validator(mode="after")

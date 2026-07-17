@@ -143,7 +143,10 @@ class AdminService:
         request_id: str = "",
     ) -> TemporaryPasswordResponse:
         user = session.exec(
-            select(AppUser).where(AppUser.id == user_id).with_for_update()
+            select(AppUser)
+            .where(AppUser.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).first()
         if user is None:
             raise AuthServiceError("用户不存在", status_code=404)

@@ -22,33 +22,35 @@ PREFLIGHT_QUERIES = (
         "session owner mismatches",
         """
         SELECT s.id FROM chatsession s
-        JOIN agentprofile a ON a.id = s.agent_id
-        WHERE a.user_id <> s.user_id ORDER BY s.id
+        LEFT JOIN agentprofile a ON a.id = s.agent_id
+        WHERE a.user_id IS DISTINCT FROM s.user_id ORDER BY s.id
         """,
     ),
     (
         "session version mismatches",
         """
         SELECT s.id FROM chatsession s
-        JOIN agentversion v ON v.id = s.agent_version_id
-        WHERE v.agent_id <> s.agent_id ORDER BY s.id
+        LEFT JOIN agentversion v ON v.id = s.agent_version_id
+        WHERE v.agent_id IS DISTINCT FROM s.agent_id ORDER BY s.id
         """,
     ),
     (
         "invocation owner/session mismatches",
         """
         SELECT i.id FROM agentinvocation i
-        JOIN chatsession s ON s.id = i.session_id
-        WHERE i.agent_id <> s.agent_id OR i.user_id <> s.user_id ORDER BY i.id
+        LEFT JOIN chatsession s ON s.id = i.session_id
+        WHERE i.agent_id IS DISTINCT FROM s.agent_id
+           OR i.user_id IS DISTINCT FROM s.user_id
+        ORDER BY i.id
         """,
     ),
     (
         "execution version/session mismatches",
         """
         SELECT e.id FROM agentexecution e
-        JOIN agentinvocation i ON i.id = e.invocation_id
-        JOIN chatsession s ON s.id = i.session_id
-        WHERE e.agent_version_id <> s.agent_version_id ORDER BY e.id
+        LEFT JOIN agentinvocation i ON i.id = e.invocation_id
+        LEFT JOIN chatsession s ON s.id = i.session_id
+        WHERE e.agent_version_id IS DISTINCT FROM s.agent_version_id ORDER BY e.id
         """,
     ),
     (
@@ -57,8 +59,8 @@ PREFLIGHT_QUERIES = (
         SELECT m.id FROM memoryrecord m
         LEFT JOIN agentprofile a ON a.id = m.agent_id
         LEFT JOIN chatsession s ON s.id = m.session_id
-        WHERE (m.agent_id IS NOT NULL AND a.user_id <> m.user_id)
-           OR (m.session_id IS NOT NULL AND s.user_id <> m.user_id)
+        WHERE (m.agent_id IS NOT NULL AND a.user_id IS DISTINCT FROM m.user_id)
+           OR (m.session_id IS NOT NULL AND s.user_id IS DISTINCT FROM m.user_id)
         ORDER BY m.id
         """,
     ),
@@ -66,10 +68,10 @@ PREFLIGHT_QUERIES = (
         "research execution/session/version mismatches",
         """
         SELECT r.id FROM researchpackage r
-        JOIN agentexecution e ON e.id = r.execution_id
-        JOIN agentinvocation i ON i.id = e.invocation_id
-        WHERE r.session_id <> i.session_id
-           OR r.agent_version_id <> e.agent_version_id
+        LEFT JOIN agentexecution e ON e.id = r.execution_id
+        LEFT JOIN agentinvocation i ON i.id = e.invocation_id
+        WHERE r.session_id IS DISTINCT FROM i.session_id
+           OR r.agent_version_id IS DISTINCT FROM e.agent_version_id
         ORDER BY r.id
         """,
     ),

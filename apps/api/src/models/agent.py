@@ -12,7 +12,7 @@ class AgentProfile(SQLModel, table=True):
     __tablename__ = "agentprofile"
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="ux_agentprofile_user_name"),
-        UniqueConstraint("id", "user_id", name="ux_agentprofile_id_user"),
+        Index("ux_agentprofile_id_user", "id", "user_id", unique=True),
         Index("ix_agentprofile_user_updated", "user_id", "updated_at"),
     )
 
@@ -31,7 +31,7 @@ class AgentVersion(SQLModel, table=True):
     __tablename__ = "agentversion"
     __table_args__ = (
         UniqueConstraint("agent_id", "version", name="ux_agentversion_agent_version"),
-        UniqueConstraint("id", "agent_id", name="ux_agentversion_id_agent"),
+        Index("ux_agentversion_id_agent", "id", "agent_id", unique=True),
         Index("ix_agentversion_agent_created", "agent_id", "created_at"),
     )
 

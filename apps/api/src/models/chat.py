@@ -28,9 +28,9 @@ from sqlmodel import Field, SQLModel
 class ChatSession(SQLModel, table=True):
     __tablename__ = "chatsession"
     __table_args__ = (
-        UniqueConstraint("id", "user_id", name="ux_chatsession_id_user"),
-        UniqueConstraint("id", "agent_id", "user_id", name="ux_chatsession_id_agent_user"),
-        UniqueConstraint("id", "agent_version_id", name="ux_chatsession_id_agent_version"),
+        Index("ux_chatsession_id_user", "id", "user_id", unique=True),
+        Index("ux_chatsession_id_agent_user", "id", "agent_id", "user_id", unique=True),
+        Index("ux_chatsession_id_agent_version", "id", "agent_version_id", unique=True),
         ForeignKeyConstraint(
             ["agent_id", "user_id"],
             ["agentprofile.id", "agentprofile.user_id"],
@@ -74,7 +74,7 @@ class AgentInvocation(SQLModel, table=True):
             "idempotency_key",
             name="ux_agentinvocation_session_idempotency",
         ),
-        UniqueConstraint("id", "session_id", name="ux_agentinvocation_id_session"),
+        Index("ux_agentinvocation_id_session", "id", "session_id", unique=True),
         ForeignKeyConstraint(
             ["session_id", "agent_id", "user_id"],
             ["chatsession.id", "chatsession.agent_id", "chatsession.user_id"],
@@ -94,12 +94,13 @@ class AgentInvocation(SQLModel, table=True):
 class AgentExecution(SQLModel, table=True):
     __tablename__ = "agentexecution"
     __table_args__ = (
-        UniqueConstraint("invocation_id", name="ux_agentexecution_invocation"),
-        UniqueConstraint(
+        Index("ux_agentexecution_invocation", "invocation_id", unique=True),
+        Index(
+            "ux_agentexecution_id_session_version",
             "id",
             "session_id",
             "agent_version_id",
-            name="ux_agentexecution_id_session_version",
+            unique=True,
         ),
         ForeignKeyConstraint(
             ["invocation_id", "session_id"],
@@ -124,7 +125,7 @@ class AgentExecution(SQLModel, table=True):
         foreign_key="agentinvocation.id",
         ondelete="CASCADE",
     )
-    session_id: str = Field(index=True, foreign_key="chatsession.id", ondelete="CASCADE")
+    session_id: str = Field(index=True)
     agent_version_id: str = Field(index=True, foreign_key="agentversion.id", ondelete="RESTRICT")
     trace_id: str = Field(default_factory=lambda: new_id("trc"), index=True)
     latest_checkpoint_id: str | None = Field(default=None, index=True)
@@ -316,7 +317,7 @@ class ExecutionResumeRequest(SQLModel, table=True):
             "interrupt_id",
             name="ux_executionresumerequest_execution_interrupt",
         ),
-        UniqueConstraint("message_id", name="ux_executionresumerequest_message"),
+        Index("ux_executionresumerequest_message", "message_id", unique=True),
         CheckConstraint(
             "decision IS NULL OR decision IN ('approve', 'reject')",
             name="ck_executionresumerequest_decision",

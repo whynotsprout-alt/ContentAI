@@ -64,6 +64,38 @@ def _authenticate_local_request(request: Request, settings: Settings) -> AuthCon
             or user.status != "active"
         ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+        if (
+            user.must_change_password
+            and user.temporary_password_expires_at is not None
+            and user.temporary_password_expires_at <= now
+        ):
+            locked_user = session.exec(
+                select(AppUser)
+                .where(AppUser.id == user.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one()
+            if (
+                locked_user.must_change_password
+                and locked_user.temporary_password_expires_at is not None
+                and locked_user.temporary_password_expires_at <= now
+            ):
+                active_sessions = session.exec(
+                    select(AuthSession)
+                    .where(
+                        AuthSession.user_id == locked_user.id,
+                        AuthSession.revoked_at.is_(None),
+                    )
+                    .with_for_update()
+                ).all()
+                for active_session in active_sessions:
+                    active_session.revoked_at = now
+                    session.add(active_session)
+                session.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Temporary password has expired.",
+                )
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
             csrf_cookie = request.cookies.get(settings.auth.csrf_cookie_name, "")
             csrf_header = request.headers.get("x-csrf-token", "")

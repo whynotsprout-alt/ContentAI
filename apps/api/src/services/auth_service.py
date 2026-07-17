@@ -91,7 +91,7 @@ class AuthService:
         user_agent: str = "",
         ip_address: str = "",
     ) -> IssuedSession:
-        user = self.get_user_by_email(session, email)
+        user = self.get_user_by_email(session, email, for_update=True)
         now = utcnow()
         if user is None:
             self.password_hash.verify(password, self.dummy_hash)
@@ -107,18 +107,17 @@ class AuthService:
             session.add(user)
             session.commit()
             raise AuthServiceError("邮箱或密码错误", status_code=401)
-        if user.status == "disabled":
+        now = utcnow()
+        if user.status != "active" or user.email_verified_at is None:
             raise AuthServiceError("账号已被禁用", status_code=403)
         if (
             user.must_change_password
             and user.temporary_password_expires_at is not None
             and user.temporary_password_expires_at <= now
         ):
+            self.revoke_all_sessions(session, user.id, commit=False)
+            session.commit()
             raise AuthServiceError("Temporary password has expired.", status_code=401)
-        if user.status == "pending_verification" or user.email_verified_at is None:
-            user.email_verified_at = now
-            user.status = "active"
-
         user.failed_login_count = 0
         user.locked_until = None
         user.last_login_at = now
@@ -153,10 +152,23 @@ class AuthService:
         user_agent: str = "",
         ip_address: str = "",
     ) -> IssuedSession:
-        user = session.get(AppUser, user_id)
+        user = session.exec(
+            select(AppUser)
+            .where(AppUser.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
         if user is None or not self.password_hash.verify(current_password, user.password_hash):
             raise AuthServiceError("当前密码错误", status_code=400)
         now = utcnow()
+        if (
+            user.must_change_password
+            and user.temporary_password_expires_at is not None
+            and user.temporary_password_expires_at <= now
+        ):
+            self.revoke_all_sessions(session, user.id, commit=False)
+            session.commit()
+            raise AuthServiceError("Temporary password has expired.", status_code=401)
         user.password_hash = self.password_hash.hash(new_password)
         user.password_changed_at = now
         user.must_change_password = False
@@ -180,7 +192,7 @@ class AuthService:
             select(AuthSession).where(
                 AuthSession.user_id == user_id,
                 AuthSession.revoked_at.is_(None),
-            )
+            ).with_for_update()
         ).all()
         for item in rows:
             item.revoked_at = now
@@ -188,10 +200,19 @@ class AuthService:
         if commit:
             session.commit()
 
-    def get_user_by_email(self, session: Session, email: str) -> AppUser | None:
-        return session.exec(
-            select(AppUser).where(AppUser.email_normalized == self.normalize_email(email))
-        ).first()
+    def get_user_by_email(
+        self,
+        session: Session,
+        email: str,
+        *,
+        for_update: bool = False,
+    ) -> AppUser | None:
+        statement = select(AppUser).where(
+            AppUser.email_normalized == self.normalize_email(email)
+        )
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return session.exec(statement).first()
 
     def _issue_session(
         self,

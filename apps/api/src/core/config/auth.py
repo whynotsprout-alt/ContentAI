@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, SecretStr
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
 
 class AuthSettings(BaseModel):
-    # Ignore retired email settings left in existing deployments' .env files.
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_admin_allowlist(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "bootstrap_admin_emails" in value:
+            raise ValueError(
+                "bootstrap_admin_emails is retired; configure one bootstrap_admin_email"
+            )
+        return value
 
     session_cookie_name: str = "contentai_session"
     csrf_cookie_name: str = "contentai_csrf"

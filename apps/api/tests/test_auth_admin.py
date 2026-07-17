@@ -66,7 +66,7 @@ def test_local_registration_login_and_removed_password_reset_routes():
         assert client.post("/api/auth/logout", headers=login_headers).status_code == 204
 
 
-def test_legacy_pending_user_is_activated_after_valid_login():
+def test_legacy_pending_user_is_rejected_after_valid_login():
     app = auth_app()
     with TestClient(app) as client:
         _register(client, "legacy@example.com", "correct horse battery")
@@ -78,13 +78,17 @@ def test_legacy_pending_user_is_activated_after_valid_login():
             user.email_verified_at = None
             session.add(user)
             session.commit()
-        _login(client, "legacy@example.com", "correct horse battery")
+        response = client.post(
+            "/api/auth/login",
+            json={"email": "legacy@example.com", "password": "correct horse battery"},
+        )
+        assert response.status_code == 403
         with Session(get_engine(app.state.settings)) as session:
             user = session.exec(
                 select(AppUser).where(AppUser.email_normalized == "legacy@example.com")
             ).one()
-            assert user.status == "active"
-            assert user.email_verified_at is not None
+            assert user.status == "pending_verification"
+            assert user.email_verified_at is None
 
 
 def _production_settings(**auth_overrides: object) -> Settings:
@@ -236,23 +240,15 @@ def test_admin_user_listing_usage_and_disable():
         assert disabled.json()["status"] == "disabled"
 
 
-def test_public_registration_never_consumes_a_legacy_admin_allowlist():
-    settings = Settings(
-        env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
-        auth={"bootstrap_admin_emails": ["allowlisted@example.com"]},
-    )
-    with TestClient(create_app(settings)) as client:
-        _register(client, "allowlisted@example.com", "allowlisted password 123")
-
-    with Session(get_engine(settings)) as session:
-        user = session.exec(
-            select(AppUser).where(AppUser.email_normalized == "allowlisted@example.com")
-        ).one()
-        assert user.role == "user"
-    assert not hasattr(settings.auth, "bootstrap_admin_emails")
+def test_retired_bootstrap_admin_allowlist_is_rejected_explicitly():
+    with pytest.raises(ValidationError, match="bootstrap_admin_emails"):
+        Settings(
+            env="test",
+            database={
+                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+            },
+            auth={"bootstrap_admin_emails": ["allowlisted@example.com"]},
+        )
 
 
 def test_temporary_password_is_one_time_restricts_session_and_rotates_on_change():
@@ -372,6 +368,68 @@ def test_temporary_password_rejects_disabled_target_and_admin_self_reset():
             f"/api/admin/users/{admin_id}/temporary-password",
             headers=admin_headers,
         ).status_code == 409
+
+
+def test_restricted_session_cannot_change_password_after_temporary_password_expiry():
+    app = auth_app()
+    with TestClient(app) as client:
+        _register(client, "expired@example.com", "member password 123")
+        admin_headers = _login(client, "admin@example.com", "admin password 123")
+        with Session(get_engine(app.state.settings)) as session:
+            member = session.exec(
+                select(AppUser).where(AppUser.email_normalized == "expired@example.com")
+            ).one()
+            member_id = member.id
+
+        issued = client.post(
+            f"/api/admin/users/{member_id}/temporary-password",
+            headers=admin_headers,
+        ).json()
+        temporary_password = issued["temporary_password"]
+        temporary_headers = _login(client, "expired@example.com", temporary_password)
+
+        with Session(get_engine(app.state.settings)) as session:
+            member = session.get(AppUser, member_id)
+            assert member is not None
+            member.temporary_password_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.add(member)
+            session.commit()
+
+        response = client.post(
+            "/api/auth/change-password",
+            headers=temporary_headers,
+            json={
+                "current_password": temporary_password,
+                "new_password": "member permanent password 456",
+            },
+        )
+        assert response.status_code == 401
+        assert temporary_password not in response.text
+        with Session(get_engine(app.state.settings)) as session:
+            active = session.exec(
+                select(AuthSession).where(
+                    AuthSession.user_id == member_id,
+                    AuthSession.revoked_at.is_(None),
+                )
+            ).all()
+            assert active == []
+
+
+def test_admin_usage_rejects_naive_datetimes_and_accepts_offsets():
+    app = auth_app()
+    with TestClient(app) as client:
+        admin_headers = _login(client, "admin@example.com", "admin password 123")
+        naive = client.get(
+            "/api/admin/usage?start=2026-07-17T10:00:00",
+            headers=admin_headers,
+        )
+        assert naive.status_code == 422
+
+        aware = client.get(
+            "/api/admin/usage?start=2026-07-17T10:00:00%2B08:00",
+            headers=admin_headers,
+        )
+        assert aware.status_code == 200
 
 def test_verification_endpoints_are_removed():
     app = auth_app()

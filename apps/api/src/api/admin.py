@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Annotated
 
 from api.dependencies import AdminServiceDep, CurrentAdminDep, RequestContextDep, SessionDep
@@ -12,6 +11,7 @@ from models.schemas import (
     AdminUserUpdate,
     TemporaryPasswordResponse,
 )
+from models.schemas.base import AwareDatetime
 from services.auth_service import AuthServiceError
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -177,8 +177,8 @@ def usage(
     service: AdminServiceDep,
     session: SessionDep,
     _auth: CurrentAdminDep,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareDatetime | None, Query()] = None,
+    end: Annotated[AwareDatetime | None, Query()] = None,
     user_id: str | None = Query(default=None),
     model: str | None = Query(default=None),
     category: str | None = Query(default=None),

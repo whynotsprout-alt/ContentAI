@@ -827,9 +827,11 @@ class ConversationService:
         if not created_at_raw or not message_id:
             raise InvalidCursorError("Cursor format is invalid")
         try:
-            parsed = datetime.fromisoformat(created_at_raw)
+            parsed = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
         except ValueError as exc:
             raise InvalidCursorError("Cursor timestamp is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise InvalidCursorError("Cursor timestamp must be timezone-aware")
         return parsed, message_id
 
     @staticmethod
