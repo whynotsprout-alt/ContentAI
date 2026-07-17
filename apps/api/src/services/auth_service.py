@@ -62,6 +62,27 @@ class AuthService:
         session.refresh(user)
         return user
 
+    def bootstrap_default_admin(self, session: Session) -> AppUser | None:
+        email = self.normalize_email(self.settings.auth.bootstrap_admin_email)
+        if not email or self.get_user_by_email(session, email) is not None:
+            return None
+
+        now = utcnow()
+        user = AppUser(
+            email=email,
+            email_normalized=email,
+            password_hash=self.password_hash.hash(
+                self.settings.auth.bootstrap_admin_password.get_secret_value()
+            ),
+            role="admin",
+            status="active",
+            email_verified_at=now,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
     def login(
         self,
         session: Session,

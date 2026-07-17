@@ -13,11 +13,11 @@ tar -xzf contentai-0.4.2-ubuntu.tar.gz
 cd contentai-0.4.2-ubuntu
 cp .env.example .env
 chmod 600 .env
-# 编辑 .env：数据库密码、模型与搜索密钥
+# 编辑 .env：数据库密码、搜索密钥与默认管理员初始密码
 bash infra/ubuntu/deploy.sh
 ```
 
-生产配置必须通过 `docker compose config --quiet`。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 必须使用实际的前端来源。
+生产配置必须通过 `docker compose config --quiet`。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 必须使用实际的前端来源。`CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 与 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD` 必须成对设置：仅在该邮箱不存在时创建已激活管理员，已有账号在重启时不会被改写。初始登录完成后，应将密码保留在受控的部署密钥管理中；系统不提供邮件验证或邮件密码重置。
 
 ## 健康检查
 

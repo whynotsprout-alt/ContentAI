@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class AuthSettings(BaseModel):
@@ -13,3 +13,5 @@ class AuthSettings(BaseModel):
     login_max_failures: int = 5
     login_lock_minutes: int = 15
     bootstrap_admin_emails: list[str] = Field(default_factory=list)
+    bootstrap_admin_email: str = ""
+    bootstrap_admin_password: SecretStr = SecretStr("")

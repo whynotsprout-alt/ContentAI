@@ -8,7 +8,7 @@ from api.router import router
 from core.config import Env, Settings, get_settings
 from core.logging import configure_logging
 from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
-from db.session import close_database, init_database
+from db.session import close_database, get_engine, init_database
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from services.admin_service import AdminService
@@ -16,6 +16,7 @@ from services.agent_service import AgentService
 from services.auth_service import AuthService
 from services.catalog_service import CatalogService
 from services.conversation_service import ConversationService, ExecutionDispatcher
+from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ def _normalize_origins(frontend_origins: str | Iterable[str] | None) -> list[str
 
 
 def _register_services(app: FastAPI) -> None:
+    auth_service = AuthService(app.state.settings)
+    with Session(get_engine(app.state.settings)) as session:
+        auth_service.bootstrap_default_admin(session)
+
     runtime = getattr(app.state, "runtime", None)
     agent_service = AgentService(app.state.settings, runtime=runtime)
     starter = getattr(agent_service, "start", None)
@@ -57,8 +62,8 @@ def _register_services(app: FastAPI) -> None:
         execution_dispatcher=execution_dispatcher,
     )
     app.state.conversation_service = conversation_service
-    app.state.auth_service = AuthService(app.state.settings)
-    app.state.admin_service = AdminService(app.state.auth_service)
+    app.state.auth_service = auth_service
+    app.state.admin_service = AdminService(auth_service)
     app.state.rate_limiter = RedisRateLimiter(app.state.settings)
 
 

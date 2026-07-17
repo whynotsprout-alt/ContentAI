@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
@@ -11,6 +12,8 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 from models.chat import ChatMessage, ChatSession
 from models.enums import MessageRole
 from models.user import AppUser, ModelUsage, UserActionToken
+from pydantic import ValidationError
+from services.auth_service import AuthService
 from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
 
@@ -90,7 +93,8 @@ def _production_settings(**auth_overrides: object) -> Settings:
         database={"url": "postgresql+psycopg://postgres:postgres@db/contentai"},
         search={"traffic_relay_api_key": "test-relay-key"},
         auth={
-            "bootstrap_admin_emails": ["admin@example.com"],
+            "bootstrap_admin_email": "admin@example.com",
+            "bootstrap_admin_password": "bootstrap password 123",
             **auth_overrides,
         },
     )
@@ -106,6 +110,81 @@ def test_production_ignores_retired_email_settings():
     assert not hasattr(settings.auth, "public_base_url")
     assert not hasattr(settings.auth, "require_email_verification")
     assert not hasattr(settings.auth, "mail_backend")
+
+
+def test_startup_bootstraps_an_active_admin_once():
+    settings = Settings(
+        env="test",
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        auth={
+            "bootstrap_admin_email": "bootstrap-admin@example.com",
+            "bootstrap_admin_password": "bootstrap password 123",
+        },
+    )
+    assert settings.auth.bootstrap_admin_emails == ["bootstrap-admin@example.com"]
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        login_headers = _login(client, "bootstrap-admin@example.com", "bootstrap password 123")
+        assert client.get("/api/auth/me", headers=login_headers).json()["role"] == "admin"
+
+    with Session(get_engine(settings)) as session:
+        users = session.exec(
+            select(AppUser).where(AppUser.email_normalized == "bootstrap-admin@example.com")
+        ).all()
+        assert len(users) == 1
+        assert users[0].status == "active"
+        assert users[0].email_verified_at is not None
+
+
+def test_bootstrap_does_not_change_an_existing_user():
+    settings = Settings(
+        env="test",
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        auth={
+            "bootstrap_admin_email": "existing@example.com",
+            "bootstrap_admin_password": "new bootstrap password",
+        },
+    )
+    auth_service = AuthService(settings)
+    password_hash = auth_service.password_hash.hash("existing password")
+    with Session(get_engine(settings)) as session:
+        session.add(
+            AppUser(
+                email="existing@example.com",
+                email_normalized="existing@example.com",
+                password_hash=password_hash,
+                role="user",
+                status="disabled",
+            )
+        )
+        session.commit()
+
+    with TestClient(create_app(settings)):
+        pass
+
+    with Session(get_engine(settings)) as session:
+        user = session.exec(
+            select(AppUser).where(AppUser.email_normalized == "existing@example.com")
+        ).one()
+        assert user.role == "user"
+        assert user.status == "disabled"
+        assert auth_service.password_hash.verify("existing password", user.password_hash)
+
+
+def test_bootstrap_admin_requires_email_and_password_together():
+    with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN_PASSWORD"):
+        Settings(
+            env="test",
+            database={
+                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+            },
+            auth={"bootstrap_admin_email": "bootstrap-admin@example.com"},
+        )
 
 
 def test_admin_user_listing_usage_and_disable():
