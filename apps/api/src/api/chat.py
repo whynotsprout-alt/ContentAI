@@ -744,6 +744,7 @@ def _to_stream_event_v3(
     semantic_name = normalized_payload.get("name")
     name = str(semantic_name).strip() if isinstance(semantic_name, str) else ""
     channel = _stream_channel(normalized_event, name)
+    has_interrupt = "interrupt" in normalized_payload
     data = _public_stream_data(normalized_payload, channel=channel)
     if channel == "errors":
         data = _normalize_stream_error_payload(
@@ -766,7 +767,11 @@ def _to_stream_event_v3(
         else (),
         attempt_id=_optional_string(normalized_payload.get("attempt_id")),
         message_id=_optional_string(normalized_payload.get("message_id")),
-        tool_call_id=_optional_string(normalized_payload.get("tool_call_id")),
+        tool_call_id=(
+            None
+            if has_interrupt
+            else _optional_string(normalized_payload.get("tool_call_id"))
+        ),
         timestamp=timestamp_value,
         data=data,
     )
@@ -826,6 +831,14 @@ def _stream_exception_event(execution_id: str | None, payload: dict[str, str]) -
 
 def _public_stream_data(payload: dict[str, Any], *, channel: str) -> dict[str, Any]:
     """Project only public fields; never relay graph state or credentials."""
+    if "interrupt" in payload:
+        projected: dict[str, Any] = {
+            "interrupt": _sanitize_public_interrupt(payload["interrupt"]),
+        }
+        if payload.get("name") in {"run_interrupt", "execution_waiting_input"}:
+            projected = {"name": payload["name"], **projected}
+        return _bounded_public_stream_data(projected)
+
     blocked = {
         "configurable",
         "runtime",
@@ -863,8 +876,10 @@ def _public_stream_data(payload: dict[str, Any], *, channel: str) -> dict[str, A
     projected = {
         key: value for key, value in payload.items() if key in allowed and key not in blocked
     }
-    if channel == "interrupts" and "interrupt" in projected:
-        projected["interrupt"] = _sanitize_public_interrupt(projected["interrupt"])
+    return _bounded_public_stream_data(projected)
+
+
+def _bounded_public_stream_data(projected: dict[str, Any]) -> dict[str, Any]:
     safe = _json_safe_stream_data(projected)
     encoded = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) <= 512 * 1024:

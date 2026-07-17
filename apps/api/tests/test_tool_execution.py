@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
 import time
 from types import SimpleNamespace
 
+import pytest
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.tool_execution import execute_tool_call
+from agent.tools.memory import remember
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
+from memory import LongTermMemory, MemoryRepository
 from models.chat import AgentExecution, AgentInvocation, ChatSession, ToolExecution
 from models.enums import RunStatus, ToolExecutionStatus
+from models.memory import MemoryRecord
 from sqlmodel import Session, select
 
 
@@ -65,6 +70,32 @@ class RecordingEventWriter:
 
     def emit(self, event: str, payload: dict[str, object]) -> None:
         self.events.append((event, payload))
+
+
+def test_remember_rejects_spaced_sensitive_label_without_persisting_or_logging(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    execution_id = "execution-sensitive-remember"
+    sensitive_content = "my API     key is never-log-this-value"
+    _seed_execution(execution_id)
+    with Session(get_engine()) as session:
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = LongTermMemory(MemoryRepository(session))
+        with tool_runtime_scope(runtime):
+            result = remember.invoke(
+                {"content": sensitive_content, "kind": "preference"}
+            )
+        persisted = session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == sensitive_content)
+        ).all()
+
+    assert result == {
+        "error": "Potentially sensitive content is not allowed for memory storage.",
+        "tool": "remember",
+    }
+    assert persisted == []
+    assert "never-log-this-value" not in caplog.text
 
 
 def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:

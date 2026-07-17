@@ -19,7 +19,8 @@ from agent.runtime.checkpoint import (
     execution_checkpoint_config,
 )
 from agent.runtime.container import RuntimeContainer
-from api.chat import _public_stream_data
+from agent.tools.memory import normalize_remember_input, remember
+from api.chat import _encode_sse_event, _public_stream_data, _to_stream_event_v3
 from core.config import get_settings
 from core.security import AuthContext
 from db.session import get_engine
@@ -27,6 +28,7 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import interrupt
+from memory.long_term import is_sensitive_memory
 from memory.message_persister import MessagePersister
 from models.base import utcnow
 from models.chat import (
@@ -314,6 +316,240 @@ def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() ->
     }
 
 
+@pytest.mark.parametrize(
+    "channel",
+    ["lifecycle", "values", "messages", "tools", "interrupts"],
+)
+@pytest.mark.parametrize("variant", ["raw", "legacy", "malformed"])
+def test_interrupt_stream_sanitization_is_channel_independent_and_total(
+    channel: str,
+    variant: str,
+) -> None:
+    raw = {
+        "interrupts": [
+            {
+                "id": "int-cross-channel",
+                "value": {
+                    "tool_calls": [
+                        {
+                            "name": "remember",
+                            "id": "call-secret",
+                            "args": {
+                                "content": "public preference",
+                                "kind": "preference",
+                                "api_key": "secret-argument",
+                            },
+                        }
+                    ],
+                    "runtime": {"access_token": "secret-runtime"},
+                },
+            }
+        ]
+    }
+    interrupt_value: Any
+    if variant == "raw":
+        interrupt_value = raw
+    elif variant == "legacy":
+        interrupt_value = {
+            "interrupt_id": "int-legacy",
+            "tool_name": "remember",
+            "purpose": "legacy",
+            "args": {"api_key": "secret-legacy"},
+        }
+    else:
+        interrupt_value = {
+            "interrupt_id": "int-malformed",
+            "actions": [{"tool_name": "x" * 256, "purpose": "unsafe"}],
+            "runtime": {"private_key": "secret-malformed"},
+        }
+
+    projected = _public_stream_data(
+        {
+            "name": "run_interrupt",
+            "interrupt": interrupt_value,
+            "tool_call_id": "call-top-secret",
+            "content": '{"args":{"api_key":"secret-sibling"}}',
+        },
+        channel=channel,
+    )
+    encoded = json.dumps(projected, ensure_ascii=False)
+
+    if variant == "raw":
+        assert projected["interrupt"] == {
+            "interrupt_id": "int-cross-channel",
+            "actions": [
+                {
+                    "tool_name": "remember",
+                    "purpose": "保存一条长期记忆",
+                    "memory": {"type": "preference", "content": "public preference"},
+                }
+            ],
+        }
+    else:
+        assert projected["interrupt"] is None
+    assert "tool_call_id" not in projected
+    for forbidden in (
+        "call-secret",
+        "api_key",
+        "runtime",
+        "access_token",
+        "private_key",
+        "secret-sibling",
+    ):
+        assert forbidden not in encoded
+
+
+def test_interrupt_sse_envelope_drops_call_ids_and_raw_sibling_fields() -> None:
+    stream_event = _to_stream_event_v3(
+        "tool_progress",
+        {
+            "execution_id": "execution-public",
+            "sequence": 1,
+            "name": "run_interrupt",
+            "tool_call_id": "call-envelope-secret",
+            "content": '{"args":{"api_key":"secret-sibling"}}',
+            "interrupt": {
+                "interrupts": [
+                    {
+                        "id": "int-public",
+                        "value": {
+                            "tool_calls": [
+                                {
+                                    "id": "call-inner-secret",
+                                    "name": "remember",
+                                    "args": {
+                                        "content": "public preference",
+                                        "kind": "preference",
+                                        "api_key": "secret-argument",
+                                    },
+                                }
+                            ],
+                            "runtime": {"access_token": "secret-runtime"},
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    encoded = _encode_sse_event(
+        stream_event.channel,
+        stream_event.model_dump(mode="json"),
+        event_id=stream_event.event_id,
+    )
+
+    assert stream_event.tool_call_id is None
+    assert stream_event.data == {
+        "name": "run_interrupt",
+        "interrupt": {
+            "interrupt_id": "int-public",
+            "actions": [
+                {
+                    "tool_name": "remember",
+                    "purpose": "保存一条长期记忆",
+                    "memory": {"type": "preference", "content": "public preference"},
+                }
+            ],
+        },
+    }
+    for forbidden in (
+        "call-envelope-secret",
+        "call-inner-secret",
+        "secret-sibling",
+        "secret-argument",
+        "secret-runtime",
+        "api_key",
+        "access_token",
+    ):
+        assert forbidden not in encoded
+
+
+def test_remember_kind_null_matches_structured_tool_rejection() -> None:
+    validated = remember.args_schema.model_validate({"content": "safe memory"})
+    assert validated.kind == "semantic"
+    with pytest.raises(ValidationError):
+        remember.args_schema.model_validate({"content": "safe memory", "kind": None})
+    assert normalize_remember_input("safe memory", None) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "my API key is abc123",
+        "my API     key is abc123",
+        "client secret abc123",
+        "access token abc123",
+        "private key abc123",
+    ],
+)
+def test_sensitive_memory_patterns_cover_spaced_credential_labels(content: str) -> None:
+    assert is_sensitive_memory(content)
+    payload = {
+        "interrupts": [
+            {
+                "id": "int-sensitive",
+                "value": {
+                    "tool_calls": [
+                        {
+                            "name": "remember",
+                            "args": {"content": content, "kind": "preference"},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    assert public_interrupt(payload) is None
+    stream_event = _to_stream_event_v3(
+        "state",
+        {
+            "execution_id": "execution-sensitive",
+            "sequence": 1,
+            "name": "run_interrupt",
+            "interrupt": payload,
+        },
+    )
+    encoded = _encode_sse_event(
+        stream_event.channel,
+        stream_event.model_dump(mode="json"),
+        event_id=stream_event.event_id,
+    )
+    assert stream_event.data == {"name": "run_interrupt", "interrupt": None}
+    assert content not in encoded
+
+
+def test_multiple_top_level_interrupts_fail_closed_as_one_approval_scope() -> None:
+    payload = {
+        "interrupts": [
+            {
+                "id": "int-first",
+                "value": {
+                    "tool_calls": [
+                        {"name": "remember", "args": {"content": "visible first"}}
+                    ]
+                },
+            },
+            {
+                "id": "int-hidden",
+                "value": {
+                    "tool_calls": [
+                        {
+                            "name": "remember",
+                            "args": {"content": "hidden second", "api_key": "secret"},
+                        }
+                    ]
+                },
+            },
+        ]
+    }
+
+    assert public_interrupt(payload) is None
+    assert execution_resume_module.interrupt_identity(payload)[0] == ""
+    assert _public_stream_data(
+        {"name": "run_interrupt", "interrupt": payload},
+        channel="values",
+    )["interrupt"] is None
+
+
 def test_public_interrupt_normalizes_remember_exactly_like_tool_execution() -> None:
     content = "  " + ("记 忆 " * 400) + "  "
     payload = {
@@ -395,6 +631,18 @@ def test_public_interrupt_normalizes_remember_exactly_like_tool_execution() -> N
             {
                 "name": "remember",
                 "args": {"content": '[42,"scalar-secret"]', "kind": "semantic"},
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {"content": "null", "kind": "semantic"},
+            }
+        ],
+        [
+            {
+                "name": "remember",
+                "args": {"content": "safe memory", "kind": None},
             }
         ],
     ],

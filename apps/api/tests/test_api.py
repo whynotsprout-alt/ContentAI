@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -1730,16 +1731,114 @@ def test_cancel_waiting_interrupt_makes_resume_stale_and_executes_no_tool():
 
 
 @pytest.mark.parametrize(
-    "tool_calls",
+    ("interrupts_payload", "forbidden_fragment"),
     [
-        [{"name": "x" * 256, "args": {"token": "secret-long-name"}}],
-        [{"name": "remember", "args": {"kind": "preference", "api_key": "secret"}}],
-        [{"name": {"malformed": True}, "args": {"password": "secret"}}],
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {"name": "x" * 256, "args": {"token": "secret-long-name"}}
+                        ]
+                    },
+                }
+            ],
+            "secret-long-name",
+        ),
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {
+                                "name": "remember",
+                                "args": {"kind": "preference", "api_key": "secret"},
+                            }
+                        ]
+                    },
+                }
+            ],
+            "secret",
+        ),
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {"name": {"malformed": True}, "args": {"password": "secret"}}
+                        ]
+                    },
+                }
+            ],
+            "secret",
+        ),
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {
+                                "name": "remember",
+                                "args": {"content": "safe memory", "kind": None},
+                            }
+                        ]
+                    },
+                }
+            ],
+            "safe memory",
+        ),
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {
+                                "name": "remember",
+                                "args": {
+                                    "content": "my API     key is super-private-value",
+                                    "kind": "preference",
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+            "super-private-value",
+        ),
+        (
+            [
+                {
+                    "id": "int-unsafe-status",
+                    "value": {
+                        "tool_calls": [
+                            {"name": "remember", "args": {"content": "visible first"}}
+                        ]
+                    },
+                },
+                {
+                    "id": "int-hidden-status",
+                    "value": {
+                        "tool_calls": [
+                            {"name": "remember", "args": {"content": "hidden second"}}
+                        ]
+                    },
+                },
+            ],
+            "hidden second",
+        ),
     ],
 )
 def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_works(
-    tool_calls: list[Any],
+    interrupts_payload: list[dict[str, Any]],
+    forbidden_fragment: str,
+    caplog: pytest.LogCaptureFixture,
 ):
+    caplog.set_level(logging.DEBUG)
     with Session(get_engine()) as db_session:
         chat = ChatSession(
             agent_id="default-agent",
@@ -1761,18 +1860,11 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
             agent_version_id=chat.agent_version_id,
             status=RunStatus.waiting_input,
             interrupt_payload={
-                "interrupts": [
-                    {
-                        "id": "int-unsafe-status",
-                        "value": {
-                            "tool_calls": tool_calls,
-                            "runtime": {
-                                "execution_id": "secret-execution",
-                                "api_key": "secret-runtime",
-                            },
-                        },
-                    }
-                ]
+                "interrupts": interrupts_payload,
+                "runtime": {
+                    "execution_id": "secret-execution",
+                    "api_key": "secret-runtime",
+                },
             },
         )
         db_session.add(execution)
@@ -1783,7 +1875,9 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
         status_response = client.get(f"/api/chat/runs/{execution_id}/status")
         assert status_response.status_code == 200
         assert status_response.json()["interrupt"] is None
-        assert "secret" not in json.dumps(status_response.json(), ensure_ascii=False)
+        encoded_status = json.dumps(status_response.json(), ensure_ascii=False)
+        assert forbidden_fragment not in encoded_status
+        assert forbidden_fragment not in caplog.text
 
         stale = client.post(
             f"/api/chat/runs/{execution_id}/resume",
@@ -1796,6 +1890,12 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
         assert cancelled.json()["interrupt"] is None
+        encoded_flow = json.dumps(
+            [status_response.json(), stale.json(), cancelled.json()],
+            ensure_ascii=False,
+        )
+        assert forbidden_fragment not in encoded_flow
+        assert forbidden_fragment not in caplog.text
 
 
 def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():

@@ -12,7 +12,11 @@ from models.enums import MemorySourceType
 from pydantic import BaseModel, Field
 
 SENSITIVE_PATTERNS = (
-    re.compile(r"\b(?:api[_-]?key|secret|password|passwd|token|bearer)\b", re.I),
+    re.compile(
+        r"\b(?:api[\s_-]*key|client[\s_-]*secret|access[\s_-]*token|"
+        r"private[\s_-]*key|secret|password|passwd|token|bearer)\b",
+        re.I,
+    ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}\b"),
 )

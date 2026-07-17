@@ -14,12 +14,19 @@ from sqlmodel import Session
 
 
 def interrupt_identity(payload: dict[str, Any] | None) -> tuple[str, str]:
-    interrupts = payload.get("interrupts") if isinstance(payload, dict) else None
-    first = interrupts[0] if isinstance(interrupts, list) and interrupts else {}
-    interrupt_id = str(first.get("id") or "") if isinstance(first, dict) else ""
-    value = first.get("value") if isinstance(first, dict) else None
+    interrupt = _single_interrupt(payload)
+    interrupt_id = str(interrupt.get("id") or "") if interrupt is not None else ""
+    value = interrupt.get("value") if interrupt is not None else None
     tool_calls = value.get("tool_calls") if isinstance(value, dict) else []
     return interrupt_id, stable_json_hash(tool_calls)
+
+
+def _single_interrupt(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    interrupts = payload.get("interrupts") if isinstance(payload, dict) else None
+    if not isinstance(interrupts, list) or len(interrupts) != 1:
+        return None
+    interrupt = interrupts[0]
+    return interrupt if isinstance(interrupt, dict) else None
 
 
 def stable_json_hash(value: Any) -> str:
@@ -103,8 +110,7 @@ def mark_resume_consumed(
 
 
 def _public_interrupt(payload: dict[str, Any] | None) -> PublicInterrupt | None:
-    interrupts = payload.get("interrupts") if isinstance(payload, dict) else None
-    first = interrupts[0] if isinstance(interrupts, list) and interrupts else None
+    first = _single_interrupt(payload)
     if not isinstance(first, dict):
         return None
     interrupt_id = first.get("id")

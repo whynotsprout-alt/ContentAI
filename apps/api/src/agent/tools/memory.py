@@ -24,6 +24,7 @@ _MEMORY_TEXT_FIELDS = (
     "note",
     "notes",
 )
+_JSON_PARSE_FAILED = object()
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ def normalize_remember_input(
     """Normalize the exact kind/content pair that the remember tool persists."""
     if not isinstance(content, str):
         return None
-    if kind is not None and not isinstance(kind, str):
+    if not isinstance(kind, str):
         return None
     normalized_content = _normalize_text(_extract_memory_text(content))
     if not normalized_content:
@@ -140,16 +141,16 @@ def _extract_memory_text(value: str) -> str:
     if not candidate:
         return ""
     parsed_candidate = _safe_parse_json(raw)
-    if parsed_candidate is not None:
+    if parsed_candidate is not _JSON_PARSE_FAILED:
         return _extract_text_from_payload(parsed_candidate)
     return candidate
 
 
-def _safe_parse_json(value: str) -> object | None:
+def _safe_parse_json(value: str) -> object:
     try:
         return json.loads(value)
     except Exception:
-        return None
+        return _JSON_PARSE_FAILED
 
 
 def _extract_text_from_payload(value: object) -> str:
