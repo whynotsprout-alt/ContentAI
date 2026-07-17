@@ -6,7 +6,7 @@ from agent.runtime.schemas import validate_assistant_response
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from models.chat import ChatMessage
 from models.enums import MessageRole, MessageType
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 
 class MessagePersister:
@@ -20,33 +20,23 @@ class MessagePersister:
         messages: list[BaseMessage],
         event_writer: Any,
         streamed_assistant_text: str = "",
-    ) -> bool:
-        assistant_saved = False
-        pending_events: list[tuple[str, dict[str, Any]]] = []
-        for message in messages:
-            if isinstance(message, HumanMessage):
+    ) -> ChatMessage | None:
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage) or not isinstance(message, AIMessage):
                 continue
-            if isinstance(message, AIMessage):
-                content = message_to_text(message)
-                if not content or message.tool_calls:
-                    continue
-                self.persist_assistant_text(
-                    db_session,
-                    session_id=session_id,
-                    invocation_id=invocation_id,
-                    execution_id=execution_id,
-                    content=content,
-                    event_writer=event_writer,
-                    emit_delta=not streamed_assistant_text,
-                    commit=False,
-                    pending_events=pending_events,
-                )
-                assistant_saved = True
-        if pending_events:
-            db_session.commit()
-            for event, payload in pending_events:
-                event_writer.emit(event, payload)
-        return assistant_saved
+            content = message_to_text(message)
+            if not content or message.tool_calls:
+                continue
+            return self.persist_assistant_text(
+                db_session,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                execution_id=execution_id,
+                content=content,
+                event_writer=event_writer,
+                emit_delta=not streamed_assistant_text,
+            )
+        return None
 
     def persist_assistant_text(
         self,
@@ -58,48 +48,36 @@ class MessagePersister:
         content: str,
         event_writer: Any,
         emit_delta: bool = True,
-        commit: bool = True,
+        commit: bool = False,
         pending_events: list[tuple[str, dict[str, Any]]] | None = None,
-    ) -> None:
+    ) -> ChatMessage:
+        existing = db_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).one_or_none()
+        if existing is not None:
+            return existing
         response = validate_assistant_response(
             content=content,
             message_type="markdown",
             metadata={},
         )
-        db_session.add(
-            ChatMessage(
-                session_id=session_id,
-                invocation_id=invocation_id,
-                role=MessageRole.assistant,
-                message_type=MessageType.markdown,
-                content=response.content,
-            )
+        message = ChatMessage(
+            session_id=session_id,
+            invocation_id=invocation_id,
+            execution_id=execution_id,
+            role=MessageRole.assistant,
+            message_type=MessageType.markdown,
+            content=response.content,
         )
-        events = [
-            (
-                "assistant_message_delta",
-                {
-                    "execution_id": execution_id,
-                    "message_type": response.message_type,
-                    "chunk": response.content if emit_delta else "",
-                    "done": True,
-                },
-            ),
-            (
-                "assistant_message",
-                {
-                    "execution_id": execution_id,
-                    "message_type": response.message_type,
-                    "content": response.content,
-                },
-            ),
-        ]
+        db_session.add(message)
+        db_session.flush()
         if commit:
             db_session.commit()
-            for event, payload in events:
-                event_writer.emit(event, payload)
-        elif pending_events is not None:
-            pending_events.extend(events)
+            db_session.refresh(message)
+        return message
 
 
 def message_to_text(message: BaseMessage) -> str:

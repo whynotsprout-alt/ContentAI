@@ -37,6 +37,8 @@ from models.schemas.chat import (
     CreateSessionResponse,
     ErrorDetail,
     MessageListRequest,
+    PublicInterrupt,
+    PublicMemoryProposal,
     StreamEventV3,
     UserReplyRequest,
 )
@@ -63,6 +65,8 @@ __all__ = [
     "CreateSessionResponse",
     "ErrorDetail",
     "MessageListRequest",
+    "PublicInterrupt",
+    "PublicMemoryProposal",
     "UserReplyRequest",
     "MemoryItem",
     "AdminUserListResponse",

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from agent.graph.factory import build_agent_graph
 from agent.infrastructure.llm import ModelGateway
-from agent.runtime.checkpoint import RuntimePersistence
+from agent.runtime.checkpoint import RuntimePersistence, execution_checkpoint_config
 from agent.tools.registry import ToolRegistry, tool_names
 from core.config import Settings
 from langchain_core.tools import BaseTool
@@ -149,7 +149,6 @@ class RuntimeContainer:
     ) -> AgentRuntime:
         tools = self.get_tools(tool_permissions)
         configurable: dict[str, str] = {
-            "thread_id": session_id,
             "session_id": session_id,
             "user_id": user_id,
             "agent_id": agent_id,
@@ -158,6 +157,14 @@ class RuntimeContainer:
             configurable["conversation_id"] = conversation_id
         if execution_id is not None:
             configurable["execution_id"] = execution_id
+            configurable.update(
+                execution_checkpoint_config(
+                    thread_id=session_id,
+                    checkpoint_ns=execution_id,
+                )["configurable"]
+            )
+        else:
+            configurable["thread_id"] = session_id
         return AgentRuntime(
             graph=self.graph_for_permissions(tool_permissions),
             checkpointer=self.get_checkpointer(),

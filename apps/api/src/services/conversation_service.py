@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -39,11 +40,10 @@ from services.errors import (
     ActiveExecutionExistsError,
     AgentNotFoundError,
     ChatSessionNotFoundError,
-    ExecutionNotResumableError,
-    ExecutionResumeValueRequiredError,
+    IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
-    SessionAgentMismatchError,
+    RunInterruptStaleError,
     StreamingDegradedError,
     StreamReplayExpiredError,
     StreamReplayGapError,
@@ -55,7 +55,8 @@ from services.event_stream import (
     StreamReplayExpired,
     StreamReplayGap,
 )
-from services.execution_resume import interrupt_identity, stored_resume_value
+from services.execution_lineage import ExecutionLineage
+from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
 from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
@@ -271,18 +272,17 @@ class ConversationService:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> tuple[ChatUserMessageResponse, bool]:
-        chat = self._get_chat(session, payload.session_id, auth, for_update=True)
-        if payload.agent_id != chat.agent_id:
-            raise SessionAgentMismatchError(
-                f"Session {chat.id} belongs to agent {chat.agent_id}, not {payload.agent_id}"
-            )
+        lineage = ExecutionLineage.resolve_for_update(session, payload.session_id, auth)
+        chat = lineage.chat
         normalized_key = self._normalize_idempotency_key(idempotency_key)
+        request_sha256 = self._request_sha256(payload)
         if normalized_key is not None:
             replayed = self._find_replayed_turn(
                 session,
                 chat=chat,
                 auth=auth,
                 idempotency_key=normalized_key,
+                request_sha256=request_sha256,
             )
             if replayed is not None:
                 message, invocation, execution = replayed
@@ -303,6 +303,7 @@ class ConversationService:
             message_id=payload.message_id,
             auth=auth,
             idempotency_key=normalized_key,
+            request_sha256=request_sha256,
             request_id=request_id,
         )
         try:
@@ -381,21 +382,24 @@ class ConversationService:
         self,
         session: Session,
         execution_id: str,
-        resume_value: Any,
-        agent_id: str,
+        interrupt_id: str,
+        decision: str,
         auth: AuthContext,
         request_id: str | None = None,
     ) -> ChatExecutionResponse:
-        execution, _, chat = self._get_execution_in_scope(
+        execution, invocation, chat = self._get_execution_in_scope(
             session=session,
             execution_id=execution_id,
             auth=auth,
         )
-        if chat.agent_id != agent_id:
-            raise SessionAgentMismatchError(
-                f"Session {chat.id} belongs to agent {chat.agent_id}, not {agent_id}"
-            )
-        execution = self._resume_execution(session, execution, resume_value)
+        execution = self._resume_execution(
+            session,
+            execution,
+            invocation=invocation,
+            chat=chat,
+            interrupt_id=interrupt_id,
+            decision=decision,
+        )
         response = self._execution_response(
             execution=execution,
             chat_id=chat.id,
@@ -594,6 +598,7 @@ class ConversationService:
         message_id: str | None = None,
         auth: AuthContext,
         idempotency_key: str | None = None,
+        request_sha256: str | None = None,
         request_id: str | None = None,
     ) -> tuple[ChatMessage, AgentInvocation, AgentExecution]:
         invocation = AgentInvocation(
@@ -601,6 +606,7 @@ class ConversationService:
             agent_id=chat.agent_id,
             user_id=auth.user_id,
             idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
         )
         session.add(invocation)
         session.flush()
@@ -660,6 +666,7 @@ class ConversationService:
         chat: ChatSession,
         auth: AuthContext,
         idempotency_key: str,
+        request_sha256: str,
     ) -> tuple[ChatMessage, AgentInvocation, AgentExecution] | None:
         rows = list(
             session.exec(
@@ -675,7 +682,29 @@ class ConversationService:
                 .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             ).all()
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        message, invocation, execution = rows[0]
+        if invocation.request_sha256 != request_sha256:
+            raise IdempotencyPayloadMismatchError(
+                "The idempotency key is already bound to a different request payload."
+            )
+        return message, invocation, execution
+
+    @staticmethod
+    def _request_sha256(payload: AgentMessageRequest) -> str:
+        canonical = {
+            "message": payload.message,
+            "message_id": payload.message_id,
+            "session_id": payload.session_id,
+        }
+        encoded = json.dumps(
+            canonical,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _normalize_idempotency_key(value: str | None) -> str | None:
@@ -697,6 +726,30 @@ class ConversationService:
             locked.status = RunStatus.cancelled
             locked.finished_at = now
             locked.interrupt_payload = {}
+            live_resume_requests = session.exec(
+                select(ExecutionResumeRequest)
+                .where(ExecutionResumeRequest.execution_id == locked.id)
+                .where(ExecutionResumeRequest.status.in_(["pending", "claimed"]))
+                .with_for_update()
+            ).all()
+            for resume_request in live_resume_requests:
+                resume_request.status = "stale"
+                resume_request.updated_at = now
+                session.add(resume_request)
+            outbox = session.exec(
+                select(ExecutionOutbox)
+                .where(
+                    ExecutionOutbox.execution_id == locked.id,
+                    ExecutionOutbox.kind == "execute",
+                )
+                .with_for_update()
+            ).one_or_none()
+            if outbox is not None:
+                outbox.status = "cancelled"
+                outbox.locked_by = None
+                outbox.locked_until = None
+                outbox.updated_at = now
+                session.add(outbox)
         else:
             locked.cancel_requested_at = locked.cancel_requested_at or now
         locked.touch_updated_at(now)
@@ -709,39 +762,58 @@ class ConversationService:
         self,
         session: Session,
         execution: AgentExecution,
-        resume_value: Any,
+        *,
+        invocation: AgentInvocation,
+        chat: ChatSession,
+        interrupt_id: str,
+        decision: str,
     ) -> AgentExecution:
         locked = session.exec(
             select(AgentExecution).where(AgentExecution.id == execution.id).with_for_update()
         ).one_or_none()
         if locked is None or locked.status != RunStatus.waiting_input:
-            raise ExecutionNotResumableError("Only executions waiting for input can be resumed")
-        if resume_value is None:
-            raise ExecutionResumeValueRequiredError("Resume value is required")
-        interrupt_id, tool_calls_hash = interrupt_identity(locked.interrupt_payload)
-        if not interrupt_id:
-            raise ExecutionNotResumableError("Execution interrupt identity is missing")
+            raise RunInterruptStaleError("The run interrupt is stale.")
+        pending_interrupt_id, tool_calls_hash = interrupt_identity(locked.interrupt_payload)
+        if not pending_interrupt_id or interrupt_id != pending_interrupt_id:
+            raise RunInterruptStaleError("The run interrupt is stale.")
+        if decision not in {"approve", "reject"}:
+            raise RunInterruptStaleError("The run interrupt decision is invalid.")
         pending_resume = session.exec(
             select(ExecutionResumeRequest)
             .where(ExecutionResumeRequest.execution_id == locked.id)
-            .where(ExecutionResumeRequest.status.in_(["pending", "claimed"]))
+            .where(ExecutionResumeRequest.interrupt_id == interrupt_id)
             .with_for_update()
         ).first()
         if pending_resume is not None:
-            raise ExecutionNotResumableError("A resume request is already pending")
+            raise RunInterruptStaleError("The run interrupt is stale.")
+        decision_message = ChatMessage(
+            session_id=chat.id,
+            invocation_id=invocation.id,
+            execution_id=locked.id,
+            role=MessageRole.user,
+            message_type=MessageType.text,
+            content=(
+                "已批准工具执行。" if decision == "approve" else "已拒绝工具执行。"
+            ),
+        )
+        session.add(decision_message)
+        session.flush()
         session.add(
             ExecutionResumeRequest(
                 execution_id=locked.id,
                 interrupt_id=interrupt_id,
+                decision=decision,
+                message_id=decision_message.id,
                 tool_calls_hash=tool_calls_hash,
-                value=stored_resume_value(resume_value),
+                value={"decision": decision},
             )
         )
         locked.status = RunStatus.pending
         locked.error = ""
         locked.finished_at = None
         locked.cancel_requested_at = None
-        locked.resume_payload = {}
+        locked.interrupt_payload = {}
+        locked.resume_payload = {"interrupt_id": interrupt_id, "decision": decision}
         locked.worker_id = None
         locked.claimed_at = None
         locked.heartbeat_at = None
@@ -870,7 +942,7 @@ class ConversationService:
             started_at=execution.started_at,
             finished_at=execution.finished_at,
             cancel_requested_at=execution.cancel_requested_at,
-            interrupt_payload=execution.interrupt_payload or {},
+            interrupt=public_interrupt(execution.interrupt_payload),
             streaming_degraded=execution.streaming_degraded,
             streaming_degraded_reason=execution.streaming_degraded_reason or "",
             queue_stage=queue_stage,

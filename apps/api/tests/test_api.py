@@ -1,8 +1,10 @@
+import json
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 import services.conversation_service as conversation_service_module
 from agent.runtime.checkpoint import RuntimePersistence
 from agent.runtime.container import RuntimeContainer
@@ -16,14 +18,24 @@ from core.security import authenticate_request
 from db.session import get_engine
 from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
+from memory.message_persister import MessagePersister
 from models.agent import AgentProfile, AgentVersion
-from models.chat import AgentExecution, AgentInvocation, ChatMessage, ChatSession, ExecutionOutbox
-from models.enums import MessageRole, MessageType, RunStatus
+from models.base import utcnow
+from models.chat import (
+    AgentExecution,
+    AgentExecutionAttempt,
+    AgentInvocation,
+    ChatMessage,
+    ChatSession,
+    ExecutionOutbox,
+)
+from models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
 from models.user import AdminAuditLog, AppUser
 from services.agent_service import AgentService
 from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
-from sqlalchemy import text
+from services.execution_claim import claim_execution
+from sqlalchemy import event, text
 from sqlmodel import Session, select
 
 _TEST_RUNTIME: RuntimeContainer | None = None
@@ -658,7 +670,7 @@ def test_lightweight_run_status_exposes_queue_stages():
         ] == "starting"
 
 
-def test_message_agent_mismatch_creates_no_message_or_execution():
+def test_message_contract_rejects_agent_id_and_creates_no_execution():
     with TestClient(app) as client:
         chat = client.post(
             "/api/chat/sessions",
@@ -692,9 +704,55 @@ def test_message_agent_mismatch_creates_no_message_or_execution():
                 len(session.exec(select(AgentExecution)).all()),
             )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "SESSION_AGENT_MISMATCH"
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
     assert after == before
+
+
+def test_message_idempotency_replay_mismatch_and_transport_conflict():
+    with TestClient(app) as client:
+        chat = client.post(
+            "/api/chat/sessions", json={"agent_id": "default-agent"}
+        ).json()
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        try:
+            first = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                headers={"Idempotency-Key": "api-key"},
+                json={"message": "same payload", "message_id": "client-api-message"},
+            )
+            replay = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                headers={"Idempotency-Key": "api-key"},
+                json={"message": "same payload", "message_id": "client-api-message"},
+            )
+            mismatch = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                headers={"Idempotency-Key": "api-key"},
+                json={"message": "different payload", "message_id": "client-api-message"},
+            )
+            message_id_mismatch = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                headers={"Idempotency-Key": "api-key"},
+                json={"message": "same payload", "message_id": "different-message-id"},
+            )
+            conflict = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                headers={"Idempotency-Key": "header-key"},
+                json={"message": "transport conflict", "idempotency_key": "body-key"},
+            )
+        finally:
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["message_id"] == replay.json()["message_id"]
+    assert first.json()["execution_id"] == replay.json()["execution_id"]
+    assert mismatch.status_code == message_id_mismatch.status_code == 409
+    assert mismatch.json()["detail"]["code"] == "IDEMPOTENCY_PAYLOAD_MISMATCH"
+    assert message_id_mismatch.json()["detail"]["code"] == "IDEMPOTENCY_PAYLOAD_MISMATCH"
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
 def test_chat_run_completes_with_plain_reply():
@@ -708,7 +766,6 @@ def test_chat_run_completes_with_plain_reply():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": "plain message",
             },
         )
@@ -749,7 +806,7 @@ def test_session_pins_agent_version_across_later_turns():
 
         submitted = client.post(
             f"/api/chat/sessions/{chat['session_id']}/messages",
-            json={"agent_id": "default-agent", "message": "keep the pinned version"},
+            json={"message": "keep the pinned version"},
         )
         assert submitted.status_code == 202
         execution_id = submitted.json()["execution_id"]
@@ -771,7 +828,6 @@ def test_chat_message_route_runs_in_background():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": "background message",
             },
         )
@@ -805,7 +861,7 @@ def test_completed_turn_extracts_long_term_memory_with_model_judgement():
 
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
-            json={"agent_id": "default-agent", "message": "please remember this"},
+            json={"message": "please remember this"},
         )
 
         assert response.status_code == 202
@@ -844,7 +900,7 @@ def test_memory_extraction_filters_low_confidence_and_sensitive_candidates():
 
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
-            json={"agent_id": "default-agent", "message": "temporary preference"},
+            json={"message": "temporary preference"},
         )
 
         assert response.status_code == 202
@@ -869,7 +925,6 @@ def test_chat_session_title_is_generated_by_model():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": "Please generate a short title for this session",
             },
         )
@@ -903,7 +958,6 @@ def test_postprocess_failure_keeps_main_run_completed_and_schedules_retry():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": message,
             },
         )
@@ -938,7 +992,6 @@ def test_message_stream_returns_runtime_events():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": "stream this reply",
             },
         )
@@ -1043,7 +1096,7 @@ def test_waiting_input_run_can_be_resumed():
         ).json()
         started = client.post(
             f"/api/chat/sessions/{chat['session_id']}/messages",
-            json={"agent_id": "default-agent", "message": "请记住这项偏好"},
+            json={"message": "请记住这项偏好"},
         )
         assert started.status_code == 202
         execution_id = started.json()["execution_id"]
@@ -1070,7 +1123,10 @@ def test_waiting_input_run_can_be_resumed():
 
         response = client.post(
             f"/api/chat/runs/{execution_id}/resume",
-            json={"agent_id": "default-agent", "message": "approve"},
+            json={
+                "interrupt_id": waiting["latest_execution"]["interrupt"]["interrupt_id"],
+                "decision": "approve",
+            },
         )
 
         assert response.status_code == 200
@@ -1143,7 +1199,7 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
     with TestClient(app) as client:
         blocked = client.post(
             f"/api/chat/sessions/{session_id}/messages",
-            json={"agent_id": "default-agent", "message": "start a second turn"},
+            json={"message": "start a second turn"},
         )
 
     assert blocked.status_code == 409
@@ -1479,7 +1535,6 @@ def test_chat_run_can_call_memory_tool():
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
             json={
-                "agent_id": "default-agent",
                 "message": "please remember my preference",
             },
         )
@@ -1490,7 +1545,10 @@ def test_chat_run_can_call_memory_tool():
         assert payload["latest_execution"]["status"] == "waiting_input"
         resumed = client.post(
             f"/api/chat/runs/{response.json()['execution_id']}/resume",
-            json={"agent_id": "default-agent", "message": "approve"},
+            json={
+                "interrupt_id": payload["latest_execution"]["interrupt"]["interrupt_id"],
+                "decision": "approve",
+            },
         )
         assert resumed.status_code == 200
         payload = wait_for_terminal_session(client, session["session_id"])
@@ -1504,6 +1562,300 @@ def test_chat_run_can_call_memory_tool():
             select(MemoryRecord).where(MemoryRecord.agent_id == "default-agent")
         ).all()
     assert any(item.content == "prefers concise replies" for item in memories)
+
+
+def test_reject_resumes_original_namespace_without_executing_pending_tool():
+    install_fake_model(
+        FakeModel(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-reject",
+                            "name": "remember",
+                            "args": {"content": "must not be saved", "kind": "preference"},
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        started = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "do not save this"},
+        )
+        waiting = wait_for_terminal_session(client, chat["session_id"])
+        interrupt_id = waiting["latest_execution"]["interrupt"]["interrupt_id"]
+
+        rejected = client.post(
+            f"/api/chat/runs/{started.json()['execution_id']}/resume",
+            json={"interrupt_id": interrupt_id, "decision": "reject"},
+        )
+        assert rejected.status_code == 200
+        terminal = wait_for_terminal_session(client, chat["session_id"])
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert terminal["messages"][-1]["content"] == "宸插彇娑堜繚瀛榒."
+    assert [message["content"] for message in terminal["messages"]].count(
+        "已拒绝工具执行。"
+    ) == 1
+    with Session(get_engine()) as db_session:
+        assert db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == "must not be saved")
+        ).all() == []
+
+
+def test_cancel_waiting_interrupt_makes_resume_stale_and_executes_no_tool():
+    install_fake_model(
+        FakeModel(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-cancel",
+                            "name": "remember",
+                            "args": {"content": "cancelled memory"},
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        started = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "cancel this tool"},
+        )
+        waiting = wait_for_terminal_session(client, chat["session_id"])
+        interrupt_id = waiting["latest_execution"]["interrupt"]["interrupt_id"]
+        cancelled = client.post(f"/api/chat/runs/{started.json()['execution_id']}/cancel")
+        stale = client.post(
+            f"/api/chat/runs/{started.json()['execution_id']}/resume",
+            json={"interrupt_id": interrupt_id, "decision": "approve"},
+        )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["interrupt"] is None
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "RUN_INTERRUPT_STALE"
+    with Session(get_engine()) as db_session:
+        assert db_session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == "cancelled memory")
+        ).all() == []
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == started.json()["execution_id"],
+                ExecutionOutbox.kind == "execute",
+            )
+        ).one()
+        assert outbox.status == "cancelled"
+
+
+def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
+    install_fake_model(
+        FakeModel(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-private-status",
+                            "name": "remember",
+                            "args": {
+                                "content": "public memory content",
+                                "kind": "preference",
+                                "api_key": "secret",
+                            },
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        started = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "inspect approval"},
+        )
+        waiting = wait_for_terminal_session(client, chat["session_id"])
+        public_interrupt = waiting["latest_execution"]["interrupt"]
+        wrong = client.post(
+            f"/api/chat/runs/{started.json()['execution_id']}/resume",
+            json={"interrupt_id": "wrong-id", "decision": "approve"},
+        )
+
+    assert set(public_interrupt) == {"interrupt_id", "tool_name", "purpose", "memory"}
+    assert public_interrupt["tool_name"] == "remember"
+    assert public_interrupt["memory"] == {
+        "type": "preference",
+        "content": "public memory content",
+    }
+    encoded = json.dumps(public_interrupt, ensure_ascii=False)
+    assert "call-private-status" not in encoded
+    assert "api_key" not in encoded
+    assert "secret" not in encoded
+    assert wrong.status_code == 409
+    assert wrong.json()["detail"]["code"] == "RUN_INTERRUPT_STALE"
+
+
+@pytest.mark.parametrize(
+    "fault_window",
+    [
+        "before_first_checkpoint",
+        "after_end",
+        "after_assistant_flush",
+        "before_terminal_commit",
+    ],
+)
+def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
+    fault_window: str,
+):
+    class _CrashBeforeCheckpointModel(FakeModel):
+        def __init__(self) -> None:
+            super().__init__([AIMessage(content="checkpoint final")])
+            self.crashed = False
+
+        def invoke(self, messages: list[Any]) -> AIMessage:
+            self.calls.append(messages)
+            if not self.crashed:
+                self.crashed = True
+                raise SystemExit("fault before first durable graph result")
+            return next(self.responses)
+
+    class _CrashPersister(MessagePersister):
+        def __init__(self, *, after_flush: bool) -> None:
+            self.after_flush = after_flush
+            self.crashed = False
+
+        def persist_graph_messages(self, *args: Any, **kwargs: Any) -> ChatMessage | None:
+            if not self.after_flush and not self.crashed:
+                self.crashed = True
+                raise SystemExit("fault after END")
+            message = super().persist_graph_messages(*args, **kwargs)
+            if self.after_flush and not self.crashed:
+                self.crashed = True
+                raise SystemExit("fault after Assistant flush")
+            return message
+
+    model = (
+        _CrashBeforeCheckpointModel()
+        if fault_window == "before_first_checkpoint"
+        else FakeModel([AIMessage(content="checkpoint final")])
+    )
+    install_fake_model(model)
+
+    with TestClient(app) as client:
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        try:
+            chat = client.post(
+                "/api/chat/sessions", json={"agent_id": "default-agent"}
+            ).json()
+            started = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": f"fault window {fault_window}"},
+            )
+        finally:
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+        execution_id = started.json()["execution_id"]
+        service = app.state.agent_service
+        original_persister = service.runner.execution_engine.message_persister
+        if fault_window in {"after_end", "after_assistant_flush"}:
+            service.runner.execution_engine.message_persister = _CrashPersister(
+                after_flush=fault_window == "after_assistant_flush"
+            )
+
+        crashed = False
+        try:
+            for delivery in range(3):
+                claimed = claim_execution(
+                    service,
+                    execution_id,
+                    f"fault-worker-{delivery}",
+                    use_lease=False,
+                )
+                if claimed is None:
+                    continue
+                with Session(get_engine()) as db_session:
+                    if fault_window == "before_terminal_commit" and delivery == 0:
+                        def crash_before_terminal_commit(session: Any) -> None:
+                            execution = session.get(AgentExecution, execution_id)
+                            if execution is not None and execution.status == RunStatus.completed:
+                                raise SystemExit("fault before terminal commit")
+
+                        event.listen(db_session, "before_commit", crash_before_terminal_commit)
+                    try:
+                        service.runner.run(
+                            db_session,
+                            execution_id=execution_id,
+                            auth=claimed.auth,
+                            tool_permissions=claimed.auth.tool_permissions,
+                            resume_value=claimed.resume_value,
+                            resume_request_id=claimed.resume_request_id,
+                            continue_from_checkpoint=claimed.continue_from_checkpoint,
+                        )
+                    except SystemExit:
+                        crashed = True
+                    finally:
+                        if fault_window == "before_terminal_commit" and delivery == 0:
+                            event.remove(
+                                db_session,
+                                "before_commit",
+                                crash_before_terminal_commit,
+                            )
+                if crashed:
+                    service.runner.execution_engine.message_persister = original_persister
+                    with Session(get_engine()) as recovery_session:
+                        execution = recovery_session.get(AgentExecution, execution_id)
+                        assert execution is not None
+                        execution.status = RunStatus.pending
+                        execution.worker_id = None
+                        execution.claimed_at = None
+                        execution.heartbeat_at = None
+                        execution.lease_expires_at = None
+                        if execution.current_attempt_id:
+                            attempt = recovery_session.get(
+                                AgentExecutionAttempt,
+                                execution.current_attempt_id,
+                            )
+                            if attempt is not None and attempt.finished_at is None:
+                                attempt.status = ExecutionAttemptStatus.lease_lost
+                                attempt.finished_at = utcnow()
+                                recovery_session.add(attempt)
+                        recovery_session.add(execution)
+                        recovery_session.commit()
+                    crashed = False
+        finally:
+            service.runner.execution_engine.message_persister = original_persister
+
+    with Session(get_engine()) as db_session:
+        execution = db_session.get(AgentExecution, execution_id)
+        assistants = db_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        assert execution is not None
+        assert execution.status == RunStatus.completed
+        assert execution.interrupt_payload == {}
+        assert len(assistants) == 1
+        assert assistants[0].content == "checkpoint final"
+    assert len(model.calls) == (2 if fault_window == "before_first_checkpoint" else 1)
 
 
 def test_running_run_can_be_cancel_requested():

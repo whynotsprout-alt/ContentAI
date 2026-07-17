@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from agent.context.assembler import ContextAssembler
+from agent.runtime.checkpoint import checkpoint_messages
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.events import (
     PersistentAgentEventWriter,
@@ -46,6 +47,7 @@ class ExecutionTurnResult:
     assistant_text: str
     streamed_assistant_text: str
     interrupt_payload: dict[str, Any] | None
+    assistant_message: ChatMessage | None = None
 
 
 class AgentRuntimeEventService:
@@ -394,7 +396,16 @@ class AgentExecutionEngine:
                 assistant_text="",
                 streamed_assistant_text="",
                 interrupt_payload=interrupt_payload,
+                assistant_message=None,
             )
+
+        durable_messages = checkpoint_messages(
+            runtime.checkpointer,
+            thread_id=chat.langgraph_thread_id,
+            checkpoint_ns=execution.id,
+        )
+        if durable_messages:
+            new_messages = durable_messages
 
         assistant_text = _assistant_text_from_messages(new_messages) or streamed_assistant_text
 
@@ -433,7 +444,7 @@ class AgentExecutionEngine:
                 assistant_text = (
                     "The request completed, but the model did not return displayable content."
                 )
-            self.message_persister.persist_assistant_text(
+            persisted_assistant = self.message_persister.persist_assistant_text(
                 db_session,
                 session_id=chat.id,
                 invocation_id=invocation.id,
@@ -459,6 +470,7 @@ class AgentExecutionEngine:
             assistant_text=assistant_text,
             streamed_assistant_text=streamed_assistant_text,
             interrupt_payload=None,
+            assistant_message=persisted_assistant,
         )
 
     def _build_graph_input(

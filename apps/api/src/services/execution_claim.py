@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from agent.runtime.checkpoint import execution_checkpoint_config
 from core.security import AuthContext
 from db.session import get_engine
 from models.agent import AgentVersion
@@ -68,10 +69,14 @@ def claim_execution(
         invocation, chat, version = row
         if (
             invocation.agent_id != chat.agent_id
+            or invocation.session_id != chat.id
+            or invocation.user_id != chat.user_id
+            or execution.session_id != chat.id
+            or version.id != execution.agent_version_id
             or version.agent_id != chat.agent_id
             or execution.agent_version_id != chat.agent_version_id
         ):
-            _fail_execution(session, execution, "SESSION_AGENT_MISMATCH", now)
+            _fail_execution(session, execution, "EXECUTION_SCOPE_MISMATCH", now)
             return None
 
         user = session.get(AppUser, invocation.user_id)
@@ -93,13 +98,17 @@ def claim_execution(
                 pending = pending_interrupt_descriptors(
                     service.runtime.get_checkpointer(),
                     thread_id=chat.langgraph_thread_id,
+                    checkpoint_ns=execution.id,
                 )
             except Exception:
                 logger.exception("Checkpoint validation failed for execution %s", execution.id)
                 _fail_execution(session, execution, "CHECKPOINT_VALIDATION_FAILED", now)
                 return None
-            if pending and resume_request.interrupt_id not in pending:
-                _fail_execution(session, execution, "INTERRUPT_CHECKPOINT_MISMATCH", now)
+            if resume_request.interrupt_id not in pending:
+                resume_request.status = "stale"
+                resume_request.updated_at = now
+                session.add(resume_request)
+                _fail_execution(session, execution, "RUN_INTERRUPT_STALE", now)
                 return None
             if (
                 pending
@@ -108,8 +117,7 @@ def claim_execution(
             ):
                 _fail_execution(session, execution, "INTERRUPT_TOOL_CALL_MISMATCH", now)
                 return None
-            resume_value = load_resume_value(resume_request) if pending else None
-            continue_from_checkpoint = not pending
+            resume_value = load_resume_value(resume_request)
             resume_request.status = "claimed"
             resume_request.claimed_by = worker_id
             resume_request.claimed_at = now
@@ -118,7 +126,10 @@ def claim_execution(
         elif execution.attempt_count > 0:
             try:
                 checkpoint = service.runtime.get_checkpointer().get_tuple(
-                    {"configurable": {"thread_id": chat.langgraph_thread_id}}
+                    execution_checkpoint_config(
+                        thread_id=chat.langgraph_thread_id,
+                        checkpoint_ns=execution.id,
+                    )
                 )
             except Exception:
                 logger.exception("Checkpoint recovery lookup failed for execution %s", execution.id)

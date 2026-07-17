@@ -51,7 +51,6 @@ class ChatSessionSummary(SchemaBase):
 
 
 class ChatRequest(InputSchemaBase):
-    agent_id: AgentId
     message: MessageText
     message_id: SessionId | None = None
     idempotency_key: IdempotencyKey | None = None
@@ -87,7 +86,7 @@ class ChatExecutionResponse(SchemaBase):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     cancel_requested_at: datetime | None = None
-    interrupt_payload: dict[str, Any] = Field(default_factory=dict)
+    interrupt: "PublicInterrupt | None" = None
     streaming_degraded: bool = False
     streaming_degraded_reason: str = ""
     queue_stage: Literal["dispatching", "waiting_worker", "starting"] | None = None
@@ -148,6 +147,18 @@ class StreamEventV3(SchemaBase):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class PublicMemoryProposal(SchemaBase):
+    type: constr(min_length=1, max_length=80, strip_whitespace=True)
+    content: constr(min_length=1, max_length=8000, strip_whitespace=True)
+
+
+class PublicInterrupt(SchemaBase):
+    interrupt_id: constr(min_length=1, max_length=255, strip_whitespace=True)
+    tool_name: constr(min_length=1, max_length=255, strip_whitespace=True)
+    purpose: constr(min_length=1, max_length=1000, strip_whitespace=True)
+    memory: PublicMemoryProposal | None = None
+
+
 class UserReplyRequest(InputSchemaBase):
-    agent_id: AgentId
-    message: MessageText
+    interrupt_id: constr(min_length=1, max_length=255, strip_whitespace=True)
+    decision: Literal["approve", "reject"]

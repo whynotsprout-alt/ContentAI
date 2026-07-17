@@ -80,3 +80,15 @@ class ExecutionNotResumableError(ConversationError):
 
 class ExecutionResumeValueRequiredError(ConversationError):
     pass
+
+
+class IdempotencyPayloadMismatchError(ConversationError):
+    pass
+
+
+class IdempotencyKeyConflictError(ConversationError):
+    pass
+
+
+class RunInterruptStaleError(ConversationError):
+    pass

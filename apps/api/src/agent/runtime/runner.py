@@ -4,7 +4,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from agent.runtime.checkpoint import clear_thread_persistence
+from agent.runtime.checkpoint import clear_execution_persistence
 from agent.runtime.errors import classify_runtime_error
 from agent.runtime.execution_services import (
     AgentExecutionEngine,
@@ -146,14 +146,49 @@ class AgentRunner:
                 execution,
                 expected_worker_id=expected_worker_id,
             )
+            now = utcnow()
+            execution.status = RunStatus.completed
+            execution.error = ""
             execution.interrupt_payload = {}
+            execution.finished_at = execution.finished_at or now
+            execution.touch_updated_at(now)
+            db_session.add(execution)
             mark_resume_consumed(db_session, resume_request_id)
-            self.state_manager.set_execution_state(db_session, execution, RunStatus.completed, "")
+            self._finish_attempt(
+                db_session,
+                execution,
+                ExecutionAttemptStatus.completed,
+                commit=False,
+            )
+            db_session.commit()
+            if result.assistant_message is not None:
+                event_writer.emit(
+                    "assistant_message_delta",
+                    {
+                        "execution_id": execution.id,
+                        "message_type": result.assistant_message.message_type,
+                        "chunk": (
+                            ""
+                            if result.streamed_assistant_text
+                            else result.assistant_message.content
+                        ),
+                        "done": True,
+                    },
+                )
+                event_writer.emit(
+                    "assistant_message",
+                    {
+                        "execution_id": execution.id,
+                        "message_id": result.assistant_message.id,
+                        "message_type": result.assistant_message.message_type,
+                        "content": result.assistant_message.content,
+                    },
+                )
             self.event_service.emit_execution_completed(event_writer, execution)
-            self._finish_attempt(db_session, execution, ExecutionAttemptStatus.completed)
             try:
-                clear_thread_persistence(
+                clear_execution_persistence(
                     thread_id=chat.langgraph_thread_id,
+                    checkpoint_ns=execution.id,
                     checkpointer=self.container.get_checkpointer(),
                 )
             except Exception:  # noqa: BLE001
@@ -236,7 +271,11 @@ class AgentRunner:
 
     @staticmethod
     def _finish_attempt(
-        db_session: Session, execution: AgentExecution, status: ExecutionAttemptStatus
+        db_session: Session,
+        execution: AgentExecution,
+        status: ExecutionAttemptStatus,
+        *,
+        commit: bool = True,
     ) -> None:
         if not execution.current_attempt_id:
             return
@@ -246,4 +285,5 @@ class AgentRunner:
         attempt.status = status
         attempt.finished_at = utcnow()
         db_session.add(attempt)
-        db_session.commit()
+        if commit:
+            db_session.commit()

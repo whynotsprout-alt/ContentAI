@@ -35,13 +35,17 @@ from services.errors import (
     ExecutionNotFoundError,
     ExecutionNotResumableError,
     ExecutionResumeValueRequiredError,
+    IdempotencyKeyConflictError,
+    IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    RunInterruptStaleError,
     SessionAgentMismatchError,
     StreamingDegradedError,
     StreamReplayExpiredError,
     StreamReplayGapError,
 )
+from services.execution_resume import public_interrupt
 
 router = APIRouter(prefix="/chat")
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -57,9 +61,12 @@ ServiceHttpError = (
     | ExecutionNotFoundError
     | ExecutionNotResumableError
     | ExecutionResumeValueRequiredError
+    | IdempotencyKeyConflictError
+    | IdempotencyPayloadMismatchError
     | InvalidCursorError
     | InvalidStreamCursorError
     | SessionAgentMismatchError
+    | RunInterruptStaleError
     | StreamReplayExpiredError
     | StreamReplayGapError
     | StreamingDegradedError
@@ -71,9 +78,12 @@ SERVICE_HTTP_ERRORS = (
     ExecutionNotFoundError,
     ExecutionNotResumableError,
     ExecutionResumeValueRequiredError,
+    IdempotencyKeyConflictError,
+    IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
     SessionAgentMismatchError,
+    RunInterruptStaleError,
     StreamReplayExpiredError,
     StreamReplayGapError,
     StreamingDegradedError,
@@ -202,12 +212,19 @@ def create_session_message(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ChatUserMessageResponse:
     _enforce_llm_rate_limit(request, auth)
+    if (
+        idempotency_key is not None
+        and payload.idempotency_key is not None
+        and idempotency_key.strip() != payload.idempotency_key
+    ):
+        raise IdempotencyKeyConflictError(
+            "Idempotency-Key header and body values must match."
+        )
     request_idempotency_key = idempotency_key or payload.idempotency_key
     return service.submit_user_message_background(
         session,
         AgentMessageRequest(
             session_id=session_id,
-            agent_id=payload.agent_id,
             message=payload.message,
             message_id=payload.message_id,
         ),
@@ -287,8 +304,8 @@ def resume_run(
     return service.resume_execution(
         session,
         execution_id,
-        payload.message,
-        payload.agent_id,
+        payload.interrupt_id,
+        payload.decision,
         auth,
         request_id=request_context.request_id,
     )
@@ -629,6 +646,39 @@ def _http_exception_for_service_error(
                 execution_id=execution_id,
             ),
         )
+    if isinstance(exc, IdempotencyPayloadMismatchError):
+        return HTTPException(
+            status_code=409,
+            detail=_build_service_error_detail(
+                code="IDEMPOTENCY_PAYLOAD_MISMATCH",
+                message=str(exc),
+                request_id=request_id,
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        )
+    if isinstance(exc, IdempotencyKeyConflictError):
+        return HTTPException(
+            status_code=409,
+            detail=_build_service_error_detail(
+                code="IDEMPOTENCY_KEY_CONFLICT",
+                message=str(exc),
+                request_id=request_id,
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        )
+    if isinstance(exc, RunInterruptStaleError):
+        return HTTPException(
+            status_code=409,
+            detail=_build_service_error_detail(
+                code="RUN_INTERRUPT_STALE",
+                message=str(exc),
+                request_id=request_id,
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        )
     if isinstance(exc, SessionAgentMismatchError):
         return HTTPException(
             status_code=409,
@@ -835,11 +885,40 @@ def _public_stream_data(payload: dict[str, Any], *, channel: str) -> dict[str, A
     projected = {
         key: value for key, value in payload.items() if key in allowed and key not in blocked
     }
+    if channel == "interrupts" and "interrupt" in projected:
+        projected["interrupt"] = _sanitize_public_interrupt(projected["interrupt"])
     safe = _json_safe_stream_data(projected)
     encoded = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) <= 512 * 1024:
         return safe
     return {"state_truncated": True, "summary": "Public stream payload exceeded 512KiB"}
+
+
+def _sanitize_public_interrupt(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if "interrupts" in value:
+        sanitized = public_interrupt(value)
+        return sanitized.model_dump(exclude_none=True) if sanitized is not None else None
+    if "interrupt_id" in value:
+        source = value
+    else:
+        return None
+    result = {
+        key: source.get(key)
+        for key in ("interrupt_id", "tool_name", "purpose")
+        if isinstance(source.get(key), str) and source.get(key)
+    }
+    memory = source.get("memory")
+    if isinstance(memory, dict):
+        memory_result = {
+            key: memory.get(key)
+            for key in ("type", "content")
+            if isinstance(memory.get(key), str) and memory.get(key)
+        }
+        if set(memory_result) == {"type", "content"}:
+            result["memory"] = memory_result
+    return result or None
 
 
 def _normalize_stream_error_payload(

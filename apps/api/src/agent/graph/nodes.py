@@ -15,6 +15,7 @@ from langgraph.types import interrupt
 
 MODEL_STREAM_MAX_ATTEMPTS = 3
 MODEL_STREAM_RETRY_BASE_SECONDS = 0.25
+REJECTED_TOOL_MESSAGE = "宸插彇娑堜繚瀛榒."
 
 
 def build_agent_node(model: Any):
@@ -148,62 +149,46 @@ def build_human_node():
                 "runtime": _runtime_context(config),
             }
         )
-        approved = _coerce_human_approval(reply)
-        return {
+        approved = _structured_human_approval(reply)
+        result: dict[str, Any] = {
             "human_approved": approved,
             "tool_error": None,
             "task_status": "executing" if approved is True else "waiting",
         }
+        if approved is False:
+            result["messages"] = [AIMessage(content=REJECTED_TOOL_MESSAGE)]
+            result["task_status"] = "completed"
+        return result
 
     return human_node
 
 
-def _extract_tool_calls(state: AgentState) -> list[dict[str, str]]:
+def _extract_tool_calls(state: AgentState) -> list[dict[str, Any]]:
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
     calls = getattr(last_message, "tool_calls", []) if isinstance(last_message, AIMessage) else []
-    output: list[dict[str, str]] = []
+    output: list[dict[str, Any]] = []
     for call in calls if isinstance(calls, list) else []:
         name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
         call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
-        output.append({"name": str(name or "unknown_tool"), "id": str(call_id or uuid.uuid4())})
+        args = call.get("args") if isinstance(call, dict) else getattr(call, "args", None)
+        output.append(
+            {
+                "name": str(name or "unknown_tool"),
+                "id": str(call_id or uuid.uuid4()),
+                "args": args if isinstance(args, dict) else {},
+            }
+        )
     return output
 
 
-def _coerce_human_approval(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, dict) and isinstance(value.get("approved"), bool):
-        return value["approved"]
-    normalized = str(value or "").strip().lower()
-    if normalized in {
-        "approve",
-        "approved",
-        "yes",
-        "ok",
-        "true",
-        "1",
-        "confirm",
-        "确认",
-        "同意",
-        "批准",
-        "继续",
-        "可以",
-    }:
+def _structured_human_approval(value: Any) -> bool | None:
+    if not isinstance(value, dict):
+        return None
+    decision = value.get("decision")
+    if decision == "approve":
         return True
-    if normalized in {
-        "reject",
-        "rejected",
-        "no",
-        "false",
-        "0",
-        "deny",
-        "cancel",
-        "拒绝",
-        "不同意",
-        "取消",
-        "停止",
-    }:
+    if decision == "reject":
         return False
     return None
 
