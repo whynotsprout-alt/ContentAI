@@ -12,6 +12,7 @@ from db.session import get_engine
 from models.base import utcnow
 from models.chat import ExecutionOutbox
 from services.celery_app import celery_app
+from services.service_heartbeat import HEARTBEAT_INTERVAL_SECONDS, upsert_service_heartbeat
 from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
@@ -32,8 +33,10 @@ class OutboxDispatcher:
     ) -> None:
         self.settings = settings or get_settings()
         self.dispatcher_id = dispatcher_id or f"{socket.gethostname()}-{id(self):x}"
+        self._next_heartbeat_at = 0.0
 
     def dispatch_once(self, *, batch_size: int = 50) -> int:
+        self._write_heartbeat_if_due()
         now = utcnow()
         with Session(get_engine(self.settings)) as session:
             rows = list(
@@ -107,6 +110,19 @@ class OutboxDispatcher:
                 self._mark_published(delivery.outbox_id)
                 published += 1
         return published
+
+    def _write_heartbeat_if_due(self) -> None:
+        now = time.monotonic()
+        if now < self._next_heartbeat_at:
+            return
+        with Session(get_engine(self.settings)) as session:
+            upsert_service_heartbeat(
+                session,
+                service_name="dispatcher",
+                instance_id=self.dispatcher_id,
+            )
+            session.commit()
+        self._next_heartbeat_at = now + HEARTBEAT_INTERVAL_SECONDS
 
     def run_forever(self, *, poll_seconds: float = 0.25) -> None:
         while True:

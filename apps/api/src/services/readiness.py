@@ -8,22 +8,27 @@ from core.alembic import build_alembic_config
 from core.config import Env, Settings
 from db.session import get_engine
 from models.base import utcnow
-from models.chat import ExecutionOutbox
+from models.chat import AgentExecution, ExecutionOutbox
 from redis import Redis
+from services.service_heartbeat import service_heartbeats_ready
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
 
 def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
+    services_ready = False
     checks: dict[str, Any] = {
         "database": False,
         "alembic_version": None,
         "alembic_head": None,
         "database_revision_current": False,
         "checkpoint": False,
+        "checkpoint_tables": {},
         "redis": False,
         "queue": False,
+        "services": {"dispatcher": False, "workers_missing": []},
         "outbox_pending": None,
+        "outbox_unclaimed_published": None,
         "outbox_oldest_age_seconds": None,
         "outbox_within_threshold": False,
     }
@@ -39,25 +44,55 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
                 .select_from(ExecutionOutbox)
                 .where(ExecutionOutbox.status == "pending")
             ).one()
+            unclaimed_published = session.exec(
+                select(func.count())
+                .select_from(ExecutionOutbox)
+                .join(AgentExecution, AgentExecution.id == ExecutionOutbox.execution_id)
+                .where(ExecutionOutbox.status == "published")
+                .where(ExecutionOutbox.published_at.is_not(None))
+                .where(AgentExecution.claimed_at.is_(None))
+            ).one()
             oldest = session.exec(
-                select(func.min(ExecutionOutbox.created_at)).where(
-                    ExecutionOutbox.status.in_(["pending", "publishing"])
-                )
+                select(func.min(ExecutionOutbox.published_at))
+                .join(AgentExecution, AgentExecution.id == ExecutionOutbox.execution_id)
+                .where(ExecutionOutbox.status == "published")
+                .where(ExecutionOutbox.published_at.is_not(None))
+                .where(AgentExecution.claimed_at.is_(None))
             ).one()
             alembic_version = session.exec(text("SELECT version_num FROM alembic_version")).one()[0]
-            checkpoint_ready = session.exec(
-                text("SELECT to_regclass('public.checkpoints') IS NOT NULL")
-            ).one()[0]
+            checkpoint_tables = {
+                name: bool(
+                    session.exec(
+                        text(f"SELECT to_regclass('public.{name}') IS NOT NULL")
+                    ).one()[0]
+                )
+                for name in (
+                    "checkpoint_migrations",
+                    "checkpoints",
+                    "checkpoint_blobs",
+                    "checkpoint_writes",
+                )
+            }
+            if settings.env == Env.test:
+                services_ready, service_checks = True, {
+                    "dispatcher": True,
+                    "workers_missing": [],
+                }
+            else:
+                services_ready, service_checks = service_heartbeats_ready(session)
         checks["database"] = True
         checks["alembic_version"] = str(alembic_version)
         checks["database_revision_current"] = str(alembic_version) == checks["alembic_head"]
-        checks["checkpoint"] = bool(checkpoint_ready)
+        checks["checkpoint_tables"] = checkpoint_tables
+        checks["checkpoint"] = all(checkpoint_tables.values())
+        checks["services"] = service_checks
         checks["outbox_pending"] = int(pending)
+        checks["outbox_unclaimed_published"] = int(unclaimed_published)
         oldest_age = max(0, int((utcnow() - oldest).total_seconds())) if oldest else 0
         checks["outbox_oldest_age_seconds"] = oldest_age
         checks["outbox_within_threshold"] = (
             int(pending) <= settings.server.outbox_readiness_threshold
-            and oldest_age <= settings.server.outbox_max_age_seconds
+            and (not unclaimed_published or oldest_age <= settings.server.outbox_max_age_seconds)
         )
     except Exception as exc:  # noqa: BLE001
         checks["database_error"] = exc.__class__.__name__
@@ -73,7 +108,7 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
                 socket_timeout=0.5,
             )
             checks["redis"] = bool(client.ping())
-            checks["queue"] = checks["redis"]
+            checks["queue"] = bool(checks["redis"] and services_ready)
         except Exception as exc:  # noqa: BLE001
             checks["redis_error"] = exc.__class__.__name__
 
@@ -82,6 +117,8 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
         and checks["database_revision_current"]
         and checks["redis"]
         and checks["queue"]
+        and not checks["services"]["workers_missing"]
+        and checks["services"]["dispatcher"]
         and checks["checkpoint"]
         and checks["outbox_within_threshold"]
     )

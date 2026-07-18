@@ -15,6 +15,7 @@ from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, RunStatus
 from services.agent_service import AgentService
 from services.celery_app import celery_app
 from services.execution_claim import claim_execution
+from services.service_heartbeat import upsert_service_heartbeat
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,19 @@ class WorkerHeartbeat:
                     self.worker_id,
                     exc_info=True,
                 )
+
+
+@celery_app.task(name="contentai.record_queue_heartbeat", acks_late=True)
+def record_queue_heartbeat(queue_name: str) -> None:
+    """Beat routes this probe to a queue; only its real consumer can write it."""
+    settings = get_settings()
+    with Session(get_engine(settings)) as session:
+        upsert_service_heartbeat(
+            session,
+            service_name="worker",
+            queue_name=queue_name,
+        )
+        session.commit()
 
 
 @celery_app.task(name="contentai.execute_agent", bind=True, acks_late=True)

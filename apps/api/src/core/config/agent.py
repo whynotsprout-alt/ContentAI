@@ -17,6 +17,7 @@ class AgentSettings(BaseModel):
     tool_timeout_seconds: float = 60.0
     celery_queue: str = "agent-executions"
     celery_background_queue: str = "agent-background"
+    celery_side_effect_queue: str = "agent-side-effects"
     worker_concurrency: int = 4
     worker_claim_timeout_seconds: int = 120
     worker_lease_seconds: int = 120

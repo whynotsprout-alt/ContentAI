@@ -31,9 +31,17 @@ def test_ready_endpoint_reflects_lifespan_state():
         "alembic_head": "202607170002",
         "database_revision_current": True,
         "checkpoint": True,
+        "checkpoint_tables": {
+            "checkpoint_migrations": True,
+            "checkpoints": True,
+            "checkpoint_blobs": True,
+            "checkpoint_writes": True,
+        },
         "redis": True,
         "queue": True,
+        "services": {"dispatcher": True, "workers_missing": []},
         "outbox_pending": 0,
+        "outbox_unclaimed_published": 0,
         "outbox_oldest_age_seconds": 0,
         "outbox_within_threshold": True,
     }

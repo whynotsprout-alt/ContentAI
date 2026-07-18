@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from core.config.agent import AgentSettings
 from core.config.auth import AuthSettings
-from core.config.database import DatabaseSettings
+from core.config.database import DatabaseSettings, validate_connection_budget
 from core.config.llm import LLMSettings
 from core.config.logging import LoggingSettings
 from core.config.redis import RedisSettings
@@ -118,14 +118,16 @@ class Settings(BaseSettings):
             raise ValueError("Test databases can only be used when CONTENTAI_ENV=test.")
 
     def _validate_database_pool(self) -> None:
-        if self.database.pool_size < 1:
-            raise ValueError("CONTENTAI_DATABASE__POOL_SIZE must be at least 1.")
-        if self.database.max_overflow < 0:
-            raise ValueError("CONTENTAI_DATABASE__MAX_OVERFLOW cannot be negative.")
         if self.database.pool_timeout <= 0:
             raise ValueError("CONTENTAI_DATABASE__POOL_TIMEOUT must be greater than 0.")
         if self.database.pool_recycle_seconds < 1:
             raise ValueError("CONTENTAI_DATABASE__POOL_RECYCLE_SECONDS must be greater than 0.")
+        if self.database.agent_worker_concurrency != self.agent.worker_concurrency:
+            raise ValueError(
+                "CONTENTAI_DATABASE__AGENT_WORKER_CONCURRENCY must match "
+                "CONTENTAI_AGENT__WORKER_CONCURRENCY."
+            )
+        validate_connection_budget(self.database)
 
     def _validate_llm(self) -> None:
         if not self.llm.chat_model.strip():
@@ -172,6 +174,8 @@ class Settings(BaseSettings):
             raise ValueError("CONTENTAI_AGENT__CELERY_QUEUE cannot be empty.")
         if not self.agent.celery_background_queue.strip():
             raise ValueError("CONTENTAI_AGENT__CELERY_BACKGROUND_QUEUE cannot be empty.")
+        if not self.agent.celery_side_effect_queue.strip():
+            raise ValueError("CONTENTAI_AGENT__CELERY_SIDE_EFFECT_QUEUE cannot be empty.")
         if self.agent.worker_lease_seconds < 30:
             raise ValueError("CONTENTAI_AGENT__WORKER_LEASE_SECONDS must be at least 30.")
         if self.agent.worker_concurrency < 1:

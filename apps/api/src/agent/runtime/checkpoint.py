@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from core.config import Settings, get_settings
+from core.config.database import pool_profile_for_role
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -264,14 +265,16 @@ class RuntimePersistence:
         self._checkpointer: ExecutionScopedCheckpointer | None = None
 
     def start(self) -> None:
-        self.get_checkpointer()
+        if self.settings.database.runtime_role == "agent-worker":
+            self.get_checkpointer()
 
     def get_checkpointer(self) -> ExecutionScopedCheckpointer:
         if self._checkpointer is None:
             database_url = self.settings.database.url
             if not database_url:
                 raise RuntimeError("Database URL is required for checkpoint persistence.")
-            pool_size = max(1, int(self.settings.database.pool_size))
+            profile = pool_profile_for_role(self.settings.database.runtime_role)
+            pool_size = max(1, profile.checkpoint_pool_size)
             self._pool = ConnectionPool(
                 checkpoint_connection_string(database_url),
                 min_size=1,
