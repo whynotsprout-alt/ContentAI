@@ -406,6 +406,7 @@ def test_interrupt_sse_envelope_drops_call_ids_and_raw_sibling_fields() -> None:
             "execution_id": "execution-public",
             "sequence": 1,
             "name": "run_interrupt",
+            "namespace": ["langgraph-task-secret"],
             "tool_call_id": "call-envelope-secret",
             "content": '{"args":{"api_key":"secret-sibling"}}',
             "interrupt": {
@@ -437,6 +438,7 @@ def test_interrupt_sse_envelope_drops_call_ids_and_raw_sibling_fields() -> None:
         event_id=stream_event.event_id,
     )
 
+    assert stream_event.namespace == ()
     assert stream_event.tool_call_id is None
     assert stream_event.data == {
         "name": "run_interrupt",
@@ -454,6 +456,7 @@ def test_interrupt_sse_envelope_drops_call_ids_and_raw_sibling_fields() -> None:
     for forbidden in (
         "call-envelope-secret",
         "call-inner-secret",
+        "langgraph-task-secret",
         "secret-sibling",
         "secret-argument",
         "secret-runtime",
@@ -468,7 +471,12 @@ def test_remember_kind_null_matches_structured_tool_rejection() -> None:
     assert validated.kind == "semantic"
     with pytest.raises(ValidationError):
         remember.args_schema.model_validate({"content": "safe memory", "kind": None})
+    with pytest.raises(ValidationError):
+        remember.args_schema.model_validate(
+            {"content": "safe memory", "kind": b"preference"}
+        )
     assert normalize_remember_input("safe memory", None) is None
+    assert normalize_remember_input("safe memory", b"preference") is None
 
 
 @pytest.mark.parametrize(
@@ -479,6 +487,11 @@ def test_remember_kind_null_matches_structured_tool_rejection() -> None:
         "client secret abc123",
         "access token abc123",
         "private key abc123",
+        "OPENAI_API_KEY=opaque-api-value",
+        "google_client_secret = opaque-client-value",
+        "GitHub-Access-Token: opaque-access-value",
+        "RSA PRIVATE KEY = opaque-private-value",
+        "googleClientSecret=opaque-camel-value",
     ],
 )
 def test_sensitive_memory_patterns_cover_spaced_credential_labels(content: str) -> None:
@@ -515,6 +528,20 @@ def test_sensitive_memory_patterns_cover_spaced_credential_labels(content: str) 
     )
     assert stream_event.data == {"name": "run_interrupt", "interrupt": None}
     assert content not in encoded
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "please tokenize this paragraph",
+        "the tokenizer is deterministic",
+        "contact the secretary",
+    ],
+)
+def test_sensitive_memory_patterns_avoid_obvious_word_substring_false_positives(
+    content: str,
+) -> None:
+    assert not is_sensitive_memory(content)
 
 
 def test_multiple_top_level_interrupts_fail_closed_as_one_approval_scope() -> None:

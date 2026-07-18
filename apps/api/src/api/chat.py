@@ -762,9 +762,17 @@ def _to_stream_event_v3(
         sequence=sequence_value,
         event_id=f"{execution_value}:{sequence_value}",
         channel=channel,
-        namespace=tuple(str(item) for item in normalized_payload.get("namespace", []) if str(item))
-        if isinstance(normalized_payload.get("namespace"), list | tuple)
-        else (),
+        namespace=(
+            ()
+            if has_interrupt
+            else tuple(
+                str(item)
+                for item in normalized_payload.get("namespace", [])
+                if str(item)
+            )
+            if isinstance(normalized_payload.get("namespace"), list | tuple)
+            else ()
+        ),
         attempt_id=_optional_string(normalized_payload.get("attempt_id")),
         message_id=_optional_string(normalized_payload.get("message_id")),
         tool_call_id=(

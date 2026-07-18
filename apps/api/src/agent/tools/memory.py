@@ -9,6 +9,7 @@ from agent.runtime.context import get_tool_runtime_context
 from langchain_core.tools import tool
 from memory.long_term import is_sensitive_memory
 from models.enums import MemoryKind, MemorySourceType
+from pydantic import StrictStr
 
 _ALLOWED_MEMORY_KINDS: tuple[str, ...] = tuple(sorted({kind.value for kind in MemoryKind}))
 _MAX_REMEMBER_CONTENT_LENGTH = 1000
@@ -52,7 +53,7 @@ def normalize_remember_input(
 
 
 @tool("remember", description=load_tool_description("remember"))
-def remember(content: str, kind: str = "semantic") -> dict[str, str]:
+def remember(content: StrictStr, kind: StrictStr = "semantic") -> dict[str, str]:
     """Persist runtime memory with content/ kind restrictions."""
     context = get_tool_runtime_context()
     if context.long_term_memory is None:

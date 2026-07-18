@@ -13,10 +13,11 @@ from pydantic import BaseModel, Field
 
 SENSITIVE_PATTERNS = (
     re.compile(
-        r"\b(?:api[\s_-]*key|client[\s_-]*secret|access[\s_-]*token|"
-        r"private[\s_-]*key|secret|password|passwd|token|bearer)\b",
-        re.I,
+        r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z]))"
+        r"(?i:(?:api[\s_-]*key|client[\s_-]*secret|access[\s_-]*token|"
+        r"private[\s_-]*key))(?![A-Za-z0-9])"
     ),
+    re.compile(r"\b(?:secret|password|passwd|token|bearer)\b", re.I),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}\b"),
 )

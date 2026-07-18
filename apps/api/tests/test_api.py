@@ -1730,6 +1730,22 @@ def test_cancel_waiting_interrupt_makes_resume_stale_and_executes_no_tool():
         assert outbox.status == "cancelled"
 
 
+def _unsafe_remember_interrupts(content: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "int-unsafe-status",
+            "value": {
+                "tool_calls": [
+                    {
+                        "name": "remember",
+                        "args": {"content": content, "kind": "preference"},
+                    }
+                ]
+            },
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("interrupts_payload", "forbidden_fragment"),
     [
@@ -1809,6 +1825,28 @@ def test_cancel_waiting_interrupt_makes_resume_stale_and_executes_no_tool():
                 }
             ],
             "super-private-value",
+        ),
+        (
+            _unsafe_remember_interrupts("OPENAI_API_KEY=opaque-api-status"),
+            "opaque-api-status",
+        ),
+        (
+            _unsafe_remember_interrupts(
+                "google_client_secret = opaque-client-status"
+            ),
+            "opaque-client-status",
+        ),
+        (
+            _unsafe_remember_interrupts("GitHub-Access-Token: opaque-access-status"),
+            "opaque-access-status",
+        ),
+        (
+            _unsafe_remember_interrupts("RSA PRIVATE KEY = opaque-private-status"),
+            "opaque-private-status",
+        ),
+        (
+            _unsafe_remember_interrupts("googleClientSecret=opaque-camel-status"),
+            "opaque-camel-status",
         ),
         (
             [

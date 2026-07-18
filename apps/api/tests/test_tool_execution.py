@@ -14,6 +14,7 @@ from memory import LongTermMemory, MemoryRepository
 from models.chat import AgentExecution, AgentInvocation, ChatSession, ToolExecution
 from models.enums import RunStatus, ToolExecutionStatus
 from models.memory import MemoryRecord
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 
@@ -72,12 +73,27 @@ class RecordingEventWriter:
         self.events.append((event, payload))
 
 
-def test_remember_rejects_spaced_sensitive_label_without_persisting_or_logging(
+@pytest.mark.parametrize(
+    ("sensitive_content", "forbidden_fragment"),
+    [
+        ("my API     key is never-log-this-value", "never-log-this-value"),
+        ("OPENAI_API_KEY=opaque-api-tool", "opaque-api-tool"),
+        (
+            "google_client_secret = opaque-client-tool",
+            "opaque-client-tool",
+        ),
+        ("GitHub-Access-Token: opaque-access-tool", "opaque-access-tool"),
+        ("RSA PRIVATE KEY = opaque-private-tool", "opaque-private-tool"),
+        ("googleClientSecret=opaque-camel-tool", "opaque-camel-tool"),
+    ],
+)
+def test_remember_rejects_sensitive_labels_without_persisting_or_logging(
+    sensitive_content: str,
+    forbidden_fragment: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
     execution_id = "execution-sensitive-remember"
-    sensitive_content = "my API     key is never-log-this-value"
     _seed_execution(execution_id)
     with Session(get_engine()) as session:
         runtime = _runtime(execution_id, {})
@@ -95,7 +111,24 @@ def test_remember_rejects_spaced_sensitive_label_without_persisting_or_logging(
         "tool": "remember",
     }
     assert persisted == []
-    assert "never-log-this-value" not in caplog.text
+    assert forbidden_fragment not in caplog.text
+
+
+def test_remember_rejects_bytes_kind_before_execution_without_persisting() -> None:
+    execution_id = "execution-bytes-kind"
+    content = "must not persist bytes kind"
+    _seed_execution(execution_id)
+    with Session(get_engine()) as session:
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = LongTermMemory(MemoryRepository(session))
+        with tool_runtime_scope(runtime):
+            with pytest.raises(ValidationError):
+                remember.invoke({"content": content, "kind": b"preference"})
+        persisted = session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == content)
+        ).all()
+
+    assert persisted == []
 
 
 def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:
