@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 SIDE_EFFECT_EXECUTION_FAILED = "SIDE_EFFECT_EXECUTION_FAILED"
 SIDE_EFFECT_IDEMPOTENCY_MISMATCH = "SIDE_EFFECT_IDEMPOTENCY_MISMATCH"
 SIDE_EFFECT_OUTCOME_UNKNOWN = "SIDE_EFFECT_OUTCOME_UNKNOWN"
+DATABASE_SIDE_EFFECT_TOOLS = frozenset({"remember"})
 
 OperationRunner = Callable[[Session, dict[str, Any]], dict[str, Any]]
 
@@ -147,6 +148,7 @@ def reconcile_stale_side_effects(
                 select(ToolExecution)
                 .where(
                     ToolExecution.status == ToolExecutionStatus.running,
+                    ToolExecution.tool_name.in_(DATABASE_SIDE_EFFECT_TOOLS),
                     ToolExecution.updated_at < deadline,
                 )
                 .order_by(ToolExecution.updated_at, ToolExecution.id)
@@ -193,7 +195,7 @@ def reconcile_stale_side_effects(
 
 def _execute_registered_operation(session: Session, job: dict[str, Any]) -> dict[str, Any]:
     tool_name = str(job.get("tool_name") or "")
-    if tool_name != "remember":
+    if tool_name not in DATABASE_SIDE_EFFECT_TOOLS:
         raise ValueError("Unsupported database side effect")
     execution = session.get(AgentExecution, str(job["execution_id"]))
     if execution is None:
@@ -288,58 +290,51 @@ def _receipt_outcome(receipt: SideEffectReceipt) -> dict[str, Any]:
 def _persist_failed_receipt(job: dict[str, Any]) -> None:
     execution_id = str(job.get("execution_id") or "")
     tool_call_id = str(job.get("tool_call_id") or "")
-    try:
-        with Session(get_engine()) as session:
-            audit = session.exec(
-                select(ToolExecution)
-                .where(
-                    ToolExecution.execution_id == execution_id,
-                    ToolExecution.tool_call_id == tool_call_id,
-                )
-                .with_for_update()
-            ).first()
-            if audit is None or _identity_mismatch(audit, job):
-                return
-            receipt = session.exec(
-                select(SideEffectReceipt).where(
-                    SideEffectReceipt.execution_id == execution_id,
-                    SideEffectReceipt.tool_call_id == tool_call_id,
-                )
-            ).first()
-            if receipt is not None and receipt.status in {"completed", "failed"}:
-                return
-            now = utcnow()
-            if receipt is None:
-                receipt = SideEffectReceipt(
-                    execution_id=execution_id,
-                    tool_call_id=tool_call_id,
-                    operation=str(job.get("tool_name") or ""),
-                )
-            receipt.idempotency_key = stable_json_hash(
-                {"execution_id": execution_id, "tool_call_id": tool_call_id}
+    with Session(get_engine()) as session:
+        audit = session.exec(
+            select(ToolExecution)
+            .where(
+                ToolExecution.execution_id == execution_id,
+                ToolExecution.tool_call_id == tool_call_id,
             )
-            receipt.status = "failed"
-            receipt.result_digest = ""
-            receipt.detail = {
-                "arguments_hash": str(job.get("arguments_hash") or ""),
-                "tool_version": str(job.get("tool_version") or ""),
-                "error": SIDE_EFFECT_EXECUTION_FAILED,
-            }
-            receipt.updated_at = now
-            audit.status = ToolExecutionStatus.failed
-            audit.result_digest = ""
-            audit.error = SIDE_EFFECT_EXECUTION_FAILED
-            audit.finished_at = now
-            audit.touch_updated_at(now)
-            session.add(receipt)
-            session.add(audit)
-            session.commit()
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "Failed to persist side-effect failure receipt: execution=%s tool_call=%s",
-            execution_id,
-            tool_call_id,
+            .with_for_update()
+        ).first()
+        if audit is None or _identity_mismatch(audit, job):
+            return
+        receipt = session.exec(
+            select(SideEffectReceipt).where(
+                SideEffectReceipt.execution_id == execution_id,
+                SideEffectReceipt.tool_call_id == tool_call_id,
+            )
+        ).first()
+        if receipt is not None and receipt.status in {"completed", "failed"}:
+            return
+        now = utcnow()
+        if receipt is None:
+            receipt = SideEffectReceipt(
+                execution_id=execution_id,
+                tool_call_id=tool_call_id,
+                operation=str(job.get("tool_name") or ""),
+            )
+        receipt.idempotency_key = stable_json_hash(
+            {"execution_id": execution_id, "tool_call_id": tool_call_id}
         )
+        receipt.status = "failed"
+        receipt.result_digest = ""
+        receipt.detail = {
+            "arguments_hash": str(job.get("arguments_hash") or ""),
+            "tool_version": str(job.get("tool_version") or ""),
+            "error": SIDE_EFFECT_EXECUTION_FAILED,
+        }
+        receipt.updated_at = now
+        audit.status = ToolExecutionStatus.failed
+        audit.result_digest = ""
+        audit.error = SIDE_EFFECT_EXECUTION_FAILED
+        audit.finished_at = now
+        audit.touch_updated_at(now)
+        session.add(receipt)
+        session.add(audit)
+        session.commit()
 
 
 __all__ = [

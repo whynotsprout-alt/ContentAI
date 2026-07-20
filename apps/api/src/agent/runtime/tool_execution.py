@@ -222,43 +222,14 @@ def _execute_side_effect_remotely(
     poller = runtime.side_effect_receipt_poller or read_side_effect_receipt
 
     started_at = time.perf_counter()
-    receipt = poller(runtime.execution_id, tool_call_id)
-    if receipt is not None and receipt.get("status") in {"completed", "failed"}:
-        return _return_side_effect_receipt(
-            receipt,
-            runtime=runtime,
-            audit=audit,
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            started_at=started_at,
-        )
-    if audit.created:
-        _emit_tool_event(
-            runtime,
-            "tool_start",
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            status="running",
-            stage="started",
-        )
-        dispatcher(
-            {
-            "execution_id": runtime.execution_id,
-            "tool_call_id": tool_call_id,
-            "tool_name": tool_name,
-            "tool_version": tool_version,
-            "arguments": arguments,
-            "arguments_hash": arguments_hash,
-            "user_id": runtime.user_id,
-            "agent_id": runtime.agent_id,
-            "agent_version_id": runtime.agent_version_id,
-            "session_id": runtime.conversation_id,
-            "thread_id": runtime.session_id,
-            }
-        )
     deadline = time.monotonic() + timeout_seconds
-    while True:
-        receipt = poller(runtime.execution_id, tool_call_id)
+    try:
+        receipt = _call_before_deadline(
+            poller,
+            deadline,
+            runtime.execution_id,
+            tool_call_id,
+        )
         if receipt is not None and receipt.get("status") in {"completed", "failed"}:
             return _return_side_effect_receipt(
                 receipt,
@@ -268,27 +239,83 @@ def _execute_side_effect_remotely(
                 tool_call_id=tool_call_id,
                 started_at=started_at,
             )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            error = f"TOOL_TIMEOUT: {tool_name} exceeded {timeout_seconds:g} seconds"
-            if audit.created:
-                _emit_tool_event(
-                    runtime,
-                    "tool_end",
+        if audit.created:
+            _emit_tool_event(
+                runtime,
+                "tool_start",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                status="running",
+                stage="started",
+            )
+            _call_before_deadline(
+                dispatcher,
+                deadline,
+                {
+                    "execution_id": runtime.execution_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "tool_version": tool_version,
+                    "arguments": arguments,
+                    "arguments_hash": arguments_hash,
+                    "user_id": runtime.user_id,
+                    "agent_id": runtime.agent_id,
+                    "agent_version_id": runtime.agent_version_id,
+                    "session_id": runtime.conversation_id,
+                    "thread_id": runtime.session_id,
+                },
+            )
+        while True:
+            receipt = _call_before_deadline(
+                poller,
+                deadline,
+                runtime.execution_id,
+                tool_call_id,
+            )
+            if receipt is not None and receipt.get("status") in {"completed", "failed"}:
+                return _return_side_effect_receipt(
+                    receipt,
+                    runtime=runtime,
+                    audit=audit,
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
-                    status="running",
-                    stage="timeout",
-                    error=error,
-                    duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+                    started_at=started_at,
                 )
-            return ToolMessage(
-                content={"status": "failed", "error": error},
-                name=tool_name,
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FutureTimeoutError
+            time.sleep(min(0.05, remaining))
+    except FutureTimeoutError:
+        error = f"TOOL_TIMEOUT: {tool_name} exceeded {timeout_seconds:g} seconds"
+        if audit.created:
+            _emit_tool_event(
+                runtime,
+                "tool_end",
+                tool_name=tool_name,
                 tool_call_id=tool_call_id,
-                status="error",
+                status="running",
+                stage="timeout",
+                error=error,
+                duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
             )
-        time.sleep(min(0.05, remaining))
+        return ToolMessage(
+            content={"status": "failed", "error": error},
+            name=tool_name,
+            tool_call_id=tool_call_id,
+            status="error",
+        )
+
+
+def _call_before_deadline(call: Any, deadline: float, *args: Any) -> Any:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise FutureTimeoutError
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="side-effect-io")
+    future = executor.submit(call, *args)
+    try:
+        return future.result(timeout=remaining)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=False)
 
 
 def _return_side_effect_receipt(
@@ -302,8 +329,8 @@ def _return_side_effect_receipt(
 ) -> Any:
     error = str(receipt.get("error") or "")
     if error:
-        _finish_audit(audit.row_id, error=error, started_at=started_at)
         if audit.created:
+            _finish_audit(audit.row_id, error=error, started_at=started_at)
             _emit_tool_event(
                 runtime,
                 "tool_end",
@@ -320,12 +347,12 @@ def _return_side_effect_receipt(
             tool_call_id=tool_call_id,
             status="error",
         )
-    _finish_audit(
-        audit.row_id,
-        result_digest=str(receipt.get("result_digest") or ""),
-        started_at=started_at,
-    )
     if audit.created:
+        _finish_audit(
+            audit.row_id,
+            result_digest=str(receipt.get("result_digest") or ""),
+            started_at=started_at,
+        )
         _emit_tool_event(
             runtime,
             "tool_end",

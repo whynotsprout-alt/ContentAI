@@ -7,6 +7,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.tool_execution import execute_tool_call
 from db.session import get_engine
@@ -16,6 +17,7 @@ from models.chat import ChatSession, SideEffectReceipt, ToolExecution
 from models.enums import ToolExecutionStatus
 from models.memory import MemoryRecord
 from services.execution_resume import stable_json_hash
+from sqlalchemy import event
 from sqlmodel import Session, select
 from test_tool_execution import _seed_execution
 
@@ -114,6 +116,63 @@ def test_exception_before_commit_rolls_back_mutation_and_writes_safe_failure() -
         assert "opaque-secret" not in str(receipt.detail)
         assert audit.status == ToolExecutionStatus.failed
         assert audit.error == "SIDE_EFFECT_EXECUTION_FAILED"
+
+
+def test_failed_receipt_persistence_failure_propagates_for_safe_redelivery() -> None:
+    execution_id = "execution-side-effect-failure-redelivery"
+    _seed_audit(execution_id)
+    side_effects = importlib.import_module("services.side_effects")
+    runner_calls = 0
+
+    def mutation_then_fail(session: Session, _job_payload: dict[str, Any]) -> dict[str, str]:
+        nonlocal runner_calls
+        runner_calls += 1
+        session.add(
+            MemoryRecord(
+                user_id="local-user",
+                agent_id="default-agent",
+                memory_key="rollback-before-failed-receipt",
+                content="must rollback before failed receipt",
+            )
+        )
+        session.flush()
+        raise RuntimeError("operation failed")
+
+    def reject_failed_receipt_commit(_connection: object) -> None:
+        raise RuntimeError("failed receipt database unavailable")
+
+    engine = get_engine()
+    event.listen(engine, "commit", reject_failed_receipt_commit)
+    try:
+        with pytest.raises(RuntimeError, match="failed receipt database unavailable"):
+            side_effects.execute_side_effect_job(
+                _job(execution_id),
+                operation_runner=mutation_then_fail,
+            )
+    finally:
+        event.remove(engine, "commit", reject_failed_receipt_commit)
+        engine.dispose()
+
+    with Session(get_engine()) as session:
+        assert session.exec(select(MemoryRecord)).all() == []
+        assert session.exec(select(SideEffectReceipt)).all() == []
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.running
+
+    redelivered = side_effects.execute_side_effect_job(
+        _job(execution_id),
+        operation_runner=mutation_then_fail,
+    )
+
+    assert redelivered == {"status": "failed", "error": "SIDE_EFFECT_EXECUTION_FAILED"}
+    assert runner_calls == 2
+    with Session(get_engine()) as session:
+        assert session.exec(select(MemoryRecord)).all() == []
+        receipts = session.exec(select(SideEffectReceipt)).all()
+        assert len(receipts) == 1
+        assert receipts[0].status == "failed"
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.failed
 
 
 def test_default_dispatcher_routes_stable_job_to_side_effect_worker(
@@ -344,6 +403,44 @@ def test_stale_reconciler_is_bounded() -> None:
             select(ToolExecution).where(ToolExecution.status == ToolExecutionStatus.running)
         ).all()
         assert len(running) == 1
+
+
+def test_stale_reconciler_ignores_non_database_side_effect_audits() -> None:
+    remember_execution = "execution-reconcile-remember-only"
+    local_execution = "execution-reconcile-local-untouched"
+    _seed_audit(remember_execution)
+    _seed_execution(local_execution)
+    stale_at = utcnow() - timedelta(minutes=10)
+    with Session(get_engine()) as session:
+        remember_audit = session.exec(
+            select(ToolExecution).where(ToolExecution.execution_id == remember_execution)
+        ).one()
+        remember_audit.updated_at = stale_at
+        session.add(remember_audit)
+        session.add(
+            ToolExecution(
+                execution_id=local_execution,
+                tool_name="recall_memory",
+                tool_version="1",
+                tool_call_id="call-local",
+                arguments_hash="local-hash",
+                status=ToolExecutionStatus.running,
+                updated_at=stale_at,
+            )
+        )
+        session.commit()
+
+    side_effects = importlib.import_module("services.side_effects")
+    assert side_effects.reconcile_stale_side_effects(older_than_seconds=60) == 1
+
+    with Session(get_engine()) as session:
+        audits = {
+            audit.execution_id: audit for audit in session.exec(select(ToolExecution)).all()
+        }
+        assert audits[remember_execution].status == ToolExecutionStatus.failed
+        assert audits[remember_execution].error == "SIDE_EFFECT_OUTCOME_UNKNOWN"
+        assert audits[local_execution].status == ToolExecutionStatus.running
+        assert audits[local_execution].error == ""
 
 
 def test_unknown_outcome_fences_delayed_delivery_and_agent_retry() -> None:
