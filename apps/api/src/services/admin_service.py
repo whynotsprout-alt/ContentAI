@@ -27,11 +27,14 @@ from models.schemas.auth import AdminUserListResponse, AdminUserSummary
 from models.schemas.chat import ChatMessageResponse
 from models.user import AdminAuditLog, AppUser, ModelUsage
 from services.auth_service import AuthService, AuthServiceError
+from services.errors import ResponseItemTooLargeError
 from services.pagination import (
+    MAX_RESPONSE_BYTES,
     apply_ascending_cursor,
     apply_descending_cursor,
     encode_cursor,
     fit_response_items,
+    signer_from_settings,
 )
 from sqlalchemy import func, text
 from sqlmodel import Session, select
@@ -40,6 +43,7 @@ from sqlmodel import Session, select
 class AdminService:
     def __init__(self, auth_service: AuthService) -> None:
         self.auth_service = auth_service
+        self._cursor_signer = signer_from_settings(auth_service.settings)
 
     def list_users(
         self,
@@ -49,6 +53,7 @@ class AdminService:
         status: str | None = None,
         cursor: str | None = None,
         limit: int = 50,
+        scope: str = "admin.users",
     ) -> AdminUserListResponse:
         statement = select(AppUser)
         if search.strip():
@@ -58,7 +63,12 @@ class AdminService:
         if status:
             statement = statement.where(AppUser.status == status)
         statement = apply_descending_cursor(
-            statement, AppUser.created_at, AppUser.id, cursor
+            statement,
+            AppUser.created_at,
+            AppUser.id,
+            cursor,
+            scope=scope,
+            signer=self._cursor_signer,
         ).order_by(AppUser.created_at.desc(), AppUser.id.desc())
         users = list(session.exec(statement.limit(limit + 1)).all())
         has_more = len(users) > limit
@@ -105,7 +115,9 @@ class AdminService:
         next_cursor = None
         if has_more and items:
             boundary = users[len(items) - 1]
-            next_cursor = encode_cursor(boundary.created_at, boundary.id)
+            next_cursor = encode_cursor(
+                boundary.created_at, boundary.id, scope=scope, signer=self._cursor_signer
+            )
         return AdminUserListResponse(items=items, next_cursor=next_cursor)
 
     def get_user(self, session: Session, user_id: str) -> AdminUserSummary:
@@ -229,6 +241,7 @@ class AdminService:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        scope: str = "admin.user_sessions",
     ) -> AdminSessionListResponse:
         user = session.get(AppUser, user_id)
         if user is None:
@@ -238,6 +251,8 @@ class AdminService:
             ChatSession.updated_at,
             ChatSession.id,
             cursor,
+            scope=scope,
+            signer=self._cursor_signer,
         ).order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
         chats = list(session.exec(query.limit(limit + 1)).all())
         has_more = len(chats) > limit
@@ -280,7 +295,9 @@ class AdminService:
         next_cursor = None
         if has_more and items:
             boundary = chats[len(items) - 1]
-            next_cursor = encode_cursor(boundary.updated_at, boundary.id)
+            next_cursor = encode_cursor(
+                boundary.updated_at, boundary.id, scope=scope, signer=self._cursor_signer
+            )
         return AdminSessionListResponse(items=items, next_cursor=next_cursor)
 
     def get_session_detail(
@@ -318,6 +335,7 @@ class AdminService:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        scope: str = "admin.messages",
     ) -> AdminMessageListResponse:
         chat = session.get(ChatSession, session_id)
         if chat is None:
@@ -329,10 +347,14 @@ class AdminService:
             ChatMessage.created_at,
             ChatMessage.id,
             cursor,
+            scope=scope,
+            signer=self._cursor_signer,
         ).order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         rows = list(session.exec(statement.limit(limit + 1)).all())
         has_more = len(rows) > limit
         rows = rows[:limit]
+        if rows and len(rows[0].content.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise ResponseItemTooLargeError("A message exceeds the 1 MiB response budget")
         items = [
             ChatMessageResponse(
                 id=item.id,
@@ -344,9 +366,20 @@ class AdminService:
             for item in rows
         ]
         items, budget_more = fit_response_items(items)
+        if rows and not items:
+            raise ResponseItemTooLargeError("A message exceeds the 1 MiB response budget")
         rows = rows[: len(items)]
         has_more = has_more or budget_more
-        next_cursor = encode_cursor(rows[-1].created_at, rows[-1].id) if has_more and rows else None
+        next_cursor = (
+            encode_cursor(
+                rows[-1].created_at,
+                rows[-1].id,
+                scope=scope,
+                signer=self._cursor_signer,
+            )
+            if has_more and rows
+            else None
+        )
         return AdminMessageListResponse(items=items, next_cursor=next_cursor)
 
     def usage(

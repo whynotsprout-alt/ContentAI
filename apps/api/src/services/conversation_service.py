@@ -44,6 +44,7 @@ from services.errors import (
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    ResponseItemTooLargeError,
     RunInterruptStaleError,
     StreamingDegradedError,
     StreamReplayExpiredError,
@@ -60,10 +61,13 @@ from services.execution_lineage import ExecutionLineage
 from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
 from services.pagination import (
+    MAX_RESPONSE_BYTES,
+    CursorSigner,
     apply_descending_cursor,
     decode_cursor,
     encode_cursor,
     fit_response_items,
+    signer_from_settings,
 )
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
@@ -92,6 +96,7 @@ class ConversationService:
         execution_dispatcher: ExecutionDispatcher | None = None,
     ) -> None:
         self.agent_service = agent_service
+        self._cursor_signer = signer_from_settings(agent_service.settings)
         self.execution_dispatcher = execution_dispatcher
         self._execution_scope_guard = ExecutionScopeGuard()
 
@@ -142,8 +147,14 @@ class ConversationService:
         statement = select(ChatSession).where(ChatSession.user_id == auth.user_id)
         if agent_id is not None:
             statement = statement.where(ChatSession.agent_id == agent_id)
+        scope = f"chat.sessions:{auth.user_id}:{agent_id or ''}"
         statement = apply_descending_cursor(
-            statement, ChatSession.updated_at, ChatSession.id, cursor
+            statement,
+            ChatSession.updated_at,
+            ChatSession.id,
+            cursor,
+            scope=scope,
+            signer=self._cursor_signer,
         ).order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
         chats = list(session.exec(statement.limit(limit + 1)).all())
         has_more = len(chats) > limit
@@ -182,7 +193,9 @@ class ConversationService:
         next_cursor = None
         if has_more and items:
             boundary = chats[len(items) - 1]
-            next_cursor = encode_cursor(boundary.updated_at, boundary.id)
+            next_cursor = encode_cursor(
+                boundary.updated_at, boundary.id, scope=scope, signer=self._cursor_signer
+            )
         return ChatSessionListResponse(items=items, next_cursor=next_cursor)
 
     def get_session(
@@ -199,6 +212,7 @@ class ConversationService:
             session,
             session_id=chat.id,
             request=request,
+            scope=f"chat.messages:{auth.user_id}:{chat.id}",
         )
         message_count_result = session.exec(
             select(func.count())
@@ -851,14 +865,21 @@ class ConversationService:
         *,
         session_id: str,
         request: MessageListRequest,
+        scope: str | None = None,
     ) -> tuple[list[ChatMessage], str | None]:
         statement = (
             select(ChatMessage)
             .where(ChatMessage.session_id == session_id)
             .where(ChatMessage.role.in_([MessageRole.user, MessageRole.assistant]))
         )
+        scope = scope or f"chat.messages:{session_id}"
         statement = apply_descending_cursor(
-            statement, ChatMessage.created_at, ChatMessage.id, request.cursor
+            statement,
+            ChatMessage.created_at,
+            ChatMessage.id,
+            request.cursor,
+            scope=scope,
+            signer=self._cursor_signer,
         ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         rows = list(session.exec(statement.limit(request.limit + 1)).all())
         if not rows:
@@ -866,24 +887,41 @@ class ConversationService:
 
         has_more = len(rows) > request.limit
         rows = rows[: request.limit]
+        if rows and len(rows[0].content.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise ResponseItemTooLargeError("A message exceeds the 1 MiB response budget")
         items = [self._to_message_response(item) for item in rows]
         items, budget_more = fit_response_items(items)
+        if rows and not items:
+            raise ResponseItemTooLargeError("A message exceeds the 1 MiB response budget")
         rows = rows[: len(items)]
         rows.sort(key=lambda item: (item.created_at, item.id))
 
         next_cursor = None
         if has_more or budget_more:
             oldest = rows[0]
-            next_cursor = encode_cursor(oldest.created_at, oldest.id)
+            next_cursor = encode_cursor(
+                oldest.created_at, oldest.id, scope=scope, signer=self._cursor_signer
+            )
         return rows, next_cursor
 
     @staticmethod
-    def _encode_cursor(created_at: datetime, message_id: str) -> str:
-        return encode_cursor(created_at, message_id)
+    def _encode_cursor(
+        created_at: datetime,
+        message_id: str,
+        *,
+        scope: str = "",
+        signer: CursorSigner | None = None,
+    ) -> str:
+        return encode_cursor(created_at, message_id, scope=scope, signer=signer)
 
     @staticmethod
-    def _decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
-        return decode_cursor(cursor)
+    def _decode_cursor(
+        cursor: str | None,
+        *,
+        scope: str = "",
+        signer: CursorSigner | None = None,
+    ) -> tuple[datetime, str] | None:
+        return decode_cursor(cursor, scope=scope, signer=signer)
 
     @staticmethod
     def _session_summary(

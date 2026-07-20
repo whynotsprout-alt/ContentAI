@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -13,7 +15,7 @@ from models.enums import MessageRole
 from models.user import AppUser
 from services.admin_service import AdminService
 from services.auth_service import AuthService
-from services.pagination import apply_descending_cursor
+from services.pagination import CursorSigner, apply_descending_cursor, encode_cursor
 from sqlalchemy import event, text
 from sqlalchemy import select as sa_select
 from sqlalchemy.dialects import postgresql
@@ -37,6 +39,18 @@ def _login(client: TestClient, email: str, password: str) -> dict[str, str]:
     response = client.post("/api/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200
     return {"X-CSRF-Token": response.cookies["contentai_csrf"]}
+
+
+def _tamper_cursor_payload(cursor: str, **changes: str) -> str:
+    version, encoded, signature = cursor.split(".")
+    payload = json.loads(
+        base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+    )
+    payload.update(changes)
+    tampered = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    return f"{version}.{tampered}.{signature}"
 
 
 def _seed_sessions(settings: Settings, *, count: int = 51) -> tuple[str, str]:
@@ -93,7 +107,7 @@ def test_chat_session_keyset_contract_and_agent_filter() -> None:
         assert set(payload) == {"items", "next_cursor"}
         assert len(payload["items"]) == 50
         assert payload["items"][0]["session_id"] == newest
-        assert payload["next_cursor"].endswith("Z|ses_page_001")
+        assert payload["next_cursor"].count(".") == 2
 
         second = client.get(
             "/api/chat/sessions",
@@ -110,6 +124,69 @@ def test_chat_session_keyset_contract_and_agent_filter() -> None:
         ] == (
             "INVALID_CURSOR"
         )
+
+
+def test_cursor_is_signed_and_bound_to_timestamp_row_and_scope() -> None:
+    settings = _settings()
+    app = create_app(settings)
+    newest, _ = _seed_sessions(settings)
+
+    with TestClient(app) as client:
+        headers = _login(client, "local@example.com", "local password 123")
+        first = client.get("/api/chat/sessions?agent_id=default-agent", headers=headers).json()
+        cursor = first["next_cursor"]
+        assert cursor.count(".") == 2
+
+        tampered_timestamp = _tamper_cursor_payload(cursor, at="2026-07-20T11:00:00Z")
+        assert client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": tampered_timestamp},
+            headers=headers,
+        ).status_code == 422
+
+        tampered_row = _tamper_cursor_payload(cursor, id="ses_page_002")
+        assert client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": tampered_row},
+            headers=headers,
+        ).status_code == 422
+
+        missing_signature = ".".join(cursor.split(".")[:2])
+        assert client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": missing_signature},
+            headers=headers,
+        ).status_code == 422
+
+        wrong_signature = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
+        assert client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": wrong_signature},
+            headers=headers,
+        ).status_code == 422
+
+        wrong_scope = client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "other-agent", "cursor": cursor},
+            headers=headers,
+        )
+        assert wrong_scope.status_code == 422
+
+        # A cursor issued to the user endpoint cannot be replayed on admin endpoints.
+        admin_headers = _login(client, "admin@example.com", "admin password 123")
+        replay = client.get(
+            "/api/admin/users",
+            params={"cursor": cursor},
+            headers=admin_headers,
+        )
+        assert replay.status_code == 422
+        user_replay = client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": cursor},
+            headers=admin_headers,
+        )
+        assert user_replay.status_code == 422
+        assert newest == "ses_page_050"
 
 
 def test_admin_lists_are_keyset_pages_and_old_parameters_are_removed() -> None:
@@ -215,7 +292,12 @@ def test_admin_session_detail_excludes_messages_and_messages_page_independently(
 def test_deep_cursor_compiles_to_postgres_tuple_comparison() -> None:
     statement = apply_descending_cursor(
         sa_select(ChatSession), ChatSession.updated_at, ChatSession.id,
-        "2026-07-20T10:00:00Z|ses_001",
+        encode_cursor(
+            datetime(2026, 7, 20, 10, tzinfo=UTC),
+            "ses_001",
+            signer=CursorSigner("test-secret"),
+        ),
+        signer=CursorSigner("test-secret"),
     )
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "updated_at, chatsession.id" in sql
@@ -293,6 +375,37 @@ def test_large_admin_message_page_stays_below_one_mib_and_resumes() -> None:
         )
         ids = [item["id"] for item in payload["items"] + second.json()["items"]]
         assert len(ids) == len(set(ids)) == 6
+
+
+def test_single_oversized_message_returns_stable_budget_error() -> None:
+    settings = _settings()
+    app = create_app(settings)
+    with Session(get_engine(settings)) as session:
+        chat = ChatSession(
+            id="ses_oversized_page",
+            agent_id="default-agent",
+            agent_version_id="default-agent-v1",
+            user_id="local-user",
+        )
+        session.add(chat)
+        session.flush()
+        session.add(
+            ChatMessage(
+                id="msg_oversized_page",
+                session_id=chat.id,
+                role=MessageRole.user,
+                content="x" * (1024 * 1024 + 1),
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        headers = _login(client, "admin@example.com", "admin password 123")
+        response = client.get(
+            "/api/admin/sessions/ses_oversized_page/messages", headers=headers
+        )
+        assert response.status_code == 413
+        assert response.json()["detail"]["code"] == "RESPONSE_ITEM_TOO_LARGE"
 
 
 def test_100k_deep_cursor_capacity_uses_bounded_index_scan() -> None:

@@ -14,7 +14,7 @@ from models.schemas import (
 )
 from models.schemas.base import AwareDatetime
 from services.auth_service import AuthServiceError
-from services.errors import InvalidCursorError
+from services.errors import InvalidCursorError, ResponseItemTooLargeError
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -48,11 +48,17 @@ def list_users(
             status=status,
             cursor=cursor,
             limit=limit,
+            scope=f"admin.users:{_auth.user_id}:{search}:{status or ''}",
         )
     except InvalidCursorError as exc:
         raise HTTPException(
             status_code=422,
             detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
+    except ResponseItemTooLargeError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "RESPONSE_ITEM_TOO_LARGE", "message": str(exc)},
         ) from exc
 
 
@@ -166,11 +172,22 @@ def list_user_sessions(
 ) -> AdminSessionListResponse:
     _reject_legacy_query(request)
     try:
-        return service.list_user_sessions(session, user_id, cursor=cursor, limit=limit)
+        return service.list_user_sessions(
+            session,
+            user_id,
+            cursor=cursor,
+            limit=limit,
+            scope=f"admin.user_sessions:{_auth.user_id}:{user_id}",
+        )
     except InvalidCursorError as exc:
         raise HTTPException(
             status_code=422,
             detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
+    except ResponseItemTooLargeError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "RESPONSE_ITEM_TOO_LARGE", "message": str(exc)},
         ) from exc
     except AuthServiceError as exc:
         _raise_admin_error(exc)
@@ -207,11 +224,22 @@ def list_session_messages(
 ) -> AdminMessageListResponse:
     _reject_legacy_query(request)
     try:
-        return service.list_session_messages(session, session_id, cursor=cursor, limit=limit)
+        return service.list_session_messages(
+            session,
+            session_id,
+            cursor=cursor,
+            limit=limit,
+            scope=f"admin.messages:{_auth.user_id}:{session_id}",
+        )
     except InvalidCursorError as exc:
         raise HTTPException(
             status_code=422,
             detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
+    except ResponseItemTooLargeError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "RESPONSE_ITEM_TOO_LARGE", "message": str(exc)},
         ) from exc
     except AuthServiceError as exc:
         _raise_admin_error(exc)

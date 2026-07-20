@@ -38,6 +38,7 @@ from services.errors import (
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    ResponseItemTooLargeError,
     RunInterruptStaleError,
     SessionAgentMismatchError,
     StreamingDegradedError,
@@ -62,6 +63,7 @@ ServiceHttpError = (
     | IdempotencyPayloadMismatchError
     | InvalidCursorError
     | InvalidStreamCursorError
+    | ResponseItemTooLargeError
     | SessionAgentMismatchError
     | RunInterruptStaleError
     | StreamReplayExpiredError
@@ -77,6 +79,7 @@ SERVICE_HTTP_ERRORS = (
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    ResponseItemTooLargeError,
     SessionAgentMismatchError,
     RunInterruptStaleError,
     StreamReplayExpiredError,
@@ -584,6 +587,18 @@ def _http_exception_for_service_error(
             detail=_build_service_error_detail(
                 code="INVALID_CURSOR",
                 message="Invalid cursor",
+                request_id=request_id,
+                session_id=session_id,
+                thread_id=thread_id,
+                execution_id=execution_id,
+            ),
+        )
+    if isinstance(exc, ResponseItemTooLargeError):
+        return HTTPException(
+            status_code=413,
+            detail=_build_service_error_detail(
+                code="RESPONSE_ITEM_TOO_LARGE",
+                message=str(exc),
                 request_id=request_id,
                 session_id=session_id,
                 thread_id=thread_id,

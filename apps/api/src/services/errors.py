@@ -58,6 +58,10 @@ class InvalidCursorError(ConversationError):
     pass
 
 
+class ResponseItemTooLargeError(ConversationError):
+    pass
+
+
 class StreamReplayGapError(ConversationError):
     pass
 

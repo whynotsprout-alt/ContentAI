@@ -15,6 +15,7 @@ from models.schemas.base import InputSchemaBase
 from models.schemas.chat import MessageListRequest
 from pydantic import ValidationError
 from services.conversation_service import ConversationService, InvalidCursorError
+from services.pagination import CursorSigner, encode_cursor
 from sqlalchemy import inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -111,12 +112,18 @@ def test_message_cursor_rejects_naive_timestamps_with_stable_error():
     cursor = "2026-07-17T10:00:00|msg_naive"
     with pytest.raises(ValidationError, match="timezone-aware"):
         MessageListRequest(cursor=cursor)
-    with pytest.raises(InvalidCursorError, match="timezone-aware"):
+    with pytest.raises(InvalidCursorError, match="signature"):
         ConversationService._decode_cursor(cursor)
 
     aware = "2026-07-17T10:00:00+08:00|msg_aware"
     assert MessageListRequest(cursor=aware).cursor == aware
-    parsed, message_id = ConversationService._decode_cursor(aware) or (None, None)
+    signer = CursorSigner("task1-test-secret")
+    signed = encode_cursor(
+        datetime(2026, 7, 17, 10, tzinfo=UTC),
+        "msg_aware",
+        signer=signer,
+    )
+    parsed, message_id = ConversationService._decode_cursor(signed, signer=signer) or (None, None)
     assert parsed is not None and parsed.utcoffset() is not None
     assert message_id == "msg_aware"
 
