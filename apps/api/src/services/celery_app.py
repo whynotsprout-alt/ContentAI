@@ -39,6 +39,8 @@ celery_app.conf.update(
         # still expire a stalled run when every execution worker is unavailable.
         "contentai.recover_expired_executions": {"queue": settings.agent.celery_background_queue},
         "contentai.process_agent_post_execution": {"queue": settings.agent.celery_background_queue},
+        "contentai.execute_side_effect": {"queue": settings.agent.celery_side_effect_queue},
+        "contentai.reconcile_side_effects": {"queue": settings.agent.celery_background_queue},
         "contentai.record_queue_heartbeat": {"queue": settings.agent.celery_queue},
     },
     task_acks_late=True,
@@ -59,6 +61,11 @@ celery_app.conf.update(
         "recover-expired-agent-executions": {
             "task": "contentai.recover_expired_executions",
             "schedule": 30.0,
+        },
+        "reconcile-stale-side-effects": {
+            "task": "contentai.reconcile_side_effects",
+            "schedule": 30.0,
+            "options": {"queue": settings.agent.celery_background_queue},
         },
         "heartbeat-agent-executions": {
             "task": "contentai.record_queue_heartbeat",

@@ -6,6 +6,7 @@ from uuid import uuid4
 from db.session import get_engine
 from services.agent_service import AgentService
 from services.execution_claim import claim_execution
+from services.side_effects import execute_side_effect_job, read_side_effect_receipt
 from sqlmodel import Session
 
 
@@ -26,6 +27,8 @@ class DirectDispatcher:
     def __init__(self, service: AgentService) -> None:
         self.service = service
         self.service.runner.post_service.dispatcher = _DirectPostExecutionDispatcher(service)
+        self.service.runtime.side_effect_dispatcher = execute_side_effect_job
+        self.service.runtime.side_effect_receipt_poller = read_side_effect_receipt
 
     def dispatch(self, execution_id: str, request_id: str | None = None) -> None:
         claimed = claim_execution(

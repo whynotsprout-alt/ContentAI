@@ -16,6 +16,7 @@ from services.agent_service import AgentService
 from services.celery_app import celery_app
 from services.execution_claim import claim_execution
 from services.service_heartbeat import upsert_service_heartbeat
+from services.side_effects import execute_side_effect_job, reconcile_stale_side_effects
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,16 @@ def record_queue_heartbeat(queue_name: str) -> None:
             queue_name=queue_name,
         )
         session.commit()
+
+
+@celery_app.task(name="contentai.execute_side_effect", acks_late=True)
+def execute_side_effect(*, job: dict[str, Any]) -> dict[str, Any]:
+    return execute_side_effect_job(job)
+
+
+@celery_app.task(name="contentai.reconcile_side_effects")
+def reconcile_side_effects() -> int:
+    return reconcile_stale_side_effects()
 
 
 @celery_app.task(name="contentai.execute_agent", bind=True, acks_late=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -52,6 +52,8 @@ class RuntimeContainer:
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     checkpointer: Checkpointer | None = None
     persistence: RuntimePersistence | None = None
+    side_effect_dispatcher: Callable[[dict[str, Any]], None] | None = None
+    side_effect_receipt_poller: Callable[[str, str], dict[str, Any] | None] | None = None
 
     _model_cache: OrderedDict[tuple[str, ...], AgentModel] = field(
         default_factory=OrderedDict,

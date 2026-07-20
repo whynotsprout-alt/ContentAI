@@ -341,6 +341,8 @@ class AgentExecutionEngine:
             ),
             api_keys=self._build_tool_api_keys(),
             long_term_memory=long_term,
+            side_effect_dispatcher=self.container.side_effect_dispatcher,
+            side_effect_receipt_poller=self.container.side_effect_receipt_poller,
             cancellation_check=lambda: self.state_manager.ensure_execution_not_cancelled(
                 db_session,
                 execution,

@@ -80,6 +80,8 @@ class ToolRuntimeContext:
     tool_policies: dict[str, dict[str, Any]] = field(default_factory=dict)
     long_term_memory: LongTermMemory | None = None
     cancellation_check: Callable[[], None] | None = None
+    side_effect_dispatcher: Callable[[dict[str, Any]], None] | None = None
+    side_effect_receipt_poller: Callable[[str, str], dict[str, Any] | None] | None = None
 
     def __post_init__(self) -> None:
         self.permissions = list(_normalize_permissions(self.permissions))

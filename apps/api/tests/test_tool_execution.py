@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from types import SimpleNamespace
 
@@ -11,7 +12,12 @@ from agent.tools.memory import remember
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
 from memory import LongTermMemory, MemoryRepository
-from models.chat import AgentExecution, AgentInvocation, ChatSession, ToolExecution
+from models.chat import (
+    AgentExecution,
+    AgentInvocation,
+    ChatSession,
+    ToolExecution,
+)
 from models.enums import RunStatus, ToolExecutionStatus
 from models.memory import MemoryRecord
 from pydantic import ValidationError
@@ -214,6 +220,103 @@ def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> N
         tool_call={"name": "side_effect", "id": "call-once", "args": {"value": 1}}
     )
     calls = 0
+    dispatched: list[dict[str, object]] = []
+
+    def execute(_request: object) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"completed": True}
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "side_effect": {
+                "timeout_seconds": 1,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"completed": True},
+            "result_digest": "completed-digest",
+        }
+        if dispatched
+        else None
+    )
+    with tool_runtime_scope(runtime):
+        first = execute_tool_call(request, execute)
+        second = execute_tool_call(request, execute)
+
+    assert isinstance(first, ToolMessage)
+    assert isinstance(second, ToolMessage)
+    assert "completed" in str(first.content)
+    assert "completed" in str(second.content)
+    assert calls == 0
+    assert len(dispatched) == 1
+    with Session(get_engine()) as session:
+        audits = session.exec(select(ToolExecution)).all()
+        assert len(audits) == 1
+        assert audits[0].status == ToolExecutionStatus.completed
+
+
+def test_side_effecting_tool_is_dispatched_without_invoking_local_callback() -> None:
+    execution_id = "execution-side-effect-dispatch"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-dispatch", "args": {"content": "x"}}
+    )
+    calls = 0
+    dispatched: list[dict[str, object]] = []
+
+    def execute(_request: object) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"completed": True}
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"completed": True},
+            "result_digest": "receipt-digest",
+        }
+        if dispatched
+        else None
+    )
+
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, execute)
+
+    assert isinstance(result, ToolMessage)
+    assert "completed" in str(result.content)
+    assert calls == 0
+    assert len(dispatched) == 1
+    assert dispatched[0]["execution_id"] == execution_id
+    assert dispatched[0]["tool_call_id"] == "call-dispatch"
+
+
+def test_non_side_effecting_tool_stays_on_local_execution_path() -> None:
+    execution_id = "execution-local-tool"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "local_tool", "id": "call-local", "args": {}}
+    )
+    calls = 0
 
     def execute(_request: object) -> dict[str, bool]:
         nonlocal calls
@@ -223,23 +326,188 @@ def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> N
     with tool_runtime_scope(
         _runtime(
             execution_id,
-            {
-                "side_effect": {
-                    "timeout_seconds": 1,
-                    "max_output_chars": 100,
-                    "side_effecting": True,
-                }
-            },
+            {"local_tool": {"timeout_seconds": 1, "max_output_chars": 100}},
         )
     ):
-        first = execute_tool_call(request, execute)
-        second = execute_tool_call(request, execute)
+        result = execute_tool_call(request, execute)
 
-    assert first == {"completed": True}
-    assert isinstance(second, ToolMessage)
-    assert "already completed" in str(second.content)
+    assert result == {"completed": True}
     assert calls == 1
+
+
+def test_side_effect_retry_rejects_changed_arguments_hash_without_redispatch() -> None:
+    execution_id = "execution-side-effect-mismatch"
+    _seed_execution(execution_id)
+    dispatched: list[dict[str, object]] = []
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"key": "memory-key", "kind": "preference", "tool": "remember"},
+            "result_digest": "receipt-digest",
+        }
+        if dispatched
+        else None
+    )
+
+    first = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-mismatch", "args": {"content": "first"}}
+    )
+    changed = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-mismatch", "args": {"content": "changed"}}
+    )
+    with tool_runtime_scope(runtime):
+        initial = execute_tool_call(first, lambda _request: None)
+        result = execute_tool_call(changed, lambda _request: None)
+
+    assert isinstance(initial, ToolMessage)
+    assert "memory-key" in str(initial.content)
+    assert isinstance(result, ToolMessage)
+    assert "SIDE_EFFECT_IDEMPOTENCY_MISMATCH" in str(result.content)
+    assert len(dispatched) == 1
+
+
+def test_side_effect_timeout_does_not_redispatch_and_retry_reads_late_receipt() -> None:
+    execution_id = "execution-side-effect-late-receipt"
+    _seed_execution(execution_id)
+    dispatched: list[dict[str, object]] = []
+    receipt: dict[str, object] | None = None
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.005,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: receipt
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-late", "args": {"content": "later"}}
+    )
+
+    with tool_runtime_scope(runtime):
+        timed_out = execute_tool_call(request, lambda _request: None)
+        receipt = {
+            "status": "completed",
+            "result": {"key": "late-key", "kind": "semantic", "tool": "remember"},
+            "result_digest": "late-digest",
+        }
+        retried = execute_tool_call(request, lambda _request: None)
+
+    assert isinstance(timed_out, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(timed_out.content)
+    assert isinstance(retried, ToolMessage)
+    assert "late-key" in str(retried.content)
+    assert len(dispatched) == 1
     with Session(get_engine()) as session:
-        audits = session.exec(select(ToolExecution)).all()
-        assert len(audits) == 1
-        assert audits[0].status == ToolExecutionStatus.completed
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.completed
+        assert audit.result_digest == "late-digest"
+
+
+def test_side_effect_timeout_does_not_wait_for_worker_row_lock() -> None:
+    execution_id = "execution-side-effect-row-lock-timeout"
+    _seed_execution(execution_id)
+    worker_thread: threading.Thread | None = None
+    lock_acquired = threading.Event()
+
+    def hold_audit_lock() -> None:
+        with Session(get_engine()) as session:
+            session.exec(
+                select(ToolExecution)
+                .where(ToolExecution.execution_id == execution_id)
+                .with_for_update()
+            ).one()
+            lock_acquired.set()
+            time.sleep(0.25)
+
+    def dispatch(_job: dict[str, object]) -> None:
+        nonlocal worker_thread
+        worker_thread = threading.Thread(target=hold_audit_lock)
+        worker_thread.start()
+        assert lock_acquired.wait(timeout=1)
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.005,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatch
+    runtime.side_effect_receipt_poller = lambda *_identity: None
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-row-lock", "args": {"content": "x"}}
+    )
+
+    started_at = time.perf_counter()
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, lambda _request: None)
+    elapsed = time.perf_counter() - started_at
+    assert worker_thread is not None
+    worker_thread.join(timeout=1)
+
+    assert isinstance(result, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(result.content)
+    assert elapsed < 0.1
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.running
+        assert audit.error == ""
+
+
+def test_side_effect_dispatch_emits_one_start_and_terminal_event() -> None:
+    execution_id = "execution-side-effect-events"
+    _seed_execution(execution_id)
+    writer = RecordingEventWriter()
+    dispatched: list[dict[str, object]] = []
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+        event_writer=writer,
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"key": "event-key", "kind": "semantic", "tool": "remember"},
+            "result_digest": "event-digest",
+        }
+        if dispatched
+        else None
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-event", "args": {"content": "x"}}
+    )
+
+    with tool_runtime_scope(runtime):
+        execute_tool_call(request, lambda _request: None)
+
+    assert [name for name, _payload in writer.events] == ["tool_start", "tool_end"]
+    assert writer.events[-1][1]["status"] == "completed"

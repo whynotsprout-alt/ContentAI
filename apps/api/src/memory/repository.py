@@ -29,8 +29,9 @@ def normalize_memory_source_type(
 
 
 class MemoryRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, auto_commit: bool = True) -> None:
         self.session = session
+        self.auto_commit = auto_commit
 
     def upsert(
         self,
@@ -83,7 +84,10 @@ class MemoryRepository:
         row.deleted_at = None
         row.touch_updated_at(now)
         self.session.add(row)
-        self.session.commit()
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         self.session.refresh(row)
         return self._to_entry(row)
 

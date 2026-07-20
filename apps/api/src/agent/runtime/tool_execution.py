@@ -55,6 +55,32 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         arguments_hash=stable_json_hash(arguments),
         side_effecting=side_effecting,
     )
+    if audit.mismatch:
+        error = "SIDE_EFFECT_IDEMPOTENCY_MISMATCH"
+        return ToolMessage(
+            content={"status": "failed", "error": error},
+            name=tool_name,
+            tool_call_id=tool_call_id,
+            status="error",
+        )
+    if audit.terminal_error:
+        return ToolMessage(
+            content={"status": "failed", "error": audit.terminal_error},
+            name=tool_name,
+            tool_call_id=tool_call_id,
+            status="error",
+        )
+    if side_effecting:
+        return _execute_side_effect_remotely(
+            runtime=runtime,
+            audit=audit,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_version=str(policy.get("version") or "1"),
+            arguments=arguments,
+            arguments_hash=stable_json_hash(arguments),
+            timeout_seconds=timeout_seconds,
+        )
     if audit.reused:
         return ToolMessage(
             content={
@@ -179,6 +205,143 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
     return bounded
 
 
+def _execute_side_effect_remotely(
+    *,
+    runtime: Any,
+    audit: _AuditStart,
+    tool_name: str,
+    tool_call_id: str,
+    tool_version: str,
+    arguments: dict[str, Any],
+    arguments_hash: str,
+    timeout_seconds: float,
+) -> Any:
+    from services.side_effects import dispatch_side_effect_job, read_side_effect_receipt
+
+    dispatcher = runtime.side_effect_dispatcher or dispatch_side_effect_job
+    poller = runtime.side_effect_receipt_poller or read_side_effect_receipt
+
+    started_at = time.perf_counter()
+    receipt = poller(runtime.execution_id, tool_call_id)
+    if receipt is not None and receipt.get("status") in {"completed", "failed"}:
+        return _return_side_effect_receipt(
+            receipt,
+            runtime=runtime,
+            audit=audit,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            started_at=started_at,
+        )
+    if audit.created:
+        _emit_tool_event(
+            runtime,
+            "tool_start",
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            status="running",
+            stage="started",
+        )
+        dispatcher(
+            {
+            "execution_id": runtime.execution_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "tool_version": tool_version,
+            "arguments": arguments,
+            "arguments_hash": arguments_hash,
+            "user_id": runtime.user_id,
+            "agent_id": runtime.agent_id,
+            "agent_version_id": runtime.agent_version_id,
+            "session_id": runtime.conversation_id,
+            "thread_id": runtime.session_id,
+            }
+        )
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        receipt = poller(runtime.execution_id, tool_call_id)
+        if receipt is not None and receipt.get("status") in {"completed", "failed"}:
+            return _return_side_effect_receipt(
+                receipt,
+                runtime=runtime,
+                audit=audit,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                started_at=started_at,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            error = f"TOOL_TIMEOUT: {tool_name} exceeded {timeout_seconds:g} seconds"
+            if audit.created:
+                _emit_tool_event(
+                    runtime,
+                    "tool_end",
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    status="running",
+                    stage="timeout",
+                    error=error,
+                    duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+                )
+            return ToolMessage(
+                content={"status": "failed", "error": error},
+                name=tool_name,
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+        time.sleep(min(0.05, remaining))
+
+
+def _return_side_effect_receipt(
+    receipt: dict[str, Any],
+    *,
+    runtime: Any,
+    audit: _AuditStart,
+    tool_name: str,
+    tool_call_id: str,
+    started_at: float,
+) -> Any:
+    error = str(receipt.get("error") or "")
+    if error:
+        _finish_audit(audit.row_id, error=error, started_at=started_at)
+        if audit.created:
+            _emit_tool_event(
+                runtime,
+                "tool_end",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                status="failed",
+                stage="failed",
+                error=error,
+                duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            )
+        return ToolMessage(
+            content={"status": "failed", "error": error},
+            name=tool_name,
+            tool_call_id=tool_call_id,
+            status="error",
+        )
+    _finish_audit(
+        audit.row_id,
+        result_digest=str(receipt.get("result_digest") or ""),
+        started_at=started_at,
+    )
+    if audit.created:
+        _emit_tool_event(
+            runtime,
+            "tool_end",
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            status="completed",
+            stage="completed",
+            duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+        )
+    return ToolMessage(
+        content=receipt.get("result") or {},
+        name=tool_name,
+        tool_call_id=tool_call_id,
+    )
+
+
 def _emit_tool_event(
     runtime: Any,
     event_name: str,
@@ -213,10 +376,16 @@ class _AuditStart:
         *,
         reused: bool = False,
         in_progress: bool = False,
+        created: bool = False,
+        mismatch: bool = False,
+        terminal_error: str = "",
     ) -> None:
         self.row_id = row_id
         self.reused = reused
         self.in_progress = in_progress
+        self.created = created
+        self.mismatch = mismatch
+        self.terminal_error = terminal_error
 
 
 def _start_audit(
@@ -236,10 +405,27 @@ def _start_audit(
             )
         ).first()
         if existing is not None:
-            if side_effecting and existing.status == ToolExecutionStatus.completed:
-                return _AuditStart(existing.id, reused=True)
-            if side_effecting and existing.status == ToolExecutionStatus.running:
-                return _AuditStart(existing.id, in_progress=True)
+            if side_effecting:
+                mismatch = any(
+                    (
+                        existing.tool_name != tool_name,
+                        existing.tool_version != tool_version,
+                        existing.arguments_hash != arguments_hash,
+                    )
+                )
+                terminal_error = ""
+                if not mismatch and existing.status == ToolExecutionStatus.failed:
+                    terminal_error = (
+                        existing.error
+                        if existing.error
+                        in {"SIDE_EFFECT_EXECUTION_FAILED", "SIDE_EFFECT_OUTCOME_UNKNOWN"}
+                        else "SIDE_EFFECT_EXECUTION_FAILED"
+                    )
+                return _AuditStart(
+                    existing.id,
+                    mismatch=mismatch,
+                    terminal_error=terminal_error,
+                )
             row = existing
         else:
             row = ToolExecution(
@@ -270,13 +456,34 @@ def _start_audit(
                     ToolExecution.tool_call_id == tool_call_id,
                 )
             ).one()
+            mismatch = side_effecting and any(
+                (
+                    raced.tool_name != tool_name,
+                    raced.tool_version != tool_version,
+                    raced.arguments_hash != arguments_hash,
+                )
+            )
             return _AuditStart(
                 raced.id,
                 reused=side_effecting and raced.status == ToolExecutionStatus.completed,
                 in_progress=side_effecting and raced.status == ToolExecutionStatus.running,
+                mismatch=mismatch,
+                terminal_error=(
+                    raced.error
+                    if side_effecting
+                    and not mismatch
+                    and raced.status == ToolExecutionStatus.failed
+                    and raced.error
+                    in {"SIDE_EFFECT_EXECUTION_FAILED", "SIDE_EFFECT_OUTCOME_UNKNOWN"}
+                    else "SIDE_EFFECT_EXECUTION_FAILED"
+                    if side_effecting
+                    and not mismatch
+                    and raced.status == ToolExecutionStatus.failed
+                    else ""
+                ),
             )
         session.refresh(row)
-        return _AuditStart(row.id)
+        return _AuditStart(row.id, created=True)
 
 
 def _finish_audit(
