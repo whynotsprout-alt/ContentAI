@@ -2,11 +2,10 @@ import json
 import logging
 import time
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-import services.conversation_service as conversation_service_module
 from agent.runtime.checkpoint import RuntimePersistence, checkpoint_interrupts
 from agent.runtime.container import RuntimeContainer
 from api.app import create_app
@@ -1427,7 +1426,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
         )
 
 
-def test_chat_session_delete_commits_business_rows_when_persistence_cleanup_fails(monkeypatch):
+def test_chat_session_delete_commits_business_rows_before_checkpoint_cleanup():
     with Session(get_engine()) as session:
         chat = ChatSession(
             title="cleanup failure",
@@ -1459,15 +1458,6 @@ def test_chat_session_delete_commits_business_rows_when_persistence_cleanup_fail
 
         session_id = chat.id
 
-    def fail_cleanup(*, thread_id: str, execution_id: str, checkpointer: object) -> None:
-        raise RuntimeError("cleanup failed")
-
-    monkeypatch.setattr(
-        conversation_service_module,
-        "clear_execution_persistence",
-        fail_cleanup,
-    )
-
     with TestClient(app) as client:
         response = client.delete(f"/api/chat/sessions/{session_id}")
 
@@ -1477,6 +1467,23 @@ def test_chat_session_delete_commits_business_rows_when_persistence_cleanup_fail
         assert session.get(ChatSession, session_id) is None
         outbox = session.exec(select(CheckpointDeletionOutbox)).one()
         assert outbox.status == "pending"
+
+        class FailingCheckpointer:
+            def delete_namespace(self, thread_id: str, checkpoint_ns: str) -> None:
+                raise RuntimeError("cleanup failed")
+
+        assert drain_checkpoint_deletion_outbox(
+            session,
+            FailingCheckpointer(),
+            worker_id="api-test-failure",
+            batch_size=1,
+        ) == 0
+        session.refresh(outbox)
+        assert outbox.status == "pending"
+        assert outbox.last_error == "cleanup failed"
+        outbox.available_at = utcnow() - timedelta(seconds=1)
+        session.add(outbox)
+        session.commit()
 
         class Checkpointer:
             def delete_namespace(self, thread_id: str, checkpoint_ns: str) -> None:

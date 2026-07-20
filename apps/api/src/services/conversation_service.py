@@ -7,7 +7,6 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Protocol
 
-from agent.runtime.checkpoint import clear_execution_persistence
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
 from core.security import AuthContext
 from models.agent import AgentProfile, AgentVersion
@@ -282,48 +281,6 @@ class ConversationService:
         except Exception:
             session.rollback()
             raise
-
-        # Business deletion and cleanup intent are durable before touching the
-        # checkpoint store. Cleanup is best effort here; the outbox drain retries
-        # failures without resurrecting deleted business rows.
-        if not outbox_rows:
-            return
-        try:
-            checkpointer = self.agent_service.runtime.get_checkpointer()
-        except Exception as exc:
-            for row in outbox_rows:
-                row.last_error = str(exc)[:2000]
-                row.status = "pending"
-                row.updated_at = datetime.now().astimezone()
-                session.add(row)
-            session.commit()
-            return
-        for row in outbox_rows:
-            try:
-                clear_execution_persistence(
-                    thread_id=row.thread_id,
-                    execution_id=row.checkpoint_ns,
-                    checkpointer=checkpointer,
-                )
-            except (KeyError, FileNotFoundError):
-                row.status = "completed"
-                row.locked_by = None
-                row.locked_until = None
-                row.last_error = ""
-                session.add(row)
-                session.commit()
-            except Exception as exc:
-                row.last_error = str(exc)[:2000]
-                row.status = "pending"
-                session.add(row)
-                session.commit()
-            else:
-                row.status = "completed"
-                row.locked_by = None
-                row.locked_until = None
-                row.last_error = ""
-                session.add(row)
-                session.commit()
 
     def create_turn(
         self,

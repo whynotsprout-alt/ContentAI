@@ -300,7 +300,7 @@ class RuntimePersistence:
         batch_size: int,
         dry_run: bool,
         retention_cutoff: datetime | None = None,
-    ) -> dict[str, dict[str, int]]:
+    ) -> dict[str, dict[str, int | bool]]:
         """Bounded maintenance for LangGraph checkpoint tables.
 
         The table names are fixed because this is an administrative operation;
@@ -309,25 +309,37 @@ class RuntimePersistence:
         del retention_cutoff
         self.get_checkpointer()
         assert self._pool is not None
-        summary: dict[str, dict[str, int]] = {}
-        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+        summary: dict[str, dict[str, int | bool]] = {}
+        tables = (
+            (
+                "checkpoint_writes",
+                "thread_id, checkpoint_ns, checkpoint_id, task_id, idx",
+            ),
+            ("checkpoint_blobs", "thread_id, checkpoint_ns, channel, version"),
+            ("checkpoints", "thread_id, checkpoint_ns, checkpoint_id"),
+        )
+        for table, order_by in tables:
             with self._pool.connection() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(f"SELECT count(*) AS count FROM {table}")
-                    candidates = int(cursor.fetchone()["count"])
+                    cursor.execute(
+                        f"SELECT 1 FROM {table} ORDER BY {order_by} LIMIT %s",
+                        (batch_size + 1,),
+                    )
+                    probed = cursor.fetchall()
+                    candidate_count = min(len(probed), batch_size)
                     deleted = 0
-                    if not dry_run:
-                        while True:
-                            cursor.execute(
-                                f"DELETE FROM {table} WHERE ctid IN "
-                                f"(SELECT ctid FROM {table} LIMIT %s)",
-                                (batch_size,),
-                            )
-                            batch = cursor.rowcount
-                            deleted += batch
-                            if batch < batch_size:
-                                break
-                    summary[table] = {"candidates": candidates, "deleted": deleted}
+                    if not dry_run and candidate_count:
+                        cursor.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} ORDER BY {order_by} LIMIT %s)",
+                            (batch_size,),
+                        )
+                        deleted = cursor.rowcount
+                    summary[table] = {
+                        "candidate_count": candidate_count,
+                        "has_more": len(probed) > batch_size,
+                        "deleted": deleted,
+                    }
         return summary
 
     def close(self) -> None:
