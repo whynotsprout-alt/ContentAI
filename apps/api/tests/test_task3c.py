@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
+from api.app import create_app
+from client import ApiClient as TestClient
 from core.client_ip import resolve_client_ip
-from core.config import Settings
+from core.config import Env, Settings
 from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
+from db.session import get_engine
+from models.user import AuthSession
 from pydantic import ValidationError
+from redis import Redis
+from sqlmodel import Session, select
 
 
 class FakeRedis:
@@ -109,3 +117,97 @@ def test_malformed_or_empty_xff_falls_back_to_peer():
 def test_invalid_trusted_proxy_cidr_fails_settings_validation():
     with pytest.raises(ValidationError):
         _settings(server={"trusted_proxy_cidrs": ["10.0.0.0/not-cidr"]})
+
+
+def test_real_redis_first_window_is_atomic_and_ttl_bounded():
+    redis = Redis.from_url("redis://127.0.0.1:6379/15", decode_responses=True)
+    try:
+        redis.ping()
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(f"real Redis required for Lua behavior test: {exc}")
+    redis.flushdb()
+    settings = _settings(redis={"url": "redis://127.0.0.1:6379/15"})
+    limiter = RedisRateLimiter(settings)
+    scope = f"concurrent:{uuid4()}"
+    rule = RateLimitRule(100, 30)
+
+    try:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda _: limiter.check(scope, "198.51.100.1", rule), range(32)))
+        key = f"contentai:rate-limit:{scope}:198.51.100.1"
+        assert int(redis.get(key)) == 32
+        assert 0 < redis.ttl(key) <= 30
+    finally:
+        redis.flushdb()
+
+
+def test_real_redis_repairs_ttl_less_key_and_preserves_positive_ttl():
+    redis = Redis.from_url("redis://127.0.0.1:6379/15", decode_responses=True)
+    redis.ping()
+    redis.flushdb()
+    settings = _settings(redis={"url": "redis://127.0.0.1:6379/15"})
+    limiter = RedisRateLimiter(settings)
+    rule = RateLimitRule(100, 45)
+    key_without_ttl = "contentai:rate-limit:repair:ttl-less"
+    key_with_ttl = "contentai:rate-limit:repair:positive"
+    try:
+        redis.set(key_without_ttl, 4)
+        limiter.check("repair", "ttl-less", rule)
+        assert int(redis.get(key_without_ttl)) == 5
+        assert 0 < redis.ttl(key_without_ttl) <= 45
+
+        redis.setex(key_with_ttl, 120, 7)
+        before = redis.ttl(key_with_ttl)
+        limiter.check("repair", "positive", rule)
+        after = redis.ttl(key_with_ttl)
+        assert int(redis.get(key_with_ttl)) == 8
+        assert 0 < after <= before
+    finally:
+        redis.flushdb()
+
+
+def test_http_auth_rate_limit_identity_and_sessions_share_resolved_ip(monkeypatch):
+    settings = _settings(env="test", server={"trusted_proxy_cidrs": ["127.0.0.1/32"]})
+    app = create_app(settings)
+    app.state.settings.env = Env.development
+    limiter_identities: list[tuple[str, str]] = []
+
+    def capture_check(self, scope, identity, rule):
+        limiter_identities.append((scope, identity))
+
+    monkeypatch.setattr(RedisRateLimiter, "check", capture_check)
+    email = f"proxy-{uuid4()}@example.com"
+    client_ip = "198.51.100.77"
+    with TestClient(app) as client:
+        headers = {"X-Forwarded-For": client_ip}
+        registered = client.post(
+            "/api/auth/register",
+            json={"email": email, "password": "correct horse battery"},
+            headers=headers,
+        )
+        assert registered.status_code == 201
+        login = client.post(
+            "/api/auth/login",
+            json={"email": email, "password": "correct horse battery"},
+            headers=headers,
+        )
+        assert login.status_code == 200
+        csrf = login.cookies.get("contentai_csrf")
+        assert csrf
+        changed = client.post(
+            "/api/auth/change-password",
+            json={"current_password": "correct horse battery", "new_password": "new password 123"},
+            headers={"X-Forwarded-For": client_ip, "X-CSRF-Token": csrf},
+        )
+        assert changed.status_code == 200
+
+    assert limiter_identities == [
+        ("/api/auth/register", client_ip),
+        ("/api/auth/login", client_ip),
+    ]
+    with Session(get_engine(settings)) as session:
+        rows = session.exec(
+            select(AuthSession).order_by(AuthSession.created_at.desc())
+        ).all()
+    assert rows[0].ip_address == client_ip
+    assert rows[1].ip_address == client_ip
