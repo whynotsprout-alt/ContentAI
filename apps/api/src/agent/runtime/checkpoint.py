@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator, MutableMapping, Sequence
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 from core.config import Settings, get_settings
@@ -292,6 +293,42 @@ class RuntimePersistence:
     def setup(self) -> None:
         """Create/upgrade LangGraph-owned tables from the migration job only."""
         self.get_checkpointer().setup()
+
+    def purge_checkpoint_data(
+        self,
+        *,
+        batch_size: int,
+        dry_run: bool,
+        retention_cutoff: datetime | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Bounded maintenance for LangGraph checkpoint tables.
+
+        The table names are fixed because this is an administrative operation;
+        retention does not apply because checkpoint rows have no business timestamp.
+        """
+        del retention_cutoff
+        self.get_checkpointer()
+        assert self._pool is not None
+        summary: dict[str, dict[str, int]] = {}
+        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+            with self._pool.connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(f"SELECT count(*) AS count FROM {table}")
+                    candidates = int(cursor.fetchone()["count"])
+                    deleted = 0
+                    if not dry_run:
+                        while True:
+                            cursor.execute(
+                                f"DELETE FROM {table} WHERE ctid IN "
+                                f"(SELECT ctid FROM {table} LIMIT %s)",
+                                (batch_size,),
+                            )
+                            batch = cursor.rowcount
+                            deleted += batch
+                            if batch < batch_size:
+                                break
+                    summary[table] = {"candidates": candidates, "deleted": deleted}
+        return summary
 
     def close(self) -> None:
         self._checkpointer = None
