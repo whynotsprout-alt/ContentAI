@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextvars import copy_context
 from typing import Any
@@ -18,6 +21,66 @@ from models.enums import ToolExecutionStatus
 from services.execution_resume import stable_json_hash
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+
+_REMOTE_IO_CAPACITY = 4
+
+
+class _RemoteIOGate:
+    def __init__(self, capacity: int) -> None:
+        self._slots = threading.BoundedSemaphore(capacity)
+        self._queue: queue.Queue[tuple[Future[Any], Any, tuple[Any, ...]]] = queue.Queue(
+            maxsize=capacity
+        )
+        for index in range(capacity):
+            threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"side-effect-io-{index}",
+            ).start()
+
+    def call(self, call: Any, deadline: float, *args: Any) -> Any:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._slots.acquire(timeout=remaining):
+            raise FutureTimeoutError
+        future: Future[Any] = Future()
+        try:
+            self._queue.put_nowait((future, call, args))
+        except queue.Full:
+            self._slots.release()
+            raise FutureTimeoutError from None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise FutureTimeoutError
+        return future.result(timeout=remaining)
+
+    def _run(self) -> None:
+        while True:
+            future, call, args = self._queue.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(call(*args))
+                    except BaseException as exc:  # noqa: BLE001
+                        future.set_exception(exc)
+            finally:
+                self._slots.release()
+                self._queue.task_done()
+
+
+_remote_io_gate: _RemoteIOGate | None = None
+_remote_io_gate_pid: int | None = None
+_remote_io_gate_lock = threading.Lock()
+
+
+def _reset_remote_io_gate_after_fork() -> None:
+    global _remote_io_gate, _remote_io_gate_lock, _remote_io_gate_pid
+    _remote_io_gate = None
+    _remote_io_gate_pid = None
+    _remote_io_gate_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_remote_io_gate_after_fork)
 
 
 def execute_tool_call(request: Any, execute: Any) -> Any:
@@ -307,15 +370,19 @@ def _execute_side_effect_remotely(
 
 
 def _call_before_deadline(call: Any, deadline: float, *args: Any) -> Any:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise FutureTimeoutError
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="side-effect-io")
-    future = executor.submit(call, *args)
-    try:
-        return future.result(timeout=remaining)
-    finally:
-        executor.shutdown(wait=False, cancel_futures=False)
+    return _get_remote_io_gate().call(call, deadline, *args)
+
+
+def _get_remote_io_gate() -> _RemoteIOGate:
+    global _remote_io_gate, _remote_io_gate_pid
+    process_id = os.getpid()
+    if _remote_io_gate is not None and _remote_io_gate_pid == process_id:
+        return _remote_io_gate
+    with _remote_io_gate_lock:
+        if _remote_io_gate is None or _remote_io_gate_pid != process_id:
+            _remote_io_gate = _RemoteIOGate(_REMOTE_IO_CAPACITY)
+            _remote_io_gate_pid = process_id
+        return _remote_io_gate
 
 
 def _return_side_effect_receipt(

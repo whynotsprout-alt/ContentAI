@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.tool_execution import execute_tool_call
+from celery.exceptions import Retry
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
 from models.base import utcnow
@@ -173,6 +174,50 @@ def test_failed_receipt_persistence_failure_propagates_for_safe_redelivery() -> 
         assert receipts[0].status == "failed"
         audit = session.exec(select(ToolExecution)).one()
         assert audit.status == ToolExecutionStatus.failed
+
+
+def test_side_effect_task_retries_raised_persistence_failure_then_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id = "execution-side-effect-task-retry"
+    _seed_audit(execution_id)
+    side_effects = importlib.import_module("services.side_effects")
+    tasks = importlib.import_module("services.tasks")
+    job = _job(execution_id, content="OPENAI_API_KEY=task-retry-secret")
+    real_persist_failed_receipt = side_effects._persist_failed_receipt
+    retry_calls: list[dict[str, Any]] = []
+
+    def persistence_unavailable(_job_payload: dict[str, Any]) -> None:
+        raise RuntimeError("failed receipt persistence unavailable")
+
+    def request_retry(**kwargs: Any) -> None:
+        retry_calls.append(kwargs)
+        raise Retry()
+
+    monkeypatch.setattr(side_effects, "_persist_failed_receipt", persistence_unavailable)
+    monkeypatch.setattr(tasks.execute_side_effect, "retry", request_retry)
+    with pytest.raises(Retry):
+        tasks.execute_side_effect.run(job=job)
+
+    assert len(retry_calls) == 1
+    assert isinstance(retry_calls[0]["exc"], RuntimeError)
+    assert retry_calls[0]["kwargs"] == {"job": job}
+    assert retry_calls[0]["max_retries"] == 3
+
+    monkeypatch.setattr(side_effects, "_persist_failed_receipt", real_persist_failed_receipt)
+    monkeypatch.setattr(
+        tasks.execute_side_effect,
+        "retry",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("terminal failure must not retry")),
+    )
+    redelivered = tasks.execute_side_effect.run(job=job)
+
+    assert redelivered == {"status": "failed", "error": "SIDE_EFFECT_EXECUTION_FAILED"}
+    with Session(get_engine()) as session:
+        assert session.exec(select(MemoryRecord)).all() == []
+        receipts = session.exec(select(SideEffectReceipt)).all()
+        assert len(receipts) == 1
+        assert receipts[0].status == "failed"
 
 
 def test_default_dispatcher_routes_stable_job_to_side_effect_worker(

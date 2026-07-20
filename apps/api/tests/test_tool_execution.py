@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -677,3 +678,87 @@ def test_terminal_receipt_retry_preserves_original_audit_timestamps() -> None:
         assert audit.finished_at == original_finished_at
         assert audit.duration_ms == 5000
         assert audit.result_digest == "original-digest"
+
+
+def test_side_effect_remote_io_capacity_stays_bounded_when_calls_block() -> None:
+    call_count = 10
+    execution_ids = [f"execution-side-effect-capacity-{index}" for index in range(call_count)]
+    for execution_id in execution_ids:
+        _seed_execution(execution_id)
+    release_calls = threading.Event()
+    call_lock = threading.Lock()
+    started_calls = 0
+    active_calls = 0
+    max_active_calls = 0
+    dispatched: list[dict[str, object]] = []
+    local_calls = 0
+
+    def blocking_poller(_execution_id: str, _tool_call_id: str) -> None:
+        nonlocal active_calls, max_active_calls, started_calls
+        with call_lock:
+            started_calls += 1
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        try:
+            release_calls.wait(timeout=1)
+        finally:
+            with call_lock:
+                active_calls -= 1
+        return None
+
+    def invoke(index: int) -> ToolMessage:
+        nonlocal local_calls
+        runtime = _runtime(
+            execution_ids[index],
+            {
+                "remember": {
+                    "version": "1",
+                    "timeout_seconds": 0.03,
+                    "max_output_chars": 100,
+                    "side_effecting": True,
+                }
+            },
+        )
+        runtime.side_effect_dispatcher = dispatched.append
+        runtime.side_effect_receipt_poller = blocking_poller
+        request = SimpleNamespace(
+            tool_call={
+                "name": "remember",
+                "id": f"call-capacity-{index}",
+                "args": {},
+            }
+        )
+
+        def local_callback(_request: object) -> None:
+            nonlocal local_calls
+            with call_lock:
+                local_calls += 1
+
+        with tool_runtime_scope(runtime):
+            result = execute_tool_call(request, local_callback)
+        assert isinstance(result, ToolMessage)
+        return result
+
+    with ThreadPoolExecutor(max_workers=call_count) as callers:
+        results = list(callers.map(invoke, range(call_count)))
+
+    with call_lock:
+        started_before_release = started_calls
+        max_active_before_release = max_active_calls
+    remote_threads_before_release = sum(
+        thread.name.startswith("side-effect-io") for thread in threading.enumerate()
+    )
+    release_calls.set()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with call_lock:
+            if active_calls == 0:
+                break
+        time.sleep(0.01)
+
+    assert all("TOOL_TIMEOUT" in str(result.content) for result in results)
+    assert started_before_release <= 4
+    assert max_active_before_release <= 4
+    assert remote_threads_before_release <= 4
+    assert dispatched == []
+    assert local_calls == 0

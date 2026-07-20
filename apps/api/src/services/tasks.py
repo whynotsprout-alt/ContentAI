@@ -21,6 +21,7 @@ from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
+SIDE_EFFECT_TASK_MAX_RETRIES = 3
 
 
 @lru_cache(maxsize=1)
@@ -88,9 +89,23 @@ def record_queue_heartbeat(queue_name: str) -> None:
         session.commit()
 
 
-@celery_app.task(name="contentai.execute_side_effect", acks_late=True)
-def execute_side_effect(*, job: dict[str, Any]) -> dict[str, Any]:
-    return execute_side_effect_job(job)
+@celery_app.task(
+    name="contentai.execute_side_effect",
+    bind=True,
+    acks_late=True,
+    max_retries=SIDE_EFFECT_TASK_MAX_RETRIES,
+)
+def execute_side_effect(self: Any, *, job: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return execute_side_effect_job(job)
+    except Exception as exc:  # noqa: BLE001
+        retry_count = max(0, int(getattr(self.request, "retries", 0)))
+        raise self.retry(
+            exc=exc,
+            kwargs={"job": job},
+            countdown=min(30, 2 ** min(retry_count, 4)),
+            max_retries=SIDE_EFFECT_TASK_MAX_RETRIES,
+        ) from exc
 
 
 @celery_app.task(name="contentai.reconcile_side_effects")
