@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from agent.runtime.container import RuntimeContainer
 from api.router import router
+from core.client_ip import resolve_client_ip
 from core.config import Env, Settings, get_settings
 from core.logging import configure_logging
 from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
@@ -135,8 +136,8 @@ def create_app(
         request_id = str(uuid4())
         request.state.request_id = request_id
         rule = _rate_limit_rule(request.method, request.url.path)
-        if rule is not None:
-            identity = request.client.host if request.client else "unknown"
+        if rule is not None and app.state.settings.env != Env.test:
+            identity = resolve_client_ip(request, app.state.settings)
             try:
                 app.state.rate_limiter.check(request.url.path, identity, rule)
             except PermissionError as exc:

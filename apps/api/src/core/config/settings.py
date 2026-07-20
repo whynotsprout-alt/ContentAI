@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -64,6 +65,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_env_settings(self) -> Self:
         self.server.frontend_origins = self._final_frontend_origins()
+        self.server.trusted_proxy_cidrs = self._final_trusted_proxy_cidrs()
 
         database_url = (self.database.url or "").strip()
         if not database_url:
@@ -95,6 +97,23 @@ class Settings(BaseSettings):
         self._validate_auth()
         self._validate_frontend_origins()
         return self
+
+    def _final_trusted_proxy_cidrs(self) -> list[str]:
+        raw = self.server.trusted_proxy_cidrs
+        values = raw.split(",") if isinstance(raw, str) else raw
+        normalized: list[str] = []
+        for value in values:
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                network = ipaddress.ip_network(value, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    "CONTENTAI_SERVER__TRUSTED_PROXY_CIDRS must contain valid IP/CIDR values."
+                ) from exc
+            normalized.append(str(network))
+        return list(dict.fromkeys(normalized))
 
     def _final_frontend_origins(self) -> list[str]:
         raw_origins = self.server.frontend_origins

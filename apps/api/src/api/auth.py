@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from api.dependencies import AuthServiceDep, CurrentUserDep, SessionDep
+from core.client_ip import resolve_client_ip
 from core.config import Env
 from fastapi import APIRouter, HTTPException, Request, Response
 from models.schemas import (
@@ -83,7 +84,7 @@ def login(
             email=str(payload.email),
             password=payload.password,
             user_agent=request.headers.get("user-agent", ""),
-            ip_address=request.client.host if request.client else "",
+            ip_address=resolve_client_ip(request, request.app.state.settings),
         )
     except AuthServiceError as exc:
         _raise_auth_error(exc)
@@ -136,7 +137,7 @@ def change_password(
             current_password=payload.current_password,
             new_password=payload.new_password,
             user_agent=request.headers.get("user-agent", ""),
-            ip_address=request.client.host if request.client else "",
+            ip_address=resolve_client_ip(request, request.app.state.settings),
         )
     except AuthServiceError as exc:
         _raise_auth_error(exc)

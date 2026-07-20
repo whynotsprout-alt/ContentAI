@@ -22,20 +22,25 @@ class RateLimitRule:
 class RedisRateLimiter:
     """Fixed-window Redis limiter for security-sensitive API operations."""
 
+    LUA_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+""".strip()
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client: Redis | None = None
 
     def check(self, scope: str, identity: str, rule: RateLimitRule) -> None:
-        if self.settings.env == Env.test:
-            return
         try:
             client = self._client or Redis.from_url(self.settings.redis.url, decode_responses=True)
             self._client = client
             key = f"{self.settings.redis.rate_limit_prefix}:{scope}:{identity}"
-            count = int(client.incr(key))
-            if count == 1:
-                client.expire(key, rule.window_seconds)
+            count = int(client.eval(self.LUA_SCRIPT, 1, key, rule.window_seconds))
         except Exception as exc:  # noqa: BLE001
             if self.settings.env == Env.production:
                 raise RateLimitUnavailable("Redis rate limiter is unavailable") from exc
