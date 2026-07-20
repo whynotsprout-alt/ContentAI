@@ -34,7 +34,7 @@ def drain_checkpoint_deletion_outbox(
             select(CheckpointDeletionOutbox)
             .where(
                 or_(
-                    (CheckpointDeletionOutbox.status == "pending")
+                    (CheckpointDeletionOutbox.status.in_(("pending", "failed")))
                     & (CheckpointDeletionOutbox.available_at <= now),
                     (CheckpointDeletionOutbox.status == "processing")
                     & (CheckpointDeletionOutbox.locked_until <= now),

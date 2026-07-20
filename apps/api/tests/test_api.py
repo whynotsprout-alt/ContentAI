@@ -28,6 +28,7 @@ from models.chat import (
     AgentInvocation,
     ChatMessage,
     ChatSession,
+    CheckpointDeletionOutbox,
     ExecutionOutbox,
     ExecutionResumeRequest,
     ToolExecution,
@@ -36,6 +37,7 @@ from models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunSt
 from models.memory import MemoryRecord
 from models.user import AdminAuditLog, AppUser
 from services.agent_service import AgentService
+from services.checkpoint_deletion import drain_checkpoint_deletion_outbox
 from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
 from services.execution_claim import claim_execution
 from sqlalchemy import event, text
@@ -1425,7 +1427,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
         )
 
 
-def test_chat_session_delete_keeps_rows_when_persistence_cleanup_fails(monkeypatch):
+def test_chat_session_delete_commits_business_rows_when_persistence_cleanup_fails(monkeypatch):
     with Session(get_engine()) as session:
         chat = ChatSession(
             title="cleanup failure",
@@ -1435,27 +1437,58 @@ def test_chat_session_delete_keeps_rows_when_persistence_cleanup_fails(monkeypat
         )
 
         session.add(chat)
+        session.flush()
+        invocation = AgentInvocation(
+            session_id=chat.id,
+            agent_id="default-agent",
+            user_id="local-user",
+        )
+        session.add(invocation)
+        session.flush()
+        session.add(
+            AgentExecution(
+                id="execution-cleanup-failure",
+                invocation_id=invocation.id,
+                session_id=chat.id,
+                agent_version_id="default-agent-v1",
+                status=RunStatus.completed,
+            )
+        )
 
         session.commit()
 
         session_id = chat.id
 
-    def fail_cleanup(*, thread_id: str, session: Session | None = None) -> None:
+    def fail_cleanup(*, thread_id: str, execution_id: str, checkpointer: object) -> None:
         raise RuntimeError("cleanup failed")
 
     monkeypatch.setattr(
         conversation_service_module,
-        "clear_thread_persistence",
+        "clear_execution_persistence",
         fail_cleanup,
     )
 
     with TestClient(app) as client:
         response = client.delete(f"/api/chat/sessions/{session_id}")
 
-    assert response.status_code == 500
+    assert response.status_code == 204
 
     with Session(get_engine()) as session:
-        assert session.get(ChatSession, session_id) is not None
+        assert session.get(ChatSession, session_id) is None
+        outbox = session.exec(select(CheckpointDeletionOutbox)).one()
+        assert outbox.status == "pending"
+
+        class Checkpointer:
+            def delete_namespace(self, thread_id: str, checkpoint_ns: str) -> None:
+                return None
+
+        assert drain_checkpoint_deletion_outbox(
+            session,
+            Checkpointer(),
+            worker_id="api-test",
+            batch_size=1,
+        ) == 1
+        assert session.get(CheckpointDeletionOutbox, outbox.id).status == "completed"
 
 
 def test_chat_session_delete_rejects_active_run():
