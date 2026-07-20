@@ -20,7 +20,7 @@ from models.schemas import (
     ChatExecutionResponse,
     ChatRequest,
     ChatSessionDetail,
-    ChatSessionSummary,
+    ChatSessionListResponse,
     ChatUserMessageResponse,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -28,6 +28,7 @@ from models.schemas import (
     StreamEventV3,
     UserReplyRequest,
 )
+from pydantic import ValidationError
 from services.errors import (
     ActiveExecutionExistsError,
     AgentNotFoundError,
@@ -110,15 +111,18 @@ def create_session(
     return service.create_session(session, payload, auth)
 
 
-@router.get("/sessions", response_model=list[ChatSessionSummary])
+@router.get("/sessions", response_model=ChatSessionListResponse)
 @translate_service_errors
 def list_sessions(
     session: SessionDep,
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
-) -> list[ChatSessionSummary]:
-    return service.list_sessions(session, auth)
+    agent_id: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ChatSessionListResponse:
+    return service.list_sessions(session, auth, agent_id=agent_id, cursor=cursor, limit=limit)
 
 
 @router.get("/sessions/{session_id}", response_model=ChatSessionDetail)
@@ -129,15 +133,21 @@ def get_session(
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
+    request: Request,
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-    before: str | None = Query(default=None),
 ) -> ChatSessionDetail:
+    if "before" in request.query_params:
+        raise HTTPException(status_code=422, detail="before is no longer supported")
+    try:
+        history = MessageListRequest(limit=limit, cursor=cursor)
+    except ValidationError as exc:
+        raise InvalidCursorError("Invalid cursor") from exc
     return service.get_session(
         session,
         session_id,
         auth,
-        MessageListRequest(limit=limit, cursor=cursor, before=before),
+        history,
     )
 
 

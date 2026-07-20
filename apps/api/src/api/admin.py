@@ -1,8 +1,9 @@
 from typing import Annotated
 
 from api.dependencies import AdminServiceDep, CurrentAdminDep, RequestContextDep, SessionDep
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from models.schemas import (
+    AdminMessageListResponse,
     AdminSessionDetail,
     AdminSessionListResponse,
     AdminUsageResponse,
@@ -13,6 +14,7 @@ from models.schemas import (
 )
 from models.schemas.base import AwareDatetime
 from services.auth_service import AuthServiceError
+from services.errors import InvalidCursorError
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -21,23 +23,37 @@ def _raise_admin_error(exc: AuthServiceError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+def _reject_legacy_query(request: Request) -> None:
+    for name in ("page", "page_size", "before"):
+        if name in request.query_params:
+            raise HTTPException(status_code=422, detail=f"{name} is no longer supported")
+
+
 @router.get("/users", response_model=AdminUserListResponse)
 def list_users(
     service: AdminServiceDep,
     session: SessionDep,
     _auth: CurrentAdminDep,
+    request: Request,
     search: str = Query(default="", max_length=254),
     status: str | None = Query(default=None, pattern="^(pending_verification|active|disabled)$"),
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> AdminUserListResponse:
-    return service.list_users(
-        session,
-        search=search,
-        status=status,
-        page=page,
-        page_size=page_size,
-    )
+    _reject_legacy_query(request)
+    try:
+        return service.list_users(
+            session,
+            search=search,
+            status=status,
+            cursor=cursor,
+            limit=limit,
+        )
+    except InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
 
 
 @router.get("/users/{user_id}", response_model=AdminUserSummary)
@@ -144,11 +160,18 @@ def list_user_sessions(
     service: AdminServiceDep,
     session: SessionDep,
     _auth: CurrentAdminDep,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=30, ge=1, le=100),
+    request: Request,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> AdminSessionListResponse:
+    _reject_legacy_query(request)
     try:
-        return service.list_user_sessions(session, user_id, page=page, page_size=page_size)
+        return service.list_user_sessions(session, user_id, cursor=cursor, limit=limit)
+    except InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
     except AuthServiceError as exc:
         _raise_admin_error(exc)
 
@@ -168,6 +191,28 @@ def get_session_detail(
             actor_user_id=auth.user_id,
             request_id=request_context.request_id or "",
         )
+    except AuthServiceError as exc:
+        _raise_admin_error(exc)
+
+
+@router.get("/sessions/{session_id}/messages", response_model=AdminMessageListResponse)
+def list_session_messages(
+    session_id: str,
+    service: AdminServiceDep,
+    session: SessionDep,
+    _auth: CurrentAdminDep,
+    request: Request,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> AdminMessageListResponse:
+    _reject_legacy_query(request)
+    try:
+        return service.list_session_messages(session, session_id, cursor=cursor, limit=limit)
+    except InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_CURSOR", "message": "Invalid cursor"},
+        ) from exc
     except AuthServiceError as exc:
         _raise_admin_error(exc)
 

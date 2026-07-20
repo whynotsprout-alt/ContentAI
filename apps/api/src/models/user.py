@@ -13,6 +13,8 @@ class AppUser(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("email_normalized", name="ux_appuser_email_normalized"),
         Index("ix_appuser_role_status", "role", "status"),
+        Index("ix_appuser_created_id", "created_at", "id"),
+        Index("ix_appuser_status_created_id", "status", "created_at", "id"),
     )
 
     id: str = Field(default_factory=lambda: new_id("usr"), primary_key=True)

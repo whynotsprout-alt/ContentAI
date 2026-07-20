@@ -45,6 +45,7 @@ class ChatSession(SQLModel, table=True):
             ondelete="RESTRICT",
         ),
         Index("ix_chatsession_user_updated", "user_id", "updated_at"),
+        Index("ix_chatsession_user_updated_id", "user_id", "updated_at", "id"),
         Index("ix_chatsession_agent_updated", "agent_id", "updated_at"),
     )
 
@@ -119,6 +120,7 @@ class AgentExecution(SQLModel, table=True):
         Index("ix_agentexecution_invocation_created", "invocation_id", "created_at"),
         Index("ix_agentexecution_invocation_status", "invocation_id", "status"),
         Index("ix_agentexecution_status_updated", "status", "updated_at"),
+        Index("ix_agentexecution_session_updated_id", "session_id", "updated_at", "id"),
     )
 
     id: str = Field(default_factory=lambda: new_id("exe"), primary_key=True)

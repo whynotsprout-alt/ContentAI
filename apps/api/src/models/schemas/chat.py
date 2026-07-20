@@ -5,7 +5,7 @@ from typing import Any, Literal
 from models.enums import MessageRole, MessageType
 from models.schemas.agent import AgentId
 from models.schemas.base import InputSchemaBase, SchemaBase
-from pydantic import Field, constr, field_validator, model_validator
+from pydantic import Field, constr, field_validator
 
 SessionId = constr(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9_-]+$")
 TitleText = constr(min_length=1, max_length=120, strip_whitespace=True)
@@ -48,6 +48,11 @@ class ChatSessionSummary(SchemaBase):
     updated_at: datetime
     latest_execution_status: AgentExecutionState | None = None
     message_count: int = Field(default=0, ge=0)
+
+
+class ChatSessionListResponse(SchemaBase):
+    items: list[ChatSessionSummary] = Field(default_factory=list)
+    next_cursor: str | None = None
 
 
 class ChatRequest(InputSchemaBase):
@@ -101,9 +106,8 @@ class ChatSessionDetail(ChatSessionSummary):
 class MessageListRequest(InputSchemaBase):
     limit: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
-    before: str | None = None
 
-    @field_validator("cursor", "before", mode="before")
+    @field_validator("cursor", mode="before")
     @classmethod
     def _validate_cursor(cls, value: Any) -> Any:
         if value is None:
@@ -126,11 +130,6 @@ class MessageListRequest(InputSchemaBase):
             raise ValueError("Cursor timestamp must be timezone-aware")
         return normalized
 
-    @model_validator(mode="after")
-    def _validate_cursor_mode(self) -> "MessageListRequest":
-        if self.cursor is not None and self.before is not None:
-            raise ValueError("cursor and before are mutually exclusive")
-        return self
 
 
 class StreamEventV3(SchemaBase):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from models.schemas.base import InputSchemaBase, SchemaBase
+from models.schemas.chat import ChatMessageResponse
 from pydantic import Field
 
 
@@ -29,13 +30,16 @@ class AdminSessionSummary(SchemaBase):
 
 class AdminSessionListResponse(SchemaBase):
     items: list[AdminSessionSummary] = Field(default_factory=list)
-    page: int
-    page_size: int
-    total: int
+    next_cursor: str | None = None
 
 
 class AdminSessionDetail(AdminSessionSummary):
-    messages: list[dict[str, Any]] = Field(default_factory=list)
+    pass
+
+
+class AdminMessageListResponse(SchemaBase):
+    items: list[ChatMessageResponse] = Field(default_factory=list)
+    next_cursor: str | None = None
 
 
 class AdminUsageBucket(SchemaBase):

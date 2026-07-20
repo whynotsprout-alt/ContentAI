@@ -71,9 +71,34 @@ def upgrade() -> None:
         nullable=False,
     )
     op.drop_table("useractiontoken")
+    op.create_index(
+        "ix_appuser_created_id", "appuser", ["created_at", "id"], unique=False
+    )
+    op.create_index(
+        "ix_appuser_status_created_id",
+        "appuser",
+        ["status", "created_at", "id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_chatsession_user_updated_id",
+        "chatsession",
+        ["user_id", "updated_at", "id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_agentexecution_session_updated_id",
+        "agentexecution",
+        ["session_id", "updated_at", "id"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_agentexecution_session_updated_id")
+    op.execute("DROP INDEX IF EXISTS ix_chatsession_user_updated_id")
+    op.execute("DROP INDEX IF EXISTS ix_appuser_status_created_id")
+    op.execute("DROP INDEX IF EXISTS ix_appuser_created_id")
     op.create_table(
         "useractiontoken",
         sa.Column("id", sa.String(), nullable=False),

@@ -27,6 +27,7 @@ from models.schemas import (
     ChatExecutionResponse,
     ChatMessageResponse,
     ChatSessionDetail,
+    ChatSessionListResponse,
     ChatSessionSummary,
     ChatUserMessageResponse,
     CreateSessionRequest,
@@ -58,7 +59,13 @@ from services.event_stream import (
 from services.execution_lineage import ExecutionLineage
 from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
-from sqlalchemy import and_, delete, func, or_
+from services.pagination import (
+    apply_descending_cursor,
+    decode_cursor,
+    encode_cursor,
+    fit_response_items,
+)
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 ACTIVE_EXECUTION_STATUSES = {RunStatus.pending, RunStatus.running}
@@ -70,7 +77,7 @@ TERMINAL_EXECUTION_STATUSES = {
     RunStatus.cancelled,
 }
 
-_MESSAGE_CURSOR_SEP = "|"
+__all__ = ["ConversationService", "InvalidCursorError"]
 
 
 class ExecutionDispatcher(Protocol):
@@ -125,62 +132,58 @@ class ConversationService:
         self,
         session: Session,
         auth: AuthContext,
-    ) -> list[ChatSessionSummary]:
-        latest_execution_status = (
-            select(
-                AgentInvocation.session_id.label("session_id"),
-                AgentExecution.status.label("status"),
-                func.row_number()
-                .over(
-                    partition_by=AgentInvocation.session_id,
-                    order_by=(AgentExecution.updated_at.desc(), AgentExecution.id.desc()),
-                )
-                .label("rank"),
-            )
-            .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)
-            .subquery()
-        )
-        message_counts = (
-            select(
-                ChatMessage.session_id.label("session_id"),
-                func.count(ChatMessage.id).label("message_count"),
-            )
+        *,
+        agent_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> ChatSessionListResponse:
+        if agent_id is not None and not auth.can_access_agent(agent_id):
+            raise AgentNotFoundError(agent_id)
+        statement = select(ChatSession).where(ChatSession.user_id == auth.user_id)
+        if agent_id is not None:
+            statement = statement.where(ChatSession.agent_id == agent_id)
+        statement = apply_descending_cursor(
+            statement, ChatSession.updated_at, ChatSession.id, cursor
+        ).order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+        chats = list(session.exec(statement.limit(limit + 1)).all())
+        has_more = len(chats) > limit
+        chats = chats[:limit]
+        if not chats:
+            return ChatSessionListResponse(items=[], next_cursor=None)
+        ids = [chat.id for chat in chats]
+        count_rows = session.exec(
+            select(ChatMessage.session_id, func.count(ChatMessage.id))
+            .where(ChatMessage.session_id.in_(ids))
             .where(ChatMessage.message_type.in_((MessageType.text, MessageType.markdown)))
             .group_by(ChatMessage.session_id)
-            .subquery()
-        )
-
-        rows = session.exec(
-            select(
-                ChatSession,
-                latest_execution_status.c.status,
-                func.coalesce(message_counts.c.message_count, 0).label("message_count"),
-            )
-            .outerjoin(
-                latest_execution_status,
-                (latest_execution_status.c.session_id == ChatSession.id)
-                & (latest_execution_status.c.rank == 1),
-            )
-            .outerjoin(message_counts, message_counts.c.session_id == ChatSession.id)
-            .where(ChatSession.user_id == auth.user_id)
-            .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
         ).all()
-
-        return [
-            ChatSessionSummary(
-                session_id=chat.id,
-                agent_id=chat.agent_id,
-                agent_version_id=chat.agent_version_id,
-                title=chat.title,
-                created_at=chat.created_at,
-                updated_at=chat.updated_at,
-                latest_execution_status=ConversationService._execution_state(execution_status)
-                if execution_status is not None
-                else None,
-                message_count=int(message_count or 0),
+        counts = {row[0]: int(row[1] or 0) for row in count_rows}
+        latest_rows = session.exec(
+            select(AgentExecution.session_id, AgentExecution.status)
+            .where(AgentExecution.session_id.in_(ids))
+            .distinct(AgentExecution.session_id)
+            .order_by(
+                AgentExecution.session_id,
+                AgentExecution.updated_at.desc(),
+                AgentExecution.id.desc(),
             )
-            for chat, execution_status, message_count in rows
+        ).all()
+        latest = {row[0]: row[1] for row in latest_rows}
+        items = [
+            self._session_summary(
+                chat,
+                latest_execution_status=latest.get(chat.id),
+                message_count=counts.get(chat.id, 0),
+            )
+            for chat in chats
         ]
+        items, budget_more = fit_response_items(items)
+        has_more = has_more or budget_more
+        next_cursor = None
+        if has_more and items:
+            boundary = chats[len(items) - 1]
+            next_cursor = encode_cursor(boundary.updated_at, boundary.id)
+        return ChatSessionListResponse(items=items, next_cursor=next_cursor)
 
     def get_session(
         self,
@@ -849,65 +852,38 @@ class ConversationService:
         session_id: str,
         request: MessageListRequest,
     ) -> tuple[list[ChatMessage], str | None]:
-        requested_cursor = request.before or request.cursor
-        cursor_filter = self._decode_cursor(requested_cursor)
-
         statement = (
             select(ChatMessage)
             .where(ChatMessage.session_id == session_id)
             .where(ChatMessage.role.in_([MessageRole.user, MessageRole.assistant]))
         )
-        if cursor_filter is not None:
-            cursor_time, cursor_message_id = cursor_filter
-            statement = statement.where(
-                or_(
-                    ChatMessage.created_at < cursor_time,
-                    and_(
-                        ChatMessage.created_at == cursor_time,
-                        ChatMessage.id < cursor_message_id,
-                    ),
-                )
-            )
-
-        statement = statement.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        statement = apply_descending_cursor(
+            statement, ChatMessage.created_at, ChatMessage.id, request.cursor
+        ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         rows = list(session.exec(statement.limit(request.limit + 1)).all())
         if not rows:
             return [], None
 
         has_more = len(rows) > request.limit
         rows = rows[: request.limit]
+        items = [self._to_message_response(item) for item in rows]
+        items, budget_more = fit_response_items(items)
+        rows = rows[: len(items)]
         rows.sort(key=lambda item: (item.created_at, item.id))
 
         next_cursor = None
-        if has_more:
+        if has_more or budget_more:
             oldest = rows[0]
-            next_cursor = self._encode_cursor(oldest.created_at, oldest.id)
+            next_cursor = encode_cursor(oldest.created_at, oldest.id)
         return rows, next_cursor
 
     @staticmethod
     def _encode_cursor(created_at: datetime, message_id: str) -> str:
-        return f"{created_at.isoformat()}{_MESSAGE_CURSOR_SEP}{message_id}"
+        return encode_cursor(created_at, message_id)
 
     @staticmethod
     def _decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
-        if cursor is None:
-            return None
-        if not isinstance(cursor, str):
-            raise InvalidCursorError("Cursor must be a string")
-        if not cursor.strip():
-            raise InvalidCursorError("Cursor cannot be empty")
-        if _MESSAGE_CURSOR_SEP not in cursor:
-            raise InvalidCursorError("Cursor format is invalid")
-        created_at_raw, message_id = cursor.split(_MESSAGE_CURSOR_SEP, 1)
-        if not created_at_raw or not message_id:
-            raise InvalidCursorError("Cursor format is invalid")
-        try:
-            parsed = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise InvalidCursorError("Cursor timestamp is invalid") from exc
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise InvalidCursorError("Cursor timestamp must be timezone-aware")
-        return parsed, message_id
+        return decode_cursor(cursor)
 
     @staticmethod
     def _session_summary(

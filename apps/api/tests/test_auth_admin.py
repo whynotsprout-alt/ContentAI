@@ -489,7 +489,12 @@ def test_admin_can_view_session_messages_after_audit_is_recorded():
         response = client.get(f"/api/admin/sessions/{session_id}", headers=admin_headers)
 
         assert response.status_code == 200
-        messages = response.json()["messages"]
+        assert "messages" not in response.json()
+        messages_response = client.get(
+            f"/api/admin/sessions/{session_id}/messages", headers=admin_headers
+        )
+        assert messages_response.status_code == 200
+        messages = messages_response.json()["items"]
         assert len(messages) == 2
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Please keep this message visible to administrators."

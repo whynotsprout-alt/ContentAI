@@ -15,6 +15,7 @@ from models.chat import (
 )
 from models.enums import MessageRole, RunStatus
 from models.schemas.admin import (
+    AdminMessageListResponse,
     AdminSessionDetail,
     AdminSessionListResponse,
     AdminSessionSummary,
@@ -23,8 +24,15 @@ from models.schemas.admin import (
     TemporaryPasswordResponse,
 )
 from models.schemas.auth import AdminUserListResponse, AdminUserSummary
+from models.schemas.chat import ChatMessageResponse
 from models.user import AdminAuditLog, AppUser, ModelUsage
 from services.auth_service import AuthService, AuthServiceError
+from services.pagination import (
+    apply_ascending_cursor,
+    apply_descending_cursor,
+    encode_cursor,
+    fit_response_items,
+)
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
@@ -39,31 +47,66 @@ class AdminService:
         *,
         search: str = "",
         status: str | None = None,
-        page: int = 1,
-        page_size: int = 20,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> AdminUserListResponse:
-        filters = []
+        statement = select(AppUser)
         if search.strip():
-            filters.append(AppUser.email_normalized.ilike(f"%{search.strip().lower()}%"))
+            statement = statement.where(
+                AppUser.email_normalized.ilike(f"%{search.strip().lower()}%")
+            )
         if status:
-            filters.append(AppUser.status == status)
-        count_query = select(func.count()).select_from(AppUser)
-        users_query = select(AppUser)
-        for condition in filters:
-            count_query = count_query.where(condition)
-            users_query = users_query.where(condition)
-        total = int(session.exec(count_query).one() or 0)
-        users = session.exec(
-            users_query.order_by(AppUser.created_at.desc(), AppUser.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+            statement = statement.where(AppUser.status == status)
+        statement = apply_descending_cursor(
+            statement, AppUser.created_at, AppUser.id, cursor
+        ).order_by(AppUser.created_at.desc(), AppUser.id.desc())
+        users = list(session.exec(statement.limit(limit + 1)).all())
+        has_more = len(users) > limit
+        users = users[:limit]
+        ids = [user.id for user in users]
+        if not ids:
+            return AdminUserListResponse(items=[], next_cursor=None)
+        agent_rows = session.exec(
+            select(AgentProfile.user_id, func.count(AgentProfile.id))
+            .where(AgentProfile.user_id.in_(ids))
+            .group_by(AgentProfile.user_id)
         ).all()
-        return AdminUserListResponse(
-            items=[self.user_summary(session, user) for user in users],
-            page=page,
-            page_size=page_size,
-            total=total,
-        )
+        session_rows = session.exec(
+            select(ChatSession.user_id, func.count(ChatSession.id))
+            .where(ChatSession.user_id.in_(ids))
+            .group_by(ChatSession.user_id)
+        ).all()
+        usage_rows = session.exec(
+            select(
+                ModelUsage.user_id,
+                func.coalesce(func.sum(ModelUsage.input_tokens), 0),
+                func.coalesce(func.sum(ModelUsage.output_tokens), 0),
+                func.coalesce(func.sum(ModelUsage.total_tokens), 0),
+                func.count(ModelUsage.id),
+                func.count(ModelUsage.id).filter(ModelUsage.usage_available.is_(False)),
+            )
+            .where(ModelUsage.user_id.in_(ids))
+            .group_by(ModelUsage.user_id)
+        ).all()
+        agents = {row[0]: int(row[1] or 0) for row in agent_rows}
+        conversations = {row[0]: int(row[1] or 0) for row in session_rows}
+        usage = {row[0]: row[1:] for row in usage_rows}
+        items = [
+            self._user_summary_from_values(
+                user,
+                agent_count=agents.get(user.id, 0),
+                conversation_count=conversations.get(user.id, 0),
+                usage_values=usage.get(user.id),
+            )
+            for user in users
+        ]
+        items, budget_more = fit_response_items(items)
+        has_more = has_more or budget_more
+        next_cursor = None
+        if has_more and items:
+            boundary = users[len(items) - 1]
+            next_cursor = encode_cursor(boundary.created_at, boundary.id)
+        return AdminUserListResponse(items=items, next_cursor=next_cursor)
 
     def get_user(self, session: Session, user_id: str) -> AdminUserSummary:
         user = session.get(AppUser, user_id)
@@ -184,25 +227,61 @@ class AdminService:
         session: Session,
         user_id: str,
         *,
-        page: int = 1,
-        page_size: int = 30,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> AdminSessionListResponse:
         user = session.get(AppUser, user_id)
         if user is None:
             raise AuthServiceError("用户不存在", status_code=404)
-        query = select(ChatSession).where(ChatSession.user_id == user_id)
-        total = int(session.exec(select(func.count()).select_from(query.subquery())).one() or 0)
-        chats = session.exec(
-            query.order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+        query = apply_descending_cursor(
+            select(ChatSession).where(ChatSession.user_id == user_id),
+            ChatSession.updated_at,
+            ChatSession.id,
+            cursor,
+        ).order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+        chats = list(session.exec(query.limit(limit + 1)).all())
+        has_more = len(chats) > limit
+        chats = chats[:limit]
+        if not chats:
+            return AdminSessionListResponse(items=[], next_cursor=None)
+        ids = [chat.id for chat in chats]
+        count_rows = session.exec(
+            select(ChatMessage.session_id, func.count(ChatMessage.id))
+            .where(ChatMessage.session_id.in_(ids))
+            .group_by(ChatMessage.session_id)
         ).all()
-        return AdminSessionListResponse(
-            items=[self._session_summary(session, chat, user) for chat in chats],
-            page=page,
-            page_size=page_size,
-            total=total,
-        )
+        latest_rows = session.exec(
+            select(AgentExecution.session_id, AgentExecution.status)
+            .where(AgentExecution.session_id.in_(ids))
+            .distinct(AgentExecution.session_id)
+            .order_by(
+                AgentExecution.session_id,
+                AgentExecution.updated_at.desc(),
+                AgentExecution.id.desc(),
+            )
+        ).all()
+        counts = {row[0]: int(row[1] or 0) for row in count_rows}
+        latest = {row[0]: row[1] for row in latest_rows}
+        items = [
+            AdminSessionSummary(
+                session_id=chat.id,
+                user_id=user.id,
+                user_email=user.email,
+                agent_id=chat.agent_id,
+                title=chat.title,
+                message_count=counts.get(chat.id, 0),
+                latest_execution_status=str(latest[chat.id]) if chat.id in latest else None,
+                updated_at=chat.updated_at,
+            )
+            for chat in chats
+        ]
+        items, budget_more = fit_response_items(items)
+        has_more = has_more or budget_more
+        next_cursor = None
+        if has_more and items:
+            boundary = chats[len(items) - 1]
+            next_cursor = encode_cursor(boundary.updated_at, boundary.id)
+        return AdminSessionListResponse(items=items, next_cursor=next_cursor)
 
     def get_session_detail(
         self,
@@ -218,17 +297,8 @@ class AdminService:
         user = session.get(AppUser, chat.user_id)
         if user is None:
             raise AuthServiceError("会话所属用户不存在", status_code=404)
-        messages = list(
-            session.exec(
-                select(ChatMessage)
-                .where(ChatMessage.session_id == chat.id)
-                .where(ChatMessage.role.in_([MessageRole.user, MessageRole.assistant]))
-                .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
-            ).all()
-        )
         detail = AdminSessionDetail(
             **self._session_summary(session, chat, user).model_dump(),
-            messages=[self._row(item) for item in messages],
         )
         self._audit(
             session,
@@ -240,6 +310,44 @@ class AdminService:
         )
         session.commit()
         return detail
+
+    def list_session_messages(
+        self,
+        session: Session,
+        session_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> AdminMessageListResponse:
+        chat = session.get(ChatSession, session_id)
+        if chat is None:
+            raise AuthServiceError("会话不存在", status_code=404)
+        statement = apply_ascending_cursor(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == chat.id)
+            .where(ChatMessage.role.in_([MessageRole.user, MessageRole.assistant])),
+            ChatMessage.created_at,
+            ChatMessage.id,
+            cursor,
+        ).order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        rows = list(session.exec(statement.limit(limit + 1)).all())
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = [
+            ChatMessageResponse(
+                id=item.id,
+                role=item.role,
+                message_type=item.message_type,
+                content=item.content,
+                created_at=item.created_at,
+            )
+            for item in rows
+        ]
+        items, budget_more = fit_response_items(items)
+        rows = rows[: len(items)]
+        has_more = has_more or budget_more
+        next_cursor = encode_cursor(rows[-1].created_at, rows[-1].id) if has_more and rows else None
+        return AdminMessageListResponse(items=items, next_cursor=next_cursor)
 
     def usage(
         self,
@@ -297,15 +405,6 @@ class AdminService:
                 for row in rows
             ]
         )
-
-    @staticmethod
-    def _row(value: Any) -> dict[str, Any]:
-        dump = getattr(value, "model_dump", None)
-        raw = dump() if callable(dump) else dict(value)
-        return {
-            key: item.isoformat() if isinstance(item, datetime) else item
-            for key, item in raw.items()
-        }
 
     @staticmethod
     def _session_summary(session: Session, chat: ChatSession, user: AppUser) -> AdminSessionSummary:
@@ -433,11 +532,29 @@ class AdminService:
             ).where(ModelUsage.user_id == user.id)
         ).one()
         input_tokens, output_tokens, total_tokens, call_count, missing_count = map(int, usage)
+        return AdminService._user_summary_from_values(
+            user,
+            agent_count=content_count,
+            conversation_count=conversation_count,
+            usage_values=(input_tokens, output_tokens, total_tokens, call_count, missing_count),
+        )
+
+    @staticmethod
+    def _user_summary_from_values(
+        user: AppUser,
+        *,
+        agent_count: int,
+        conversation_count: int,
+        usage_values: tuple[Any, ...] | None,
+    ) -> AdminUserSummary:
+        input_tokens, output_tokens, total_tokens, call_count, missing_count = map(
+            int, usage_values or (0, 0, 0, 0, 0)
+        )
         coverage = 1.0 if call_count == 0 else (call_count - missing_count) / call_count
         return AdminUserSummary(
             **AuthService.to_response(user).model_dump(),
             password_set=bool(user.password_hash),
-            agent_count=content_count,
+            agent_count=agent_count,
             conversation_count=conversation_count,
             input_tokens=input_tokens,
             output_tokens=output_tokens,

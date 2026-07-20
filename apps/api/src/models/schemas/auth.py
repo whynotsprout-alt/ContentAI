@@ -59,6 +59,4 @@ class AdminUserSummary(CurrentUserResponse):
 
 class AdminUserListResponse(SchemaBase):
     items: list[AdminUserSummary]
-    page: int
-    page_size: int
-    total: int
+    next_cursor: str | None = None

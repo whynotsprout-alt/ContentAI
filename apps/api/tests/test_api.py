@@ -201,7 +201,7 @@ def wait_for_session_title(client: TestClient, *, expected_title: str) -> list[d
 
         assert response.status_code == 200
 
-        sessions = response.json()
+        sessions = response.json()["items"]
 
         if sessions and sessions[0]["title"] == expected_title:
             return sessions
@@ -970,7 +970,7 @@ def test_postprocess_failure_keeps_main_run_completed_and_schedules_retry():
         execution_id = response.json()["execution_id"]
         terminal = wait_for_terminal_session(client, session["session_id"])
 
-        sessions = client.get("/api/chat/sessions").json()
+        sessions = client.get("/api/chat/sessions").json()["items"]
 
     assert terminal["latest_execution"]["status"] == "completed"
     assert sessions[0]["title"] == "New Session"
@@ -1067,8 +1067,8 @@ def test_session_message_count_includes_persisted_conversation_messages():
         detail = client.get(f"/api/chat/sessions/{session_id}")
 
     assert summaries.status_code == 200
-    assert summaries.json()[0]["session_id"] == session_id
-    assert summaries.json()[0]["message_count"] == 2
+    assert summaries.json()["items"][0]["session_id"] == session_id
+    assert summaries.json()["items"][0]["message_count"] == 2
     assert detail.status_code == 200
     assert detail.json()["message_count"] == 2
 
