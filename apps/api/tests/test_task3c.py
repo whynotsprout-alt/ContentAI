@@ -211,3 +211,47 @@ def test_http_auth_rate_limit_identity_and_sessions_share_resolved_ip(monkeypatc
         ).all()
     assert rows[0].ip_address == client_ip
     assert rows[1].ip_address == client_ip
+
+
+def test_http_auth_without_xff_uses_immediate_peer_for_identity_and_sessions(monkeypatch):
+    settings = _settings(env="test", server={"trusted_proxy_cidrs": ["127.0.0.1/32"]})
+    app = create_app(settings)
+    app.state.settings.env = Env.development
+    limiter_identities: list[tuple[str, str]] = []
+
+    def capture_check(self, scope, identity, rule):
+        limiter_identities.append((scope, identity))
+
+    monkeypatch.setattr(RedisRateLimiter, "check", capture_check)
+    email = f"direct-{uuid4()}@example.com"
+    immediate_peer = "127.0.0.1"
+    with TestClient(app) as client:
+        registered = client.post(
+            "/api/auth/register",
+            json={"email": email, "password": "correct horse battery"},
+        )
+        assert registered.status_code == 201
+        login = client.post(
+            "/api/auth/login",
+            json={"email": email, "password": "correct horse battery"},
+        )
+        assert login.status_code == 200
+        csrf = login.cookies.get("contentai_csrf")
+        assert csrf
+        changed = client.post(
+            "/api/auth/change-password",
+            json={"current_password": "correct horse battery", "new_password": "new password 123"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert changed.status_code == 200
+
+    assert limiter_identities == [
+        ("/api/auth/register", immediate_peer),
+        ("/api/auth/login", immediate_peer),
+    ]
+    with Session(get_engine(settings)) as session:
+        rows = session.exec(
+            select(AuthSession).order_by(AuthSession.created_at.desc())
+        ).all()
+    assert rows[0].ip_address == immediate_peer
+    assert rows[1].ip_address == immediate_peer
