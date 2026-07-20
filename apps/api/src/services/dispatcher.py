@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import socket
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -12,7 +11,11 @@ from db.session import get_engine
 from models.base import utcnow
 from models.chat import ExecutionOutbox
 from services.celery_app import celery_app
-from services.service_heartbeat import HEARTBEAT_INTERVAL_SECONDS, upsert_service_heartbeat
+from services.service_heartbeat import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    service_instance_id,
+    upsert_service_heartbeat,
+)
 from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
@@ -32,7 +35,7 @@ class OutboxDispatcher:
         self, settings: Settings | None = None, *, dispatcher_id: str | None = None
     ) -> None:
         self.settings = settings or get_settings()
-        self.dispatcher_id = dispatcher_id or f"{socket.gethostname()}-{id(self):x}"
+        self.dispatcher_id = dispatcher_id or service_instance_id()
         self._next_heartbeat_at = 0.0
 
     def dispatch_once(self, *, batch_size: int = 50) -> int:

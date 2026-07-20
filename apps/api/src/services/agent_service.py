@@ -20,7 +20,8 @@ class AgentService:
         self.runner = AgentRunner(self.runtime)
 
     def start(self) -> None:
-        self.runtime.get_checkpointer()
+        if self.settings.database.runtime_role == "agent-worker":
+            self.runtime.get_checkpointer()
 
     def close(self) -> None:
         self.runner.close()

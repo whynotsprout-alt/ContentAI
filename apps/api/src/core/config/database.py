@@ -20,17 +20,16 @@ RUNTIME_ROLES = {
 class PoolProfile:
     pool_size: int
     max_overflow: int
-    checkpoint_pool_size: int = 0
 
     @property
     def capacity(self) -> int:
-        return self.pool_size + self.max_overflow + self.checkpoint_pool_size
+        return self.pool_size + self.max_overflow
 
 
 ROLE_POOL_PROFILES: dict[str, PoolProfile] = {
-    "api": PoolProfile(pool_size=7, max_overflow=3, checkpoint_pool_size=2),
+    "api": PoolProfile(pool_size=7, max_overflow=3),
     "dispatcher": PoolProfile(pool_size=4, max_overflow=2),
-    "agent-worker": PoolProfile(pool_size=4, max_overflow=2, checkpoint_pool_size=2),
+    "agent-worker": PoolProfile(pool_size=4, max_overflow=2),
     "background-worker": PoolProfile(pool_size=3, max_overflow=1),
     "side-effect-worker": PoolProfile(pool_size=3, max_overflow=1),
     "beat": PoolProfile(pool_size=2, max_overflow=0),
@@ -60,6 +59,7 @@ class DatabaseSettings(BaseModel):
     background_worker_concurrency: int = 2
     side_effect_worker_replicas: int = 1
     side_effect_worker_concurrency: int = 1
+    checkpoint_pool_size: int = 2
     beat_replicas: int = 1
     migration_replicas: int = 1
     ops_replicas: int = 1
@@ -90,7 +90,11 @@ def calculate_connection_budget(settings: DatabaseSettings) -> ConnectionBudget:
         "ops": settings.ops_replicas,
     }
     by_role = {
-        role: pool_profile_for_role(role).capacity * replicas
+        role: (
+            pool_profile_for_role(role).capacity
+            + (settings.checkpoint_pool_size if role == "agent-worker" else 0)
+        )
+        * replicas
         for role, replicas in replica_counts.items()
     }
     safe_connection_limit = (settings.max_connections - settings.reserved_connections) * 0.70
@@ -117,6 +121,8 @@ def validate_connection_budget(settings: DatabaseSettings) -> None:
             "CONTENTAI_DATABASE__RESERVED_CONNECTIONS must be non-negative and below "
             "CONTENTAI_DATABASE__MAX_CONNECTIONS."
         )
+    if settings.checkpoint_pool_size < 1:
+        raise ValueError("CONTENTAI_DATABASE__CHECKPOINT_POOL_SIZE must be at least 1.")
     for field_name, value in settings.model_dump().items():
         if field_name.endswith(("_replicas", "_concurrency")) and value < 1:
             raise ValueError(f"CONTENTAI_DATABASE__{field_name.upper()} must be at least 1.")

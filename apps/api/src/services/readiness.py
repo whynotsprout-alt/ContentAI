@@ -5,7 +5,7 @@ from typing import Any
 
 from alembic.script import ScriptDirectory
 from core.alembic import build_alembic_config
-from core.config import Env, Settings
+from core.config import Settings
 from db.session import get_engine
 from models.base import utcnow
 from models.chat import AgentExecution, ExecutionOutbox
@@ -73,13 +73,7 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
                     "checkpoint_writes",
                 )
             }
-            if settings.env == Env.test:
-                services_ready, service_checks = True, {
-                    "dispatcher": True,
-                    "workers_missing": [],
-                }
-            else:
-                services_ready, service_checks = service_heartbeats_ready(session)
+            services_ready, service_checks = service_heartbeats_ready(session)
         checks["database"] = True
         checks["alembic_version"] = str(alembic_version)
         checks["database_revision_current"] = str(alembic_version) == checks["alembic_head"]
@@ -97,9 +91,8 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         checks["database_error"] = exc.__class__.__name__
 
-    if settings.env == Env.test:
+    if settings.env.value == "test":
         checks["redis"] = True
-        checks["queue"] = True
     else:
         try:
             client = Redis.from_url(
@@ -108,9 +101,9 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
                 socket_timeout=0.5,
             )
             checks["redis"] = bool(client.ping())
-            checks["queue"] = bool(checks["redis"] and services_ready)
         except Exception as exc:  # noqa: BLE001
             checks["redis_error"] = exc.__class__.__name__
+    checks["queue"] = bool(checks["redis"] and services_ready)
 
     ready = bool(
         checks["database"]

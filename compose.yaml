@@ -65,6 +65,8 @@ services:
 
   api:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__API_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: api
@@ -84,6 +86,8 @@ services:
 
   dispatcher:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__DISPATCHER_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: dispatcher
@@ -103,10 +107,12 @@ services:
 
   agent-worker:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__AGENT_WORKER_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: agent-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--hostname=agent@%h"]
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--concurrency=${CONTENTAI_AGENT__WORKER_CONCURRENCY:-4}", "--hostname=agent@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -123,10 +129,12 @@ services:
 
   background-worker:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__BACKGROUND_WORKER_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: background-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=2", "--hostname=background@%h"]
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=${CONTENTAI_DATABASE__BACKGROUND_WORKER_CONCURRENCY:-2}", "--hostname=background@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -143,10 +151,12 @@ services:
 
   side-effect-worker:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: side-effect-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-side-effects", "--concurrency=1", "--hostname=side-effects@%h"]
+    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-side-effects", "--concurrency=${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_CONCURRENCY:-1}", "--hostname=side-effects@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,6 +173,8 @@ services:
 
   beat:
     <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__BEAT_REPLICAS:-1}
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: beat

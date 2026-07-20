@@ -5,7 +5,26 @@ from core.config import Settings
 from db.session import get_engine
 from models.schemas import AgentVersionCreate
 from pydantic import ValidationError
+from services.service_heartbeat import REQUIRED_WORKER_QUEUES, upsert_service_heartbeat
 from sqlalchemy import inspect
+from sqlmodel import Session
+
+
+def _seed_required_service_heartbeats() -> None:
+    with Session(get_engine()) as session:
+        upsert_service_heartbeat(
+            session,
+            service_name="dispatcher",
+            instance_id="test:dispatcher",
+        )
+        for queue_name in REQUIRED_WORKER_QUEUES:
+            upsert_service_heartbeat(
+                session,
+                service_name="worker",
+                instance_id=f"test:{queue_name}",
+                queue_name=queue_name,
+            )
+        session.commit()
 
 
 def test_normalize_origins_splits_comma_separated_values_and_deduplicates():
@@ -19,6 +38,8 @@ def test_normalize_origins_splits_comma_separated_values_and_deduplicates():
 
 
 def test_ready_endpoint_reflects_lifespan_state():
+    _seed_required_service_heartbeats()
+
     with TestClient(app) as client:
         response = client.get("/api/ready")
 
@@ -49,6 +70,7 @@ def test_ready_endpoint_reflects_lifespan_state():
 
 
 def test_startup_registers_only_runtime_services():
+    _seed_required_service_heartbeats()
     created_app = create_app()
 
     with TestClient(created_app) as client:
@@ -70,6 +92,7 @@ def test_startup_registers_only_runtime_services():
 
 
 def test_ready_response_includes_request_id_header():
+    _seed_required_service_heartbeats()
     created_app = create_app()
 
     with TestClient(created_app) as client:
@@ -80,6 +103,7 @@ def test_ready_response_includes_request_id_header():
 
 
 def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
+    _seed_required_service_heartbeats()
     test_settings = Settings(
         env="test",
         database={"url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"},
