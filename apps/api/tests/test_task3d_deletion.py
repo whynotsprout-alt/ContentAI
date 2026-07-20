@@ -248,6 +248,8 @@ def test_session_delete_rollback_does_not_touch_checkpoint_or_business_rows(
 
     with Session(get_engine()) as session:
         assert session.get(ChatSession, "session-task3d-rollback") is not None
+        assert session.get(AgentInvocation, "invocation-task3d-rollback") is not None
+        assert session.get(AgentExecution, "execution-task3d-rollback") is not None
         assert session.exec(select(CheckpointDeletionOutbox)).all() == []
     assert checkpoint_calls == []
 
