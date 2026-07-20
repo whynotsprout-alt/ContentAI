@@ -14,6 +14,7 @@ x-app-environment: &app-environment
   CONTENTAI_ENV: ${CONTENTAI_ENV:-production}
   CONTENTAI_DATABASE__URL: ${CONTENTAI_DATABASE__URL:?Set CONTENTAI_DATABASE__URL in .env}
   CONTENTAI_REDIS__URL: ${CONTENTAI_REDIS__URL:-redis://redis:6379/0}
+  CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS: ${CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS:-30}
 
 x-app-service: &app-service
   build: *api-build

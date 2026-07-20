@@ -84,9 +84,8 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
         checks["outbox_unclaimed_published"] = int(unclaimed_published)
         oldest_age = max(0, int((utcnow() - oldest).total_seconds())) if oldest else 0
         checks["outbox_oldest_age_seconds"] = oldest_age
-        checks["outbox_within_threshold"] = (
-            int(pending) <= settings.server.outbox_readiness_threshold
-            and (not unclaimed_published or oldest_age <= settings.server.outbox_max_age_seconds)
+        checks["outbox_within_threshold"] = not unclaimed_published or (
+            oldest_age <= settings.server.outbox_max_age_seconds
         )
     except Exception as exc:  # noqa: BLE001
         checks["database_error"] = exc.__class__.__name__

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,14 @@ from db.session import (
     get_engine,
 )
 from models.base import utcnow
-from models.chat import ServiceHeartbeat
+from models.chat import (
+    AgentExecution,
+    AgentInvocation,
+    ChatSession,
+    ExecutionOutbox,
+    ServiceHeartbeat,
+)
+from models.enums import RunStatus
 from pydantic import ValidationError
 from services.agent_service import AgentService
 from services.dispatcher import OutboxDispatcher
@@ -22,7 +29,7 @@ from services.service_heartbeat import (
     service_instance_id,
     upsert_service_heartbeat,
 )
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, select
 
@@ -37,6 +44,70 @@ def _settings(**database: object) -> Settings:
     )
 
 
+def _seed_ready_service_heartbeats(settings: Settings) -> None:
+    with Session(get_engine(settings)) as session:
+        upsert_service_heartbeat(
+            session,
+            service_name="dispatcher",
+            instance_id="test:dispatcher",
+        )
+        for queue_name in REQUIRED_WORKER_QUEUES:
+            upsert_service_heartbeat(
+                session,
+                service_name="worker",
+                instance_id=f"test:{queue_name}",
+                queue_name=queue_name,
+            )
+        session.commit()
+
+
+def _seed_published_outbox(
+    settings: Settings,
+    *,
+    suffix: str,
+    published_at: datetime,
+    claimed_at: datetime | None = None,
+    status: str = "published",
+) -> None:
+    with Session(get_engine(settings)) as session:
+        chat = ChatSession(
+            id=f"session-readiness-{suffix}",
+            agent_id="default-agent",
+            agent_version_id="default-agent-v1",
+            user_id="local-user",
+        )
+        session.add(chat)
+        session.flush()
+        invocation = AgentInvocation(
+            id=f"invocation-readiness-{suffix}",
+            session_id=chat.id,
+            agent_id=chat.agent_id,
+            user_id=chat.user_id,
+        )
+        session.add(invocation)
+        session.flush()
+        execution = AgentExecution(
+            id=f"execution-readiness-{suffix}",
+            invocation_id=invocation.id,
+            session_id=chat.id,
+            agent_version_id=chat.agent_version_id,
+            claimed_at=claimed_at,
+            status=RunStatus.completed if claimed_at else RunStatus.pending,
+        )
+        session.add(execution)
+        session.flush()
+        session.add(
+            ExecutionOutbox(
+                id=f"outbox-readiness-{suffix}",
+                execution_id=execution.id,
+                kind="execute",
+                status=status,
+                published_at=published_at if status == "published" else None,
+            )
+        )
+        session.commit()
+
+
 def test_default_operational_topology_stays_within_the_single_host_budget() -> None:
     settings = _settings()
 
@@ -44,6 +115,16 @@ def test_default_operational_topology_stays_within_the_single_host_budget() -> N
 
     assert budget.total_connections <= 67
     assert budget.total_connections < budget.safe_connection_limit
+
+
+def test_default_outbox_readiness_age_is_thirty_seconds_and_declared_for_compose() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    env_example = (project_root / ".env.example").read_text(encoding="utf-8")
+    compose = (project_root / "compose.yaml").read_text(encoding="utf-8")
+
+    assert _settings().server.outbox_max_age_seconds == 30
+    assert "CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS=30" in env_example
+    assert "CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS" in compose
 
 
 def test_connection_budget_counts_prefork_children_and_checkpoint_pool() -> None:
@@ -261,6 +342,102 @@ def test_readiness_requires_service_heartbeats_in_the_test_environment() -> None
         "dispatcher": False,
         "workers_missing": list(REQUIRED_WORKER_QUEUES),
     }
+
+
+def test_readiness_recovers_after_all_required_heartbeats_are_restored() -> None:
+    settings = _settings()
+
+    ready, _ = check_api_readiness(settings)
+    assert not ready
+
+    _seed_ready_service_heartbeats(settings)
+    ready, checks = check_api_readiness(settings)
+
+    assert ready
+    assert checks["services"] == {"dispatcher": True, "workers_missing": []}
+
+
+def test_readiness_ignores_claimed_completed_published_outbox_history() -> None:
+    settings = _settings()
+    _seed_ready_service_heartbeats(settings)
+    _seed_published_outbox(
+        settings,
+        suffix="claimed-history",
+        published_at=utcnow() - timedelta(seconds=31),
+        claimed_at=utcnow() - timedelta(seconds=31),
+    )
+
+    ready, checks = check_api_readiness(settings)
+
+    assert ready
+    assert checks["outbox_unclaimed_published"] == 0
+    assert checks["outbox_within_threshold"]
+
+
+def test_readiness_rejects_unclaimed_published_outbox_older_than_thirty_seconds() -> None:
+    settings = _settings()
+    _seed_ready_service_heartbeats(settings)
+    _seed_published_outbox(
+        settings,
+        suffix="unclaimed-old",
+        published_at=utcnow() - timedelta(seconds=31),
+    )
+
+    ready, checks = check_api_readiness(settings)
+
+    assert not ready
+    assert checks["outbox_unclaimed_published"] == 1
+    assert checks["outbox_oldest_age_seconds"] > 30
+    assert not checks["outbox_within_threshold"]
+
+
+def test_readiness_ignores_pending_outbox_count_without_an_old_unclaimed_publish() -> None:
+    settings = _settings()
+    settings.server.outbox_readiness_threshold = 1
+    _seed_ready_service_heartbeats(settings)
+    _seed_published_outbox(
+        settings,
+        suffix="pending-one",
+        published_at=utcnow(),
+        status="pending",
+    )
+    _seed_published_outbox(
+        settings,
+        suffix="pending-two",
+        published_at=utcnow(),
+        status="pending",
+    )
+
+    ready, checks = check_api_readiness(settings)
+
+    assert ready
+    assert checks["outbox_pending"] == 2
+    assert checks["outbox_unclaimed_published"] == 0
+    assert checks["outbox_within_threshold"]
+
+
+def test_readiness_reports_each_missing_checkpoint_table() -> None:
+    settings = _settings()
+    _seed_ready_service_heartbeats(settings)
+    engine = get_engine(settings)
+
+    for table_name in (
+        "checkpoint_migrations",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+    ):
+        missing_name = f"{table_name}_readiness_missing"
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {table_name} RENAME TO {missing_name}"))
+        try:
+            ready, checks = check_api_readiness(settings)
+            assert not ready
+            assert not checks["checkpoint_tables"][table_name]
+            assert not checks["checkpoint"]
+        finally:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {missing_name} RENAME TO {table_name}"))
 
 
 def test_dispatcher_writes_a_service_heartbeat_even_when_outbox_is_empty() -> None:

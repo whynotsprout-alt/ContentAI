@@ -61,6 +61,7 @@ Compose and environment declaration changes.
 - `.env.example`
 - `compose.yaml`
 - `apps/api/src/core/config/database.py`
+- `apps/api/src/core/config/server.py`
 - `apps/api/src/agent/runtime/checkpoint.py`
 - `apps/api/src/services/agent_service.py`
 - `apps/api/src/services/dispatcher.py`
@@ -76,3 +77,45 @@ Compose and environment declaration changes.
   readiness now still depends on persisted service heartbeats.
 - Full backend pytest has not been observed to completion in this recovery due
   to the documented no-output timeout; this is the sole handoff concern.
+
+## Reviewer remediation
+
+The independent review of `d26082d` identified two readiness contract defects
+and missing integration coverage. This follow-up corrects all Critical and
+Important findings without expanding into the deferred migration replica Minor:
+
+- `ServerSettings.outbox_max_age_seconds` now defaults to 30 seconds, and the
+  same value is explicitly declared in `.env.example` and Compose.
+- Readiness no longer fails solely because pending outbox volume exceeds
+  `outbox_readiness_threshold`; it fails only when the oldest genuinely
+  unclaimed published execution exceeds the configured 30-second age.
+- Real PostgreSQL readiness tests now prove claimed/completed historical
+  published rows do not fail readiness, old unclaimed published rows do,
+  every required checkpoint table is checked independently, and restoring all
+  service heartbeats restores readiness.
+
+### Follow-up TDD evidence
+
+Before changing production code, the new focused suite produced the expected
+RED result:
+
+```text
+.venv\\Scripts\\python.exe -m pytest apps/api/tests/test_task3_operational_readiness.py -q
+3 failed, 17 passed
+```
+
+The failures were exactly the reviewer findings: `120 != 30`, a 31-second
+unclaimed published row still returned ready, and pending count still blocked
+readiness. After the minimal changes:
+
+```text
+.venv\\Scripts\\python.exe -m pytest apps/api/tests/test_task3_operational_readiness.py -q
+20 passed
+
+.venv\\Scripts\\python.exe -m pytest apps/api/tests/test_task3_operational_readiness.py apps/api/tests/test_main.py -q
+35 passed
+```
+
+Ruff, `compileall`, and Alembic check all passed again. A renewed complete
+`.venv\\Scripts\\python.exe -m pytest -q` attempt timed out after 360 seconds
+without output, so the existing full-suite verification limitation remains.
