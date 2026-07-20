@@ -391,6 +391,38 @@ def test_readiness_rejects_unclaimed_published_outbox_older_than_thirty_seconds(
     assert not checks["outbox_within_threshold"]
 
 
+def test_readiness_outbox_age_boundary_preserves_microseconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    now = utcnow()
+    _seed_ready_service_heartbeats(settings)
+    _seed_published_outbox(
+        settings,
+        suffix="age-boundary",
+        published_at=now - timedelta(seconds=30),
+    )
+    monkeypatch.setattr("services.readiness.utcnow", lambda: now)
+
+    ready, checks = check_api_readiness(settings)
+
+    assert ready
+    assert checks["outbox_oldest_age_seconds"] == 30
+
+    with Session(get_engine(settings)) as session:
+        outbox = session.get(ExecutionOutbox, "outbox-readiness-age-boundary")
+        assert outbox is not None
+        outbox.published_at = now - timedelta(seconds=30, microseconds=1)
+        session.add(outbox)
+        session.commit()
+
+    ready, checks = check_api_readiness(settings)
+
+    assert not ready
+    assert checks["outbox_oldest_age_seconds"] == 30
+    assert not checks["outbox_within_threshold"]
+
+
 def test_readiness_ignores_pending_outbox_count_without_an_old_unclaimed_publish() -> None:
     settings = _settings()
     settings.server.outbox_readiness_threshold = 1

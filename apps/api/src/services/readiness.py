@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -82,10 +83,10 @@ def check_api_readiness(settings: Settings) -> tuple[bool, dict[str, Any]]:
         checks["services"] = service_checks
         checks["outbox_pending"] = int(pending)
         checks["outbox_unclaimed_published"] = int(unclaimed_published)
-        oldest_age = max(0, int((utcnow() - oldest).total_seconds())) if oldest else 0
-        checks["outbox_oldest_age_seconds"] = oldest_age
+        oldest_age = utcnow() - oldest if oldest else timedelta()
+        checks["outbox_oldest_age_seconds"] = max(0, int(oldest_age.total_seconds()))
         checks["outbox_within_threshold"] = not unclaimed_published or (
-            oldest_age <= settings.server.outbox_max_age_seconds
+            oldest_age <= timedelta(seconds=settings.server.outbox_max_age_seconds)
         )
     except Exception as exc:  # noqa: BLE001
         checks["database_error"] = exc.__class__.__name__

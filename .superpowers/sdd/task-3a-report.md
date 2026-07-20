@@ -119,3 +119,26 @@ readiness. After the minimal changes:
 Ruff, `compileall`, and Alembic check all passed again. A renewed complete
 `.venv\\Scripts\\python.exe -m pytest -q` attempt timed out after 360 seconds
 without output, so the existing full-suite verification limitation remains.
+
+## Timestamp precision remediation
+
+Re-review found that readiness truncated the published outbox age with
+`int(total_seconds())` before comparing it to the 30-second threshold. That
+made an item aged 30 seconds plus one microsecond appear healthy. The new real
+database regression freezes only the readiness clock, verifies that exactly 30
+seconds remains healthy, then updates the same unclaimed published row to
+30 seconds plus one microsecond and requires readiness to fail while the
+display field remains integer `30`.
+
+```text
+.venv\\Scripts\\python.exe -m pytest apps/api/tests/test_task3_operational_readiness.py::test_readiness_outbox_age_boundary_preserves_microseconds -q
+RED: 1 failed (30s + 1us incorrectly returned ready)
+GREEN: 1 passed
+
+.venv\\Scripts\\python.exe -m pytest apps/api/tests/test_task3_operational_readiness.py apps/api/tests/test_main.py -q
+36 passed
+```
+
+Readiness now retains the `timedelta` for the strict inclusive comparison and
+only truncates the value used in the response's display field. Ruff,
+`compileall`, and Alembic check passed after this change.
