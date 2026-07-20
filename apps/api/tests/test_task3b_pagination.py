@@ -189,6 +189,21 @@ def test_cursor_is_signed_and_bound_to_timestamp_row_and_scope() -> None:
         assert newest == "ses_page_050"
 
 
+def test_non_ascii_cursor_payload_is_a_stable_invalid_cursor() -> None:
+    settings = _settings()
+    app = create_app(settings)
+    _seed_sessions(settings)
+    with TestClient(app) as client:
+        headers = _login(client, "local@example.com", "local password 123")
+        response = client.get(
+            "/api/chat/sessions",
+            params={"agent_id": "default-agent", "cursor": "v1.é.sig"},
+            headers=headers,
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "INVALID_CURSOR"
+
+
 def test_admin_lists_are_keyset_pages_and_old_parameters_are_removed() -> None:
     settings = _settings()
     app = create_app(settings)

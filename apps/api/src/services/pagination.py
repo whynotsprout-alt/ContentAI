@@ -45,9 +45,11 @@ class CursorSigner:
         if len(parts) != 3 or parts[0] != _CURSOR_VERSION:
             raise InvalidCursorError("Cursor signature is invalid")
         _, encoded, provided_signature = parts
-        expected_signature = _b64encode(
-            hmac.new(self._key, encoded.encode("ascii"), hashlib.sha256).digest()
-        )
+        try:
+            encoded_bytes = encoded.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise InvalidCursorError("Cursor signature is invalid") from exc
+        expected_signature = _b64encode(hmac.new(self._key, encoded_bytes, hashlib.sha256).digest())
         if not hmac.compare_digest(provided_signature, expected_signature):
             raise InvalidCursorError("Cursor signature is invalid")
         try:
