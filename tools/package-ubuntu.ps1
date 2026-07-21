@@ -1,10 +1,24 @@
-param([string]$Version = "0.4.3")
+param([string]$Version)
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$projectText = Get-Content -LiteralPath (Join-Path $root "pyproject.toml") -Raw
+$projectBlock = [regex]::Match($projectText, '(?ms)^\[project\]\s*(?<body>.*?)(?=^\[|\z)')
+$versionMatch = [regex]::Match($projectBlock.Groups['body'].Value, '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$')
+if (-not $versionMatch.Success) { throw "Canonical project version is missing from pyproject.toml" }
+$canonicalVersion = $versionMatch.Groups['version'].Value
+if ([string]::IsNullOrWhiteSpace($Version)) {
+  $Version = $canonicalVersion
+} elseif ($Version -ne $canonicalVersion) {
+  throw "Package version '$Version' does not match canonical version '$canonicalVersion'."
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+  throw "Package version is invalid: $Version"
+}
 $name = "contentai-$Version-ubuntu"
 $stage = Join-Path $root "dist/$name"
 $archive = Join-Path $root "dist/$name.tar.gz"
+$checksum = "$archive.sha256"
 
 $requiredPaths = @(
   "apps/api/src", "apps/web/src", "apps/web/index.html",
@@ -27,6 +41,7 @@ foreach ($relative in $requiredPaths) {
 
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+if (Test-Path -LiteralPath $checksum) { Remove-Item -LiteralPath $checksum -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 foreach ($relative in $requiredPaths) {
@@ -36,11 +51,22 @@ foreach ($relative in $requiredPaths) {
   Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
 }
 
+$commit = (& git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+  throw "Unable to resolve the release commit."
+}
+[ordered]@{ version = $Version; commit = $commit } |
+  ConvertTo-Json |
+  Set-Content -LiteralPath (Join-Path $stage "release-manifest.json") -Encoding UTF8
+
 Get-ChildItem -Path $stage -Recurse -Directory | Where-Object {
   $_.Name -in @("node_modules", "dist", "__pycache__", ".pytest_cache", ".ruff_cache")
 } | Sort-Object FullName -Descending | Remove-Item -Recurse -Force
 
 tar -C (Split-Path $stage -Parent) -czf $archive $name
 if ($LASTEXITCODE -ne 0) { throw "tar 打包失败" }
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+"$hash  $name.tar.gz" | Set-Content -LiteralPath $checksum -Encoding ASCII -NoNewline
 Write-Output $archive
-Get-FileHash -Algorithm SHA256 -LiteralPath $archive | Select-Object -ExpandProperty Hash
+Write-Output $checksum
+Write-Output $hash

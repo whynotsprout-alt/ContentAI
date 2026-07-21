@@ -12,6 +12,7 @@ import {
   ServerCog
 } from '@lucide/vue';
 import AdminShell from '../components/AdminShell.vue';
+import { createModelConfigRequestGuard } from './modelConfigRequestGuard';
 import {
   ApiError,
   adminApi,
@@ -33,6 +34,15 @@ const initialLoadFailed = ref(false);
 const versionSyncFailed = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
+let applyingServerState = false;
+
+const readDraft = () => ({
+  baseUrl: baseUrl.value,
+  apiKey: apiKey.value,
+  modelName: modelName.value
+});
+const probeGuard = createModelConfigRequestGuard(readDraft);
+const saveGuard = createModelConfigRequestGuard(readDraft);
 
 const configured = computed(() => Boolean(active.value?.configured));
 const expectedVersion = computed(() => active.value?.version ?? 0);
@@ -114,46 +124,64 @@ async function retryVersionSync() {
 
 async function runProbe(includeModel: boolean) {
   if (!canProbe.value) return;
+  const requestPayload = payload(includeModel);
+  const request = probeGuard.begin();
   probing.value = true;
   errorMessage.value = '';
   successMessage.value = '';
   try {
-    const result = await adminApi.probeModelConfig(payload(includeModel));
-    models.value = result.models;
-    modelsTruncated.value = result.models_truncated;
-    if (!includeModel && !modelName.value && result.models.length) modelName.value = result.models[0];
-    latencyMs.value = result.latency_ms;
-    successMessage.value = includeModel
-      ? result.model_validated
-        ? `连接与模型验证成功，耗时约 ${result.latency_ms} ms。`
-        : `连接成功，但当前模型尚未完成推理验证，耗时约 ${result.latency_ms} ms。`
-      : result.models.length
-        ? `已刷新 ${result.models.length} 个可用模型。`
-        : '连接成功，但服务没有返回模型候选；仍可填写自定义模型 ID。';
+    const result = await adminApi.probeModelConfig(requestPayload);
+    if (!probeGuard.isCurrent(request)) return;
+    applyingServerState = true;
+    try {
+      models.value = result.models;
+      modelsTruncated.value = result.models_truncated;
+      if (!includeModel && !modelName.value && result.models.length) modelName.value = result.models[0];
+      latencyMs.value = result.latency_ms;
+      successMessage.value = includeModel
+        ? result.model_validated
+          ? `连接与模型验证成功，耗时约 ${result.latency_ms} ms。`
+          : `连接成功，但当前模型尚未完成推理验证，耗时约 ${result.latency_ms} ms。`
+        : result.models.length
+          ? `已刷新 ${result.models.length} 个可用模型。`
+          : '连接成功，但服务没有返回模型候选；仍可填写自定义模型 ID。';
+    } finally {
+      applyingServerState = false;
+    }
   } catch (value) {
-    errorMessage.value = formatError(value);
+    if (probeGuard.isCurrent(request)) errorMessage.value = formatError(value);
   } finally {
-    probing.value = false;
+    if (probeGuard.isLatest(request)) probing.value = false;
   }
 }
 
 async function saveConfiguration() {
   if (!canSave.value) return;
+  const requestPayload = {
+    ...payload(true),
+    model_name: modelName.value.trim(),
+    expected_version: expectedVersion.value
+  };
+  const request = saveGuard.begin();
   saving.value = true;
   errorMessage.value = '';
   successMessage.value = '';
   try {
-    active.value = await adminApi.updateModelConfig({
-      ...payload(true),
-      model_name: modelName.value.trim(),
-      expected_version: expectedVersion.value
-    });
-    baseUrl.value = active.value.base_url ?? baseUrl.value.trim();
-    modelName.value = active.value.model_name ?? modelName.value.trim();
-    apiKey.value = '';
-    models.value = Array.from(new Set([...models.value, modelName.value.trim()])).sort();
-    successMessage.value = `版本 v${active.value.version} 已验证并启用，仅对新 execution 生效。`;
+    const result = await adminApi.updateModelConfig(requestPayload);
+    active.value = result;
+    if (!saveGuard.isCurrent(request)) return;
+    applyingServerState = true;
+    try {
+      baseUrl.value = result.base_url ?? requestPayload.base_url;
+      modelName.value = result.model_name ?? requestPayload.model_name;
+      apiKey.value = '';
+      models.value = Array.from(new Set([...models.value, modelName.value])).sort();
+      successMessage.value = `版本 v${result.version} 已验证并启用，仅对新 execution 生效。`;
+    } finally {
+      applyingServerState = false;
+    }
   } catch (error) {
+    if (!saveGuard.isCurrent(request)) return;
     if (error instanceof ApiError && error.code === 'MODEL_CONFIG_CHANGED') {
       try {
         await loadConfiguration({ preserveForm: true, background: true, propagate: true });
@@ -171,6 +199,10 @@ async function saveConfiguration() {
 }
 
 watch([baseUrl, apiKey], () => {
+  if (applyingServerState) return;
+  probeGuard.invalidate();
+  saveGuard.invalidate();
+  probing.value = false;
   models.value = [];
   modelsTruncated.value = false;
   latencyMs.value = null;
@@ -178,6 +210,10 @@ watch([baseUrl, apiKey], () => {
 }, { flush: 'sync' });
 
 watch(modelName, () => {
+  if (applyingServerState) return;
+  probeGuard.invalidate();
+  saveGuard.invalidate();
+  probing.value = false;
   latencyMs.value = null;
   successMessage.value = '';
 }, { flush: 'sync' });

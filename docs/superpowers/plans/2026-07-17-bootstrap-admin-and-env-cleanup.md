@@ -222,4 +222,3 @@ Expected: `api`、`web`、Redis、PostgreSQL 与 worker 服务健康；默认管
 git add .env.example docs/DEVELOPMENT.md docs/OPERATIONS.md apps/api/tests/test_auth_admin.py
 git commit -m "docs: document bootstrap administrator setup"
 ~~~
-

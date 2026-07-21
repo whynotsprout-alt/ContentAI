@@ -4,6 +4,34 @@ import { readFile } from 'node:fs/promises';
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
 describe('admin model configuration', () => {
+  it('accepts only the newest response for the current normalized draft', async () => {
+    const { createModelConfigRequestGuard } = await import('../src/views/modelConfigRequestGuard.ts');
+    let draft = { baseUrl: ' https://a.example/v1/ ', apiKey: 'key-a', modelName: ' model-a ' };
+    const guard = createModelConfigRequestGuard(() => draft);
+    const applied = [];
+    let resolveA;
+    let resolveB;
+    const responseA = new Promise((resolve) => { resolveA = resolve; });
+    const responseB = new Promise((resolve) => { resolveB = resolve; });
+
+    const run = async (response) => {
+      const ticket = guard.begin();
+      const value = await response;
+      if (guard.isCurrent(ticket)) applied.push(value);
+    };
+
+    const pendingA = run(responseA);
+    draft = { baseUrl: 'https://b.example/v1', apiKey: 'key-b', modelName: 'model-b' };
+    guard.invalidate();
+    const pendingB = run(responseB);
+    resolveB('new-response');
+    await pendingB;
+    resolveA('stale-response');
+    await pendingA;
+
+    expect(applied).toEqual(['new-response']);
+  });
+
   it('registers an admin-only models route and shared admin shell', async () => {
     const [router, users, models] = await Promise.all([
       read('../src/router.ts'),
@@ -47,6 +75,21 @@ describe('admin model configuration', () => {
     expect(models).toContain('model_validated');
     expect(models).toContain('aria-live="polite"');
     expect(models).toContain(':aria-busy="loading || probing || saving"');
+    expect(models).toContain('probeGuard.isCurrent');
+    expect(models).toContain('saveGuard.isCurrent');
+  });
+
+  it('provides a keyboard skip target and route focus management in the shared shell', async () => {
+    const [shell, styles] = await Promise.all([
+      read('../src/components/AdminShell.vue'),
+      read('../src/styles/base.css')
+    ]);
+
+    expect(shell).toContain('href="#admin-main-content"');
+    expect(shell).toContain('id="admin-main-content"');
+    expect(shell).toContain('tabindex="-1"');
+    expect(shell).toContain('preventScroll: true');
+    expect(styles).toContain('.skip-link:focus');
   });
 
   it('keeps the shared users page aligned with cursor and audit APIs', async () => {

@@ -4,13 +4,13 @@
 
 生产环境面向受支持的 Ubuntu LTS、Docker Engine 与 Docker Compose v2。V0.5.0 只支持全新空数据库安装，不支持任何旧数据库或旧 Alembic revision 原地升级。部署时必须创建新的 PostgreSQL 数据库或数据卷；迁移服务不会自动删除旧数据库。
 
-生产 `compose.yaml` 启动九个服务：PostgreSQL、Redis、migration、API、dispatcher、agent worker、background worker、beat 和 Web。只有 Web 通过 `127.0.0.1:${WEB_PORT}` 暴露给宿主机，API、PostgreSQL 和 Redis不发布生产端口。TLS 由宿主机 Nginx/Caddy 或云负载均衡终止。
+生产 `compose.yaml` 启动十个服务：PostgreSQL、Redis、migration、API、dispatcher、三个 Worker（`agent-worker`、`background-worker`、`side-effect-worker`）、beat 和 Web。只有 Web 通过 `127.0.0.1:${WEB_PORT}` 暴露给宿主机，API、PostgreSQL 和 Redis不发布生产端口。TLS 由宿主机 Nginx/Caddy 或云负载均衡终止。
 
 ## 首次部署
 
 ```bash
-tar -xzf contentai-0.4.3-ubuntu.tar.gz
-cd contentai-0.4.3-ubuntu
+tar -xzf contentai-0.5.0-rc.1-ubuntu.tar.gz
+cd contentai-0.5.0-rc.1-ubuntu
 cp .env.example .env
 chmod 600 .env
 # 编辑 .env：数据库密码、搜索密钥与默认管理员初始密码
@@ -44,7 +44,7 @@ curl --fail http://127.0.0.1:${WEB_PORT:-5180}/api/ready
 
 ## 日志
 
-应用不创建日志目录或文件，全部写入 stdout/stderr。九个服务统一使用 Docker `json-file` 驱动并按 `LOG_MAX_SIZE`、`LOG_MAX_FILES` 滚动：
+应用不创建日志目录或文件，全部写入 stdout/stderr。十个服务统一使用 Docker `json-file` 驱动并按 `LOG_MAX_SIZE`、`LOG_MAX_FILES` 滚动；三个 Worker 中的 `side-effect-worker` 独立消费副作用队列，必须单独纳入健康、日志与告警：
 
 ```bash
 docker compose logs --tail 200 api
@@ -75,7 +75,7 @@ bash infra/ubuntu/upgrade.sh
 在 Windows 开发机根目录执行：
 
 ```powershell
-tools/package-ubuntu.ps1 -Version 0.4.3
+tools/package-ubuntu.ps1
 ```
 
 输出为 `dist/contentai-<version>-ubuntu.tar.gz`，只包含运行源码、Compose、镜像配置、环境模板、单一迁移、Ubuntu 脚本、锁定依赖和必要文档；不包含 `.env`、测试、缓存、依赖目录、日志或开发产物。

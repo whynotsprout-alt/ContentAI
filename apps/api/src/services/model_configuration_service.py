@@ -13,6 +13,7 @@ from services.model_configuration_repository import (
     ModelConfigurationChanged,
     ModelConfigurationRepository,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
 
 
@@ -23,6 +24,11 @@ class ModelCredentialsRequired(RuntimeError):
 
 class ModelNotConfigured(RuntimeError):
     code = "MODEL_NOT_CONFIGURED"
+    status_code = 503
+
+
+class ModelConfigurationPersistenceFailed(RuntimeError):
+    code = "MODEL_CONFIG_PERSISTENCE_FAILED"
     status_code = 503
 
 
@@ -116,18 +122,24 @@ class ModelConfigurationService:
             fingerprint = active.api_key_fingerprint
             hint = active.api_key_hint
 
-        return self._repository.replace_active(
-            session,
-            expected_version=expected_version,
-            actor_user_id=actor_user_id,
-            request_id=request_id,
-            base_url=result.base_url,
-            model_name=model_name,
-            api_key_ciphertext=ciphertext,
-            api_key_fingerprint=fingerprint,
-            api_key_hint=hint,
-            validated_at=utcnow(),
-        )
+        try:
+            return self._repository.replace_active(
+                session,
+                expected_version=expected_version,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+                base_url=result.base_url,
+                model_name=model_name,
+                api_key_ciphertext=ciphertext,
+                api_key_fingerprint=fingerprint,
+                api_key_hint=hint,
+                validated_at=utcnow(),
+            )
+        except SQLAlchemyError:
+            session.rollback()
+            raise ModelConfigurationPersistenceFailed(
+                "The model configuration could not be saved."
+            ) from None
 
     def _resolve_plaintext_key(
         self,

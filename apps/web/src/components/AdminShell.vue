@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft, Boxes, LogOut, ShieldCheck, Users } from '@lucide/vue';
+import { nextTick, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 
@@ -11,6 +12,15 @@ defineProps<{
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+const mainContent = ref<HTMLElement | null>(null);
+
+async function focusAdminContent() {
+  await nextTick();
+  mainContent.value?.focus({ preventScroll: true });
+}
+
+onMounted(() => void focusAdminContent());
+watch(() => route.fullPath, () => void focusAdminContent(), { flush: 'post' });
 
 async function logout() {
   await auth.logout();
@@ -20,6 +30,7 @@ async function logout() {
 
 <template>
   <main class="admin-shell" aria-labelledby="admin-page-title">
+    <a class="skip-link" href="#admin-main-content" @click="focusAdminContent">跳到管理内容</a>
     <header class="admin-topbar liquid-glass">
       <div class="admin-brand">
         <span class="brand-symbol"><ShieldCheck :size="18" /></span>
@@ -39,7 +50,7 @@ async function logout() {
       </nav>
     </header>
 
-    <section class="admin-content">
+    <section id="admin-main-content" ref="mainContent" class="admin-content" tabindex="-1">
       <header class="admin-heading">
         <div>
           <span class="section-kicker">ADMINISTRATION</span>

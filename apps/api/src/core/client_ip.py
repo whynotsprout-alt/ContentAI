@@ -44,4 +44,3 @@ def resolve_client_ip(request: Any, settings: Any) -> str:
         if not any(address in network for network in networks):
             return str(address)
     return peer
-

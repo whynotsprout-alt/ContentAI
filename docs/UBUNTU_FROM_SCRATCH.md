@@ -1,4 +1,4 @@
-# Ubuntu 部署指南（ContentAI v0.4.3）
+# Ubuntu 部署指南（ContentAI V0.5.0-rc.1）
 
 本文用于在全新的 Ubuntu 22.04 或 24.04 LTS 服务器上部署 ContentAI。生产环境使用 Docker Compose，应用只在本机回环地址暴露 Web 服务，由 Nginx 或 Caddy 负责 HTTPS。
 
@@ -55,22 +55,23 @@ docker compose version
 
 ~~~bash
 cd /tmp
-curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.4.3/contentai-0.4.3-ubuntu.tar.gz
+curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.5.0-rc.1/contentai-0.5.0-rc.1-ubuntu.tar.gz
+curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.5.0-rc.1/contentai-0.5.0-rc.1-ubuntu.tar.gz.sha256
 
-echo '22CCDF446D3AB3AC563E798CDECDAECEA07E42EFCAB965C9965DD6FF67B8F2A8  contentai-0.4.3-ubuntu.tar.gz' | sha256sum -c -
+sha256sum -c contentai-0.5.0-rc.1-ubuntu.tar.gz.sha256
 
 sudo install -d -m 0755 /opt/contentai
-sudo tar -xzf contentai-0.4.3-ubuntu.tar.gz -C /opt/contentai
-sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.4.3-ubuntu
-cd /opt/contentai/contentai-0.4.3-ubuntu
+sudo tar -xzf contentai-0.5.0-rc.1-ubuntu.tar.gz -C /opt/contentai
+sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.5.0-rc.1-ubuntu
+cd /opt/contentai/contentai-0.5.0-rc.1-ubuntu
 ~~~
 
 也可从源码安装：
 
 ~~~bash
-git clone --branch codex/release-v0.4.3 --single-branch \
-  https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.4.3
-cd /opt/contentai/contentai-0.4.3
+git clone --branch V0.5.0-rc.1 --single-branch \
+  https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.5.0-rc.1
+cd /opt/contentai/contentai-0.5.0-rc.1
 ~~~
 
 ## 4. 配置生产环境
@@ -149,7 +150,7 @@ sudo certbot --nginx -d content.example.com
 ## 6. 启动与验证
 
 ~~~bash
-cd /opt/contentai/contentai-0.4.3-ubuntu
+cd /opt/contentai/contentai-0.5.0-rc.1-ubuntu
 docker compose --env-file .env config --quiet
 bash infra/ubuntu/deploy.sh
 bash infra/ubuntu/health.sh
@@ -178,7 +179,7 @@ docker compose --env-file .env logs --tail 200 api
 docker compose --env-file .env logs --follow agent-worker
 
 # 调度或后台处理问题
-docker compose --env-file .env logs --tail 200 dispatcher background-worker
+docker compose --env-file .env logs --tail 200 dispatcher background-worker side-effect-worker
 ~~~
 
 深度搜索的工具调用错误优先查看 `agent-worker`。若浏览器只显示请求失败或 SSE 中断，再查看 `api` 日志。

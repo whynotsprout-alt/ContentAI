@@ -30,6 +30,7 @@ def build_engine(settings: Settings) -> Engine:
     options = engine_options_for_role(settings.database)
     return create_engine(
         settings.database.url,
+        hide_parameters=True,
         pool_timeout=settings.database.pool_timeout,
         pool_pre_ping=True,
         pool_recycle=settings.database.pool_recycle_seconds,

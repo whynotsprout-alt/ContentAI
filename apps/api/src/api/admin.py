@@ -28,7 +28,10 @@ from services.auth_service import AuthServiceError
 from services.errors import InvalidCursorError, ResponseItemTooLargeError
 from services.model_config_network import ModelProbeError
 from services.model_configuration_repository import ModelConfigurationChanged
-from services.model_configuration_service import ModelCredentialsRequired
+from services.model_configuration_service import (
+    ModelConfigurationPersistenceFailed,
+    ModelCredentialsRequired,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -41,6 +44,7 @@ _MODEL_ERROR_STATUS = {
     "MODEL_NOT_FOUND": 422,
     "MODEL_PROVIDER_UNREACHABLE": 502,
     "MODEL_PROBE_FAILED": 502,
+    "MODEL_CONFIG_PERSISTENCE_FAILED": 503,
 }
 
 _MODEL_ERROR_MESSAGES = {
@@ -52,6 +56,7 @@ _MODEL_ERROR_MESSAGES = {
     "MODEL_NOT_FOUND": "The requested model was not found.",
     "MODEL_PROVIDER_UNREACHABLE": "The model provider could not be reached.",
     "MODEL_PROBE_FAILED": "The model provider probe failed.",
+    "MODEL_CONFIG_PERSISTENCE_FAILED": "The model configuration could not be saved.",
 }
 
 
@@ -151,7 +156,12 @@ def update_model_configuration(
             model_name=payload.model_name,
             expected_version=payload.expected_version,
         )
-    except (ModelProbeError, ModelCredentialsRequired, ModelConfigurationChanged) as exc:
+    except (
+        ModelProbeError,
+        ModelCredentialsRequired,
+        ModelConfigurationChanged,
+        ModelConfigurationPersistenceFailed,
+    ) as exc:
         session.rollback()
         return _model_error_response(exc)
     return _model_configuration_response(service.get_active(session))

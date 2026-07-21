@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from collections.abc import Sequence
 from importlib import import_module
@@ -35,6 +36,16 @@ class ClosingMockTransport(httpx.MockTransport):
     def close(self) -> None:
         self.close_calls += 1
         super().close()
+
+
+class TrackingStream(httpx.SyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        yield self.content
 
 
 @pytest.mark.parametrize(
@@ -320,6 +331,46 @@ def test_probe_rejects_oversized_response_without_exposing_it() -> None:
         prober.probe("https://api.example.test/v1", "test-secret-key")
 
     assert "ssss" not in str(exc_info.value)
+
+
+def test_probe_requests_identity_and_rejects_compression_before_decoding() -> None:
+    network = _network_module()
+    compressed = gzip.compress(b"x" * (network.MAX_PROBE_RESPONSE_BYTES * 8))
+    stream = TrackingStream(compressed)
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=stream,
+        )
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=Resolver(["93.184.216.34"], ["93.184.216.34"]),
+        transport=httpx.MockTransport(handle),
+    )
+
+    with pytest.raises(network.ModelProbeFailed):
+        prober.probe("https://api.example.test/v1", "test-secret-key")
+
+    assert requests[0].headers["Accept-Encoding"] == "identity"
+    assert stream.iterations == 0
+
+
+def test_probe_rejects_error_status_without_reading_response_body() -> None:
+    network = _network_module()
+    stream = TrackingStream(b"x" * (network.MAX_PROBE_RESPONSE_BYTES + 1))
+    prober = network.OpenAICompatibleProbe(
+        resolver=Resolver(["93.184.216.34"], ["93.184.216.34"]),
+        transport=httpx.MockTransport(lambda request: httpx.Response(401, stream=stream)),
+    )
+
+    with pytest.raises(network.ModelAuthenticationFailed):
+        prober.probe("https://api.example.test/v1", "test-secret-key")
+
+    assert stream.iterations == 0
 
 
 def test_probe_rejects_malformed_successful_completion() -> None:

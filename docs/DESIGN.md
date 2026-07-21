@@ -24,6 +24,8 @@ flowchart LR
   WORKER --> CP
   WORKER --> REDIS
   BG["Background Worker"] --> PG
+  SIDE["Side-effect Worker"] --> PG
+  SIDE --> REDIS
   BEAT["Beat / Watchdog"] --> PG
 ```
 
@@ -31,6 +33,7 @@ flowchart LR
 - Dispatcher 只发布已提交的 outbox；发布失败的记录继续保持待投递状态。
 - Agent Worker 领取 execution 或恢复请求，刷新租约，执行 LangGraph，并持久化 Assistant 消息。
 - Background Worker 执行标题、累积摘要和长期记忆后处理。
+- Side-effect Worker 独立消费副作用队列并持久化幂等回执。
 - Beat/Watchdog 仅处理已经发布但超时未领取、租约失效或后处理超时的任务；未发布 outbox 不会被提前判失败。
 
 ## 发送与恢复
@@ -80,7 +83,7 @@ flowchart LR
 
 - 删除空闲 session 时，业务关联行主要由数据库外键级联硬删除；事务提交后单独删除对应 LangGraph thread。
 - 保留的 `AdminAuditLog` 墓碑仅含不可逆目标哈希和操作元数据。
-- 注册用户直接为活跃状态；历史 `pending_verification` 用户在密码正确登录后补写验证时间并规范化为活跃状态。旧验证与重发接口保留为无副作用的 `410 Gone` 兼容响应，系统不再创建验证邮件或验证令牌。
+- 注册用户直接为活跃状态；历史 `pending_verification` 用户登录时返回 `403` 且保持原状态。已移除的验证与重发路由返回 `404`，系统不再创建验证邮件或验证令牌。
 - 禁用用户时使历史密码重置令牌和登录会话失效，取消排队/待确认任务，并为运行中任务设置取消请求；Worker 在安全边界终止。
 - LLM 限流使用稳定的认证用户 scope，并叠加可配置日预算。邮箱验证和邮件密码重置当前均已停用。
 - 最后一个管理员的降权或禁用操作使用 PostgreSQL 事务级 advisory lock 串行化。
@@ -94,7 +97,7 @@ flowchart LR
 - readiness 检查数据库 revision、checkpoint schema、Redis、队列连接及 outbox 最老积压时间。
 - Celery Beat 调度文件位于运行目录 `/tmp`，不写入源码目录。
 - Python 容器只安装构建出的 wheel，并以非 root 用户运行；提示词和迁移均随 wheel 打包。
-- 应用日志只写 stdout/stderr，Compose 对九个容器统一配置 `json-file` 滚动策略。
+- 应用日志只写 stdout/stderr。Compose 共十个服务，包含 `agent-worker`、`background-worker`、`side-effect-worker` 三个 Worker，并统一配置 `json-file` 滚动策略。
 
 ### 模型配置与密钥边界
 

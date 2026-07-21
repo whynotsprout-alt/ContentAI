@@ -228,7 +228,11 @@ class OpenAICompatibleProbe:
     def probe(self, base_url: str, api_key: str, model_name: str | None = None) -> ModelProbeResult:
         started_at = monotonic()
         normalized_url = normalize_model_base_url(base_url, self._resolver)
-        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
         models_payload = self._request_json(
             "GET",
             f"{normalized_url}/models",
@@ -294,19 +298,28 @@ class OpenAICompatibleProbe:
                     extensions=extensions,
                 ) as response:
                     status_code = response.status_code
+                    if 300 <= status_code < 400:
+                        raise ModelEndpointForbidden(
+                            "Model provider redirects are not permitted."
+                        )
+                    if status_code in {401, 403}:
+                        raise ModelAuthenticationFailed(
+                            "The model provider rejected the credentials."
+                        )
+                    if model_request and status_code == 404:
+                        raise ModelNotFound("The requested model was not found.")
+                    if status_code < 200 or status_code >= 300:
+                        raise ModelProbeFailed("The model provider probe failed.")
+                    content_encoding = response.headers.get("Content-Encoding", "").strip()
+                    if content_encoding and content_encoding.lower() != "identity":
+                        raise ModelProbeFailed(
+                            "The model provider returned an unsupported response encoding."
+                        )
                     body = _read_bounded_body(response)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.HTTPError):
             unreachable = True
         if unreachable:
             raise ModelProviderUnreachable("The model provider could not be reached.")
-        if 300 <= status_code < 400:
-            raise ModelEndpointForbidden("Model provider redirects are not permitted.")
-        if status_code in {401, 403}:
-            raise ModelAuthenticationFailed("The model provider rejected the credentials.")
-        if model_request and status_code == 404:
-            raise ModelNotFound("The requested model was not found.")
-        if status_code < 200 or status_code >= 300:
-            raise ModelProbeFailed("The model provider probe failed.")
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -349,11 +362,15 @@ class OpenAICompatibleProbe:
 
 
 def _read_bounded_body(response: httpx.Response) -> bytes:
-    body = bytearray()
-    for chunk in response.iter_bytes():
-        body.extend(chunk)
-        if len(body) > MAX_PROBE_RESPONSE_BYTES:
+    if response.is_stream_consumed:
+        if len(response.content) > MAX_PROBE_RESPONSE_BYTES:
             raise ModelProbeFailed("The model provider response exceeded the allowed size.")
+        return response.content
+    body = bytearray()
+    for chunk in response.iter_raw():
+        if len(chunk) > MAX_PROBE_RESPONSE_BYTES - len(body):
+            raise ModelProbeFailed("The model provider response exceeded the allowed size.")
+        body.extend(chunk)
     return bytes(body)
 
 

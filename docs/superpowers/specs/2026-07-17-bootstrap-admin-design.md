@@ -56,4 +56,3 @@ AuthService.bootstrap_default_admin(session)
 - 缺失配对的默认管理员配置会被设置验证拒绝。
 - 现有注册 bootstrap 管理员行为不回退。
 - 执行认证、应用生命周期、API 合约与配置相关测试，之后重建 Compose 服务并检查健康状态。
-

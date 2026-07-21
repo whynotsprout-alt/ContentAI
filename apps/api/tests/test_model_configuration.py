@@ -3,14 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 from importlib import import_module
+from types import SimpleNamespace
 
 import pytest
 from core.config import Settings, get_settings
-from db.session import get_engine
+from db.session import build_engine, get_engine
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, TEST_MODEL_CONFIG_API_KEY
 from pydantic import ValidationError
 from sqlalchemy import func, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, StatementError
 from sqlmodel import Session, select
 
 
@@ -171,6 +172,62 @@ def test_default_active_model_configuration_fixture_uses_consistent_secret_mater
     assert protector.decrypt(configuration.api_key_ciphertext) == TEST_MODEL_CONFIG_API_KEY
     assert configuration.api_key_fingerprint == protector.fingerprint(TEST_MODEL_CONFIG_API_KEY)
     assert configuration.api_key_hint == protector.hint(TEST_MODEL_CONFIG_API_KEY)
+
+
+def test_application_engine_hides_bound_parameters_in_database_errors() -> None:
+    engine = build_engine(get_settings())
+    try:
+        assert engine.hide_parameters is True
+    finally:
+        engine.dispose()
+
+
+def test_model_configuration_persistence_failure_rolls_back_and_hides_parameters() -> None:
+    service_module = import_module("services.model_configuration_service")
+    ciphertext_marker = "gAAAA-test-ciphertext-must-not-escape"
+
+    class Repository:
+        @staticmethod
+        def get_active(_session):
+            return None
+
+        @staticmethod
+        def replace_active(_session, **_kwargs):
+            raise StatementError(
+                "write failed",
+                "INSERT INTO modelconfiguration VALUES (?)",
+                (ciphertext_marker,),
+                RuntimeError("database unavailable"),
+            )
+
+    class Prober:
+        @staticmethod
+        def probe(base_url, _api_key, _model_name):
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    session = SimpleNamespace(rollback_calls=0)
+    session.rollback = lambda: setattr(session, "rollback_calls", session.rollback_calls + 1)
+    service = service_module.ModelConfigurationService(
+        get_settings(),
+        repository=Repository(),
+        prober=Prober(),
+    )
+
+    with pytest.raises(service_module.ModelConfigurationPersistenceFailed) as exc_info:
+        service.update(
+            session,
+            actor_user_id="local-user",
+            request_id="request-test",
+            base_url="https://models.example.test/v1",
+            api_key="test-only-key",
+            model_name="test-model",
+            expected_version=0,
+        )
+
+    assert session.rollback_calls == 1
+    assert ciphertext_marker not in str(exc_info.value)
+    assert ciphertext_marker not in repr(exc_info.value)
+    assert exc_info.value.__cause__ is None
 
 
 def test_model_configuration_serialization_and_repr_exclude_secret_material() -> None:
