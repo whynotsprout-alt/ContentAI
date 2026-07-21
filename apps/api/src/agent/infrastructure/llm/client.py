@@ -89,6 +89,7 @@ class LangChainChatClient:
         tools: list[Any] | None = None,
         timeout_seconds: float = 240.0,
         max_retries: int = 2,
+        disable_streaming: bool = False,
     ) -> Any:
         api_key = secret_value(self.settings.search.traffic_relay_api_key)
         model_kwargs = {
@@ -99,7 +100,7 @@ class LangChainChatClient:
             "max_tokens_to_sample": max_tokens,
             "timeout": max(0.1, float(timeout_seconds)),
             "max_retries": max(0, int(max_retries)),
-            "disable_streaming": False,
+            "disable_streaming": disable_streaming,
         }
         if model != "claude-opus-4-8":
             model_kwargs["temperature"] = temperature
@@ -123,6 +124,7 @@ class LangChainChatClient:
         schema: type[Any],
         timeout_seconds: float = 240.0,
         max_retries: int = 2,
+        disable_streaming: bool = False,
     ) -> Any:
         chat_model = self.build_chat_model(
             model=model,
@@ -130,5 +132,6 @@ class LangChainChatClient:
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
+            disable_streaming=disable_streaming,
         )
         return chat_model.with_structured_output(schema)

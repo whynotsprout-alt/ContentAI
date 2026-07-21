@@ -7,6 +7,7 @@ from typing import Any
 
 _HTML_FRAGMENT_RE = re.compile(r"<[^>]{1,500}>")
 _MAX_HTML_UNESCAPE_PASSES = 4
+_MAX_EXTERNAL_INPUT_CHARS = 12_000
 _INSTRUCTION_INJECTION_PATTERNS = (
     re.compile(
         r"\b(?:ignore|override|disregard)\b.{0,80}\b(?:instructions?|prompts?|systems?)\b",
@@ -30,7 +31,10 @@ _INSTRUCTION_INJECTION_PATTERNS = (
 
 
 def sanitize_external_text(value: Any, *, max_chars: int) -> str:
-    text = _canonical_external_text(value)
+    raw = str(value or "")
+    if len(raw) > _MAX_EXTERNAL_INPUT_CHARS:
+        return ""
+    text = _canonical_external_text(raw)
     return " ".join(text.split()).strip()[:max_chars]
 
 
@@ -55,6 +59,8 @@ def _canonical_external_text(value: Any) -> str:
 
 def looks_like_instruction_injection(value: str) -> bool:
     raw = str(value or "")
+    if len(raw) > _MAX_EXTERNAL_INPUT_CHARS:
+        return True
     canonical = _canonical_external_text(raw)
     return any(
         pattern.search(candidate)

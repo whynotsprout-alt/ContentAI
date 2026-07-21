@@ -10,7 +10,6 @@ from agent.graph.factory import build_agent_graph
 from agent.infrastructure.llm import ModelGateway
 from agent.runtime.checkpoint import RuntimePersistence, execution_checkpoint_config
 from agent.tools.registry import ToolRegistry, tool_names
-from agent.workflows.final_evidence import ResearchBackedFinalResponse
 from core.config import Settings
 from langchain_core.tools import BaseTool
 
@@ -135,7 +134,7 @@ class RuntimeContainer:
         graph = build_agent_graph(
             model=self.get_model(tool_permissions),
             tools=tools,
-            research_final_model=self._build_research_final_model(),
+            research_final_model=self._build_research_final_model,
             checkpointer=self.get_checkpointer(),
         )
         self._cache_put(self._graph_cache, cache_key, graph)
@@ -145,10 +144,10 @@ class RuntimeContainer:
         gateway = self.model_gateway
         if gateway is None:
             raise RuntimeError("Model gateway is not configured.")
-        build_structured = getattr(gateway, "build_structured_output_model", None)
-        if not callable(build_structured):
+        build_research_final = getattr(gateway, "build_research_final_model", None)
+        if not callable(build_research_final):
             raise RuntimeError("Model gateway does not support structured research final output.")
-        return build_structured(ResearchBackedFinalResponse)
+        return build_research_final()
 
     def create_runtime(
         self,

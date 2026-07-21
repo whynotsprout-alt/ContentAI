@@ -98,6 +98,7 @@ class MemoryRepository:
         user_id: str,
         agent_id: str | None = None,
         session_id: str | None = None,
+        touch: bool = True,
     ) -> MemoryEntry | None:
         query = self._scoped_query(
             user_id=user_id,
@@ -107,7 +108,8 @@ class MemoryRepository:
         row = self.session.exec(query).first()
         if row is None:
             return None
-        self._record_access([row])
+        if touch:
+            self._record_access([row])
         return self._to_entry(row)
 
     def list_scope(
@@ -117,6 +119,7 @@ class MemoryRepository:
         agent_id: str | None = None,
         session_id: str | None = None,
         limit: int = 20,
+        touch: bool = True,
     ) -> list[MemoryEntry]:
         rows = list(
             self.session.exec(
@@ -129,7 +132,8 @@ class MemoryRepository:
                 .limit(limit)
             ).all()
         )
-        self._record_access(rows)
+        if touch:
+            self._record_access(rows)
         return [self._to_entry(row) for row in rows]
 
     def search(
@@ -140,12 +144,14 @@ class MemoryRepository:
         agent_id: str | None = None,
         session_id: str | None = None,
         limit: int = 8,
+        touch: bool = True,
     ) -> list[MemoryEntry]:
         candidates = self.list_scope(
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
             limit=100,
+            touch=touch,
         )
         terms = _memory_query_terms(query_text)
         if not terms:

@@ -197,12 +197,14 @@ class LongTermMemory:
         *,
         user_id: str,
         limit: int = 8,
+        touch: bool = True,
     ) -> list[MemoryEntry]:
         return self.repository.search(
             query,
             limit=limit,
             user_id=user_id,
             agent_id=agent_id,
+            touch=touch,
         )
 
     def list_all(

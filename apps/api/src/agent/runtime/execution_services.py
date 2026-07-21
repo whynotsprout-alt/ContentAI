@@ -14,8 +14,13 @@ from agent.runtime.events import (
     PersistentAgentEventWriter,
     now_utc,
 )
+from agent.runtime.turn_context import assemble_turn_context, load_turn_prompt_inputs
 from agent.workflows.deep_research import ContentEvidenceInvalidError
-from agent.workflows.final_evidence import validate_research_backed_final_response
+from agent.workflows.final_evidence import (
+    build_supported_research_evidence,
+    parse_research_identity,
+    validate_research_final_proof,
+)
 from agent.workflows.research_repository import ResearchPackageRepository
 from core.hotspot_sources import DEFAULT_HOTSPOT_SOURCES, partition_hotspot_sources
 from db.session import get_engine
@@ -70,11 +75,10 @@ def _execution_research_identity(
     values = getattr(snapshot, "values", None)
     if not isinstance(values, dict):
         return None
-    package_id = str(values.get("research_package_id") or "").strip()
-    topic_hash = str(values.get("research_topic_hash") or "").strip()
-    if not package_id or not topic_hash:
-        return None
-    return package_id, topic_hash
+    return parse_research_identity(
+        values.get("research_package_id"),
+        values.get("research_topic_hash"),
+    )
 
 
 @dataclass(frozen=True)
@@ -293,8 +297,6 @@ class AgentExecutionEngine:
             raise RuntimeError("Agent version not found for agent execution.")
 
         allowed_hotspot_sources = _allowed_hotspot_sources(agent_version)
-        repository = MemoryRepository(db_session)
-        short_term = ShortTermMemory(repository)
         runtime = self.container.create_runtime(
             tool_permissions=tool_permissions,
             user_id=invocation.user_id,
@@ -309,18 +311,12 @@ class AgentExecutionEngine:
             graph=runtime.graph,
             config=runtime.config,
         )
-        long_term = LongTermMemory(repository)
-
-        short_summary, db_messages = short_term.load(
+        prompt_inputs = load_turn_prompt_inputs(
             db_session,
             session_id=chat.id,
             user_id=chat.user_id,
-        )
-        recalled = long_term.recall(
-            chat.agent_id,
-            user_message.content,
-            user_id=invocation.user_id,
-            limit=8,
+            agent_id=chat.agent_id,
+            focus_message=user_message.content,
         )
         tool_names = list(runtime.tool_permissions)
         build_token_counter = getattr(self.container.model_gateway, "build_token_counter", None)
@@ -329,20 +325,18 @@ class AgentExecutionEngine:
             if callable(build_token_counter)
             else None
         )
-        agent_context = self.context_assembler.assemble(
+        agent_context = assemble_turn_context(
+            context_assembler=self.context_assembler,
             agent_profile=agent_profile,
             agent_version=agent_version,
-            messages=db_messages,
-            short_term_summary=short_summary,
-            long_term_memories=recalled,
+            prompt_inputs=prompt_inputs,
             tool_names=tool_names,
             focus_message=user_message.content,
             user_id=invocation.user_id,
             conversation_id=str(chat.id),
-            run_id=execution.id,
-            permissions=tool_names,
             research_package=research_package,
             token_counter=token_counter,
+            execution_id=execution.id,
         )
 
         graph_input = self._build_graph_input(
@@ -389,7 +383,7 @@ class AgentExecutionEngine:
                 )
             ),
             api_keys=self._build_tool_api_keys(),
-            long_term_memory=long_term,
+            long_term_memory=LongTermMemory(MemoryRepository(db_session)),
             side_effect_dispatcher=self.container.side_effect_dispatcher,
             side_effect_receipt_poller=self.container.side_effect_receipt_poller,
             cancellation_check=lambda: self.state_manager.ensure_execution_not_cancelled(
@@ -1415,25 +1409,28 @@ def _validated_research_backed_final_answer(
     *,
     research_package: Any,
 ) -> str:
-    allowed_source_ids = {
-        str(source.get("source_id") or "").strip()
-        for source in getattr(research_package, "sources", [])
-        if isinstance(source, dict)
-        and not bool(source.get("isolated"))
-        and str(source.get("source_id") or "").strip()
-    }
-    for message in reversed(messages):
+    evidence = build_supported_research_evidence(research_package)
+    validated_answer: str | None = None
+    for message in messages:
         if not isinstance(message, AIMessage) or getattr(message, "tool_calls", None):
             continue
-        envelope = getattr(message, "additional_kwargs", {}).get("research_backed_final")
-        if envelope is None:
-            continue
-        response = validate_research_backed_final_response(
-            envelope,
-            allowed_source_ids=allowed_source_ids,
+        additional_kwargs = getattr(message, "additional_kwargs", {})
+        if not isinstance(additional_kwargs, dict) or set(additional_kwargs) != {
+            "research_backed_final_proof"
+        }:
+            raise ContentEvidenceInvalidError
+        expected_answer = validate_research_final_proof(
+            additional_kwargs["research_backed_final_proof"],
+            evidence=evidence,
         )
-        return response.answer
-    raise ContentEvidenceInvalidError
+        if not isinstance(message.content, str) or message.content != expected_answer:
+            raise ContentEvidenceInvalidError
+        if validated_answer is not None:
+            raise ContentEvidenceInvalidError
+        validated_answer = expected_answer
+    if validated_answer is None:
+        raise ContentEvidenceInvalidError
+    return validated_answer
 
 
 def _recent_conversation_context(messages: list[BaseMessage], limit: int = 8) -> str:

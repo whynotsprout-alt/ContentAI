@@ -10,8 +10,10 @@ from typing import Any, Protocol
 from agent.context.assembler import ContextAssembler
 from agent.context.window import TokenCounter
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
+from agent.runtime.turn_context import assemble_turn_context, load_turn_prompt_inputs
 from core.security import AuthContext
 from models.agent import AgentProfile, AgentVersion
+from models.base import new_id
 from models.chat import (
     AgentExecution,
     AgentInvocation,
@@ -318,13 +320,23 @@ class ConversationService:
                     error=self._execution_error(execution.error),
                 ), True
         self._ensure_no_active_execution(session, chat.id, for_update=True)
-        self._ensure_current_input_fits(session, chat=chat, content=payload.message, auth=auth)
+        message_id = payload.message_id or new_id("msg")
+        execution_id = new_id("exe")
+        self._ensure_current_input_fits(
+            session,
+            chat=chat,
+            content=payload.message,
+            message_id=message_id,
+            execution_id=execution_id,
+            auth=auth,
+        )
 
         message, invocation, execution = self._create_user_message_invocation_execution(
             session,
             chat=chat,
             content=payload.message,
-            message_id=payload.message_id,
+            message_id=message_id,
+            execution_id=execution_id,
             auth=auth,
             idempotency_key=normalized_key,
             request_sha256=request_sha256,
@@ -356,6 +368,8 @@ class ConversationService:
         *,
         chat: ChatSession,
         content: str,
+        message_id: str,
+        execution_id: str,
         auth: AuthContext,
     ) -> None:
         settings = getattr(self.agent_service, "settings", None)
@@ -371,26 +385,35 @@ class ConversationService:
         if runtime is None or profile is None or version is None:
             input_tokens = self._input_token_counter.count_messages([HumanMessage(content=content)])
         else:
-            tools = runtime.get_tools(("*",))
+            tools = runtime.get_tools(auth.tool_permissions)
             build_counter = getattr(runtime.model_gateway, "build_token_counter", None)
             token_counter = (
                 build_counter(tools=tools)
                 if callable(build_counter)
                 else TokenCounter(tools=tools)
             )
-            # Research does not exist durably until the turn has been created. This preflight
-            # counts the deterministic system/runtime/current/tool input; the worker repeats
-            # the complete budget check once execution-local research context is available.
-            context = ContextAssembler(settings=settings).assemble(
+            # Research does not exist durably until the turn has been created. The worker repeats
+            # the complete check once an execution-local research package is available.
+            prompt_inputs = load_turn_prompt_inputs(
+                session,
+                session_id=chat.id,
+                user_id=auth.user_id,
+                agent_id=chat.agent_id,
+                focus_message=content,
+                pending_message=HumanMessage(content=content, id=message_id),
+            )
+            tool_names = [str(getattr(tool, "name", "")) for tool in tools]
+            context = assemble_turn_context(
+                context_assembler=ContextAssembler(settings=settings),
                 agent_profile=profile,
                 agent_version=version,
-                messages=[HumanMessage(content=content)],
-                short_term_summary="",
-                long_term_memories=[],
-                tool_names=[str(getattr(tool, "name", "")) for tool in tools],
+                prompt_inputs=prompt_inputs,
+                tool_names=tool_names,
                 focus_message=content,
                 user_id=auth.user_id,
                 conversation_id=chat.id,
+                execution_id=execution_id,
+                research_package=None,
                 token_counter=token_counter,
             )
             input_tokens = token_counter.count_messages(
@@ -671,6 +694,7 @@ class ConversationService:
         chat: ChatSession,
         content: str,
         message_id: str | None = None,
+        execution_id: str | None = None,
         auth: AuthContext,
         idempotency_key: str | None = None,
         request_sha256: str | None = None,
@@ -701,6 +725,7 @@ class ConversationService:
         session.flush()
 
         execution = AgentExecution(
+            **({"id": execution_id} if execution_id else {}),
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,

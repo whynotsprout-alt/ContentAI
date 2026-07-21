@@ -27,13 +27,16 @@ class ShortTermMemory:
         *,
         session_id: str,
         user_id: str,
+        refresh_if_missing: bool = True,
+        touch: bool = True,
     ) -> tuple[str, list[BaseMessage]]:
         messages = self.load_messages(session, session_id=session_id)
         summary = self.load_summary(
             session_id,
             user_id=user_id,
+            touch=touch,
         )
-        if not summary:
+        if not summary and refresh_if_missing:
             summary = self.refresh_summary(
                 session,
                 session_id=session_id,
@@ -55,11 +58,13 @@ class ShortTermMemory:
         session_id: str,
         *,
         user_id: str,
+        touch: bool = True,
     ) -> str:
         entry = self.repository.get(
             SHORT_TERM_SUMMARY_KEY,
             user_id=user_id,
             session_id=session_id,
+            touch=touch,
         )
         return entry.content if entry else ""
 

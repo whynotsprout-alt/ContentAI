@@ -4,14 +4,9 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
 
 from agent.context.window import TokenCounter, trim_context_window
-from agent.external_content import (
-    looks_like_instruction_injection,
-    sanitize_external_text,
-)
-from agent.workflows.deep_research import ContentEvidenceInvalidError
+from agent.workflows.final_evidence import build_supported_research_evidence
 from core.config import Settings, get_settings
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from memory.long_term import is_transient_task_memory
@@ -224,86 +219,7 @@ def _render_research_context_message(
 
 
 def _supported_research_payload(research_package: ResearchPackage) -> dict[str, Any]:
-    sources: list[dict[str, str]] = []
-    for raw_source in research_package.sources:
-        if not isinstance(raw_source, dict) or bool(raw_source.get("isolated")):
-            continue
-        source_id = sanitize_external_text(raw_source.get("source_id"), max_chars=80)
-        url = sanitize_external_text(raw_source.get("url"), max_chars=2000)
-        parsed_url = urlparse(url)
-        if (
-            not source_id
-            or re.fullmatch(r"[A-Za-z0-9_-]+", source_id) is None
-            or parsed_url.scheme not in {"http", "https"}
-            or not parsed_url.hostname
-        ):
-            continue
-        title = sanitize_external_text(raw_source.get("title"), max_chars=500)
-        summary = sanitize_external_text(
-            raw_source.get("summary") or raw_source.get("snippet"),
-            max_chars=2000,
-        )
-        publisher = sanitize_external_text(raw_source.get("source"), max_chars=200)
-        if looks_like_instruction_injection("\n".join((title, summary, publisher))):
-            continue
-        sources.append(
-            {
-                "source_id": source_id,
-                "title": title,
-                "url": url,
-                "summary": summary,
-                "publisher": publisher,
-            }
-        )
-
-    allowed_source_ids = {source["source_id"] for source in sources}
-    claims: list[dict[str, Any]] = []
-
-    def append_claim(kind: str, value: Any) -> None:
-        if not isinstance(value, dict):
-            return
-        source_ids = [
-            str(source_id).strip()
-            for source_id in value.get("source_ids", [])
-            if str(source_id).strip()
-        ]
-        if (
-            not source_ids
-            or any(source_id not in allowed_source_ids for source_id in source_ids)
-        ):
-            return
-        claim = sanitize_external_text(
-            value.get("text") if kind == "conclusion" else value.get("claim"),
-            max_chars=1200 if kind == "conclusion" else 500,
-        )
-        evidence = sanitize_external_text(value.get("evidence"), max_chars=900)
-        if not claim or looks_like_instruction_injection("\n".join((claim, evidence))):
-            return
-        claims.append(
-            {
-                "kind": kind,
-                "claim": claim,
-                "evidence": evidence,
-                "source_ids": list(dict.fromkeys(source_ids)),
-            }
-        )
-
-    package_data = research_package.package_data
-    if isinstance(package_data, dict):
-        append_claim("conclusion", package_data.get("core_conclusion"))
-        findings = package_data.get("findings")
-        if isinstance(findings, list):
-            for finding in findings:
-                append_claim("finding", finding)
-    if not claims:
-        raise ContentEvidenceInvalidError
-
-    return {
-        "research_pack_id": research_package.id,
-        "topic": sanitize_external_text(research_package.topic, max_chars=500),
-        "claims": claims,
-        "sources": sources,
-    }
+    return build_supported_research_evidence(research_package)
 
 
 def _render_runtime_context_message(

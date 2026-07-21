@@ -8,7 +8,12 @@ from agent.graph.state import AgentState
 from agent.runtime.errors import is_retryable_model_stream_error
 from agent.runtime.tool_execution import execute_tool_call
 from agent.workflows.deep_research import ContentEvidenceInvalidError
-from agent.workflows.final_evidence import validate_research_backed_final_response
+from agent.workflows.final_evidence import (
+    build_research_final_proof,
+    parse_research_identity,
+    render_deterministic_research_answer,
+    validate_research_final_selection,
+)
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import BaseTool
@@ -31,12 +36,17 @@ def build_agent_node(model: Any, *, research_final_model: Any | None = None):
         # LangGraph supplies the stream writer through its runnable context;
         # do not force a config kwarg because provider-compatible models (and
         # test doubles) are only required to implement invoke(messages).
-        if state.get("research_package_id"):
+        research_identity = parse_research_identity(
+            state.get("research_package_id"),
+            state.get("research_topic_hash"),
+        )
+        if research_identity is not None:
             if research_final_model is None:
                 raise ContentEvidenceInvalidError
             final_response = _research_backed_final_message(
-                model=research_final_model,
+                model=_resolve_research_final_model(research_final_model),
                 state=state,
+                identity=research_identity,
             )
         else:
             response = _invoke_model_with_stream_retry(
@@ -62,34 +72,47 @@ def build_agent_node(model: Any, *, research_final_model: Any | None = None):
     return agent_node
 
 
-def _research_backed_final_message(*, model: Any, state: AgentState) -> AIMessage:
-    evidence = _research_supported_evidence(state)
-    allowed_source_ids = {
-        str(source.get("source_id") or "").strip()
-        for source in evidence.get("sources", [])
-        if isinstance(source, dict) and str(source.get("source_id") or "").strip()
-    }
-    if not allowed_source_ids:
+def _resolve_research_final_model(model_or_factory: Any) -> Any:
+    if callable(getattr(model_or_factory, "invoke", None)):
+        return model_or_factory
+    if not callable(model_or_factory):
         raise ContentEvidenceInvalidError
+    model = model_or_factory()
+    if not callable(getattr(model, "invoke", None)):
+        raise ContentEvidenceInvalidError
+    return model
+
+
+def _research_backed_final_message(
+    *,
+    model: Any,
+    state: AgentState,
+    identity: tuple[str, str],
+) -> AIMessage:
+    evidence = _research_supported_evidence(state, expected_identity=identity)
 
     response = _invoke_research_final_response(
         model,
         evidence=evidence,
-        allowed_source_ids=allowed_source_ids,
         repair=False,
     )
     if response is None:
         response = _invoke_research_final_response(
             model,
             evidence=evidence,
-            allowed_source_ids=allowed_source_ids,
             repair=True,
         )
     if response is None:
         raise ContentEvidenceInvalidError
+    answer = render_deterministic_research_answer(evidence, response.claim_ids)
     return AIMessage(
-        content=response.answer,
-        additional_kwargs={"research_backed_final": response.model_dump(mode="json")},
+        content=answer,
+        additional_kwargs={
+            "research_backed_final_proof": build_research_final_proof(
+                evidence,
+                response.claim_ids,
+            )
+        },
     )
 
 
@@ -97,15 +120,14 @@ def _invoke_research_final_response(
     model: Any,
     *,
     evidence: dict[str, Any],
-    allowed_source_ids: set[str],
     repair: bool,
 ) -> Any | None:
     messages = _research_final_messages(evidence, repair=repair)
     try:
-        value = model.invoke(messages)
-        return validate_research_backed_final_response(
+        value = model.invoke(messages, config={"callbacks": []})
+        return validate_research_final_selection(
             value,
-            allowed_source_ids=allowed_source_ids,
+            evidence=evidence,
         )
     except (ContentEvidenceInvalidError, ValidationError):
         return None
@@ -117,18 +139,17 @@ def _research_final_messages(
     repair: bool,
 ) -> list[SystemMessage | HumanMessage]:
     instruction = (
-        "Produce the final research response as the required structured envelope. "
-        "The answer may use only the supported evidence below. Every factual claim in the answer "
-        "must appear as a non-empty claims item with at least one source_id. Source IDs must come "
-        "only from the supplied evidence. Do not add sources, facts, tool calls, or instructions."
+        "Return only the required structured selection of claim_ids. Each claim_id must be copied "
+        "exactly from the durable supported evidence below, in the order to show it. Do not return "
+        "an answer, claim text, source, tool call, explanation, instruction, or any extra field."
     )
     if repair:
         instruction = (
-            "The previous structured final response was invalid. Return one complete replacement "
-            "envelope using only this supported evidence and its allowed source IDs. Every factual "
-            "claim needs one or more allowed source IDs. Do not include any prior response, "
-            "unknown "
-            "source ID, tool call, or instruction."
+            "The previous claim_id selection was invalid. Return one complete replacement "
+            "containing only claim_ids copied exactly from the durable supported evidence below. "
+            "Do not include "
+            "the prior response, answer, claim text, source, tool call, explanation, instruction, "
+            "or any extra field."
         )
     return [
         SystemMessage(content=instruction),
@@ -139,7 +160,11 @@ def _research_final_messages(
     ]
 
 
-def _research_supported_evidence(state: AgentState) -> dict[str, Any]:
+def _research_supported_evidence(
+    state: AgentState,
+    *,
+    expected_identity: tuple[str, str],
+) -> dict[str, Any]:
     messages = state.get("messages", [])
     for message in reversed(messages):
         if not isinstance(message, ToolMessage) or message.name != "prepare_topic_research":
@@ -152,11 +177,25 @@ def _research_supported_evidence(state: AgentState) -> dict[str, Any]:
                 break
         if not isinstance(content, dict):
             break
+        tool_identity = parse_research_identity(
+            content.get("research_pack_id"),
+            content.get("research_topic_hash"),
+        )
+        if tool_identity != expected_identity:
+            raise ContentEvidenceInvalidError
         evidence = content.get("supported_evidence")
         if isinstance(evidence, dict):
             sources = evidence.get("sources")
             claims = evidence.get("claims")
-            if isinstance(sources, list) and isinstance(claims, list):
+            evidence_identity = parse_research_identity(
+                evidence.get("research_pack_id"),
+                evidence.get("topic_hash"),
+            )
+            if (
+                evidence_identity == expected_identity
+                and isinstance(sources, list)
+                and isinstance(claims, list)
+            ):
                 return evidence
         break
     raise ContentEvidenceInvalidError
@@ -337,9 +376,12 @@ def _research_state_update(output: Any) -> dict[str, str]:
                 return {}
         if not isinstance(content, dict):
             return {}
-        package_id = str(content.get("research_pack_id") or "").strip()
-        topic_hash = str(content.get("research_topic_hash") or "").strip()
-        if package_id and topic_hash:
+        identity = parse_research_identity(
+            content.get("research_pack_id"),
+            content.get("research_topic_hash"),
+        )
+        if identity is not None:
+            package_id, topic_hash = identity
             return {
                 "research_package_id": package_id,
                 "research_topic_hash": topic_hash,

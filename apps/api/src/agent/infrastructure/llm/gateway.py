@@ -41,6 +41,18 @@ class ModelGateway:
             schema=HotspotFilterResult,
         )
 
+    def build_research_final_model(self) -> Any:
+        """Build the non-streaming, selection-only model for research final rendering."""
+        from agent.workflows.final_evidence import ResearchFinalSelection
+
+        return self.client.build_structured_output_model(
+            model=self.settings.llm.summary_model,
+            temperature=0,
+            max_tokens=self.settings.llm.structured_max_tokens,
+            schema=ResearchFinalSelection,
+            disable_streaming=True,
+        )
+
     def build_token_counter(self, *, tools: list[Any] | None = None) -> TokenCounter:
         model = self.client.build_chat_model(
             model=self.settings.llm.chat_model,
@@ -50,9 +62,9 @@ class ModelGateway:
             max_retries=0,
         )
         provider_count = getattr(model, "get_num_tokens_from_messages", None)
-        if not callable(provider_count):
-            return TokenCounter()
         bound_tools = list(tools or [])
+        if not callable(provider_count):
+            return TokenCounter(tools=bound_tools)
         return TokenCounter(
             provider_count=lambda messages: provider_count(messages, tools=bound_tools),
             tools=bound_tools,

@@ -12,11 +12,26 @@ from agent.tools.research import prepare_topic_research
 from agent.workflows.deep_research import ContentEvidenceInvalidError, DeepResearchResult
 from agent.workflows.research_repository import ResearchPackageRepository, topic_digest
 from db.session import get_engine
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from models.agent import AgentProfile, AgentVersion
 from models.chat import AgentExecution, AgentInvocation, ChatSession
 from models.research import ResearchPackage
 from sqlmodel import Session, select
+
+
+def _durable_final_package() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="rsp-runner-proof",
+        topic="runner evidence topic",
+        topic_hash="runner-topic-hash",
+        package_data={
+            "core_conclusion": {"text": "Runner durable conclusion", "source_ids": ["S1"]},
+            "findings": [],
+        },
+        sources=[
+            {"source_id": "S1", "url": "https://runner.example/source", "isolated": False}
+        ],
+    )
 
 
 def seed_execution() -> tuple[str, str]:
@@ -254,6 +269,56 @@ def test_execution_research_loader_uses_only_checkpointed_package_identity(monke
             "topic_hash": "hash-local",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"research_package_id": "rsp-partial"},
+        {"research_topic_hash": "topic-partial"},
+    ],
+)
+def test_execution_research_identity_rejects_partial_checkpoint_state(values):
+    graph = SimpleNamespace(get_state=lambda _config: SimpleNamespace(values=values))
+
+    with pytest.raises(ContentEvidenceInvalidError):
+        execution_services._execution_research_identity(graph, {"configurable": {}})
+
+
+def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelope():
+    from agent.workflows.final_evidence import (
+        build_research_final_proof,
+        build_supported_research_evidence,
+        render_deterministic_research_answer,
+    )
+
+    package = _durable_final_package()
+    evidence = build_supported_research_evidence(package)
+    claim_id = evidence["claims"][0]["claim_id"]
+    deterministic_message = AIMessage(
+        content=render_deterministic_research_answer(evidence, [claim_id]),
+        additional_kwargs={
+            "research_backed_final_proof": build_research_final_proof(evidence, [claim_id])
+        },
+    )
+
+    assert execution_services._validated_research_backed_final_answer(
+        [deterministic_message], research_package=package
+    ) == deterministic_message.content
+
+    forged_legacy_message = AIMessage(
+        content="Model-authored unsupported answer",
+        additional_kwargs={
+            "research_backed_final": {
+                "answer": "Model-authored unsupported answer",
+                "claims": [{"text": "Forged but source-labelled", "source_ids": ["S1"]}],
+            }
+        },
+    )
+    with pytest.raises(ContentEvidenceInvalidError):
+        execution_services._validated_research_backed_final_answer(
+            [forged_legacy_message], research_package=package
+        )
 
 
 def test_invalid_evidence_raises_public_terminal_error_without_persisting_package(monkeypatch):

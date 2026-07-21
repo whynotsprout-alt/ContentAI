@@ -64,9 +64,39 @@ def test_agent_model_keeps_provider_streaming_when_tools_are_bound():
         max_tokens=128,
         tools=[sample_tool],
     )
+    final_model = client.build_chat_model(
+        model="claude-test",
+        temperature=0,
+        max_tokens=128,
+        disable_streaming=True,
+    )
 
     assert plain_model.disable_streaming is False
     assert tool_model.bound.disable_streaming is False
+    assert final_model.disable_streaming is True
+
+
+def test_research_final_gateway_builds_selection_schema_with_streaming_disabled():
+    observed: dict[str, object] = {}
+
+    class Client:
+        def build_structured_output_model(self, **kwargs):
+            observed.update(kwargs)
+            return "selection-model"
+
+    gateway = ModelGateway(
+        settings=Settings(
+            database={
+                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+            },
+            search={"traffic_relay_api_key": "test-key"},
+        ),
+        client=Client(),
+    )
+
+    assert gateway.build_research_final_model() == "selection-model"
+    assert observed["schema"].__name__ == "ResearchFinalSelection"
+    assert observed["disable_streaming"] is True
 
 
 def test_model_gateway_exposes_provider_token_counter_with_tools():
@@ -93,6 +123,30 @@ def test_model_gateway_exposes_provider_token_counter_with_tools():
 
     assert counter.count_messages(messages) == 11
     assert observed == [(messages, tools)]
+
+
+def test_gateway_fallback_token_counter_includes_bound_tool_schemas():
+    class Client:
+        def build_chat_model(self, **_kwargs):
+            return object()
+
+    settings = Settings(
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        search={"traffic_relay_api_key": "test-key"},
+    )
+    message = [HumanMessage(content="count me")]
+    tool = {
+        "name": "large_tool",
+        "description": "schema payload " * 100,
+        "parameters": {"type": "object", "properties": {"value": {"type": "string"}}},
+    }
+
+    without_tools = ModelGateway(settings=settings, client=Client()).build_token_counter()
+    with_tools = ModelGateway(settings=settings, client=Client()).build_token_counter(tools=[tool])
+
+    assert with_tools.count_messages(message) > without_tools.count_messages(message)
 
 
 @pytest.mark.parametrize(

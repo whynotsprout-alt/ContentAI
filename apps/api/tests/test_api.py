@@ -3,13 +3,19 @@ import logging
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import agent.tools.research as research_tool_module
 import pytest
-from agent.runtime.checkpoint import RuntimePersistence, checkpoint_interrupts
+from agent.runtime.checkpoint import (
+    RuntimePersistence,
+    checkpoint_interrupts,
+    checkpoint_messages,
+)
 from agent.runtime.container import RuntimeContainer
 from agent.workflows.deep_research import DeepResearchResult
+from agent.workflows.final_evidence import build_supported_research_evidence
 from api.app import create_app
 from api.chat import _stream_channel, _stream_exception_payload
 from api.chat import router as chat_router
@@ -21,6 +27,7 @@ from db.session import get_engine
 from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
 from memory.message_persister import MessagePersister
+from memory.repository import MemoryRepository
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
@@ -130,8 +137,9 @@ class FakeResearchFinalModel:
         self.responses = iter(responses)
         self.calls: list[list[Any]] = []
 
-    def invoke(self, messages: list[Any]) -> Any:
+    def invoke(self, messages: list[Any], *, config: dict[str, Any]) -> Any:
         self.calls.append(messages)
+        assert config == {"callbacks": []}
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
@@ -167,10 +175,8 @@ class FakeResearchFinalGateway(FakeGateway):
         super().__init__()
         self.final_model = FakeResearchFinalModel(final_responses)
 
-    def build_structured_output_model(self, schema: type[Any], **kwargs: Any) -> Any:
-        if schema.__name__ == "ResearchBackedFinalResponse":
-            return self.final_model
-        return super().build_structured_output_model(schema)
+    def build_research_final_model(self) -> FakeResearchFinalModel:
+        return self.final_model
 
 
 def install_fake_model(
@@ -756,8 +762,11 @@ def test_message_contract_rejects_agent_id_and_creates_no_execution():
     assert after == before
 
 
-def test_oversized_current_input_returns_413_before_turn_is_persisted():
+def test_oversized_current_input_returns_413_before_turn_is_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+):
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         chat = client.post(
             "/api/chat/sessions",
             json={"agent_id": "default-agent"},
@@ -787,8 +796,11 @@ def test_oversized_current_input_returns_413_before_turn_is_persisted():
         ).all() == []
 
 
-def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn():
+def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn(
+    monkeypatch: pytest.MonkeyPatch,
+):
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         chat = client.post(
             "/api/chat/sessions",
             json={"agent_id": "default-agent"},
@@ -823,6 +835,103 @@ def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn(
         assert session.exec(
             select(AgentExecution).where(AgentExecution.session_id == chat["session_id"])
         ).all() == []
+
+
+def test_preflight_uses_existing_summary_before_creating_a_turn():
+    with TestClient(app) as client:
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        headers = auth_headers(tools=["fetch_hotspots"])
+        chat = client.post(
+            "/api/chat/sessions",
+            json={"agent_id": "default-agent"},
+            headers=headers,
+        ).json()
+        with Session(get_engine()) as db_session:
+            MemoryRepository(db_session).upsert(
+                "summary",
+                content="durable summary " * 2000,
+                user_id="local-user",
+                session_id=chat["session_id"],
+            )
+
+        conversation_service = app.state.conversation_service
+        settings = conversation_service.agent_service.settings
+        original_window = settings.llm.context_window_tokens
+        original_output = settings.llm.chat_max_tokens
+        dispatcher = conversation_service.execution_dispatcher
+        settings.llm.context_window_tokens = 12000
+        settings.llm.chat_max_tokens = 24
+        conversation_service.execution_dispatcher = None
+        try:
+            response = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "small current message"},
+                headers=headers,
+            )
+        finally:
+            conversation_service.execution_dispatcher = dispatcher
+            settings.llm.context_window_tokens = original_window
+            settings.llm.chat_max_tokens = original_output
+            monkeypatch.undo()
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "CURRENT_INPUT_TOO_LARGE"
+    with Session(get_engine()) as db_session:
+        assert db_session.exec(
+            select(ChatMessage).where(ChatMessage.session_id == chat["session_id"])
+        ).all() == []
+        assert db_session.exec(
+            select(AgentInvocation).where(AgentInvocation.session_id == chat["session_id"])
+        ).all() == []
+        assert db_session.exec(
+            select(AgentExecution).where(AgentExecution.session_id == chat["session_id"])
+        ).all() == []
+
+
+def test_preflight_uses_the_request_tool_permissions_not_the_wildcard_set():
+    with TestClient(app) as client:
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        headers = auth_headers(tools=["fetch_hotspots"])
+        chat = client.post(
+            "/api/chat/sessions",
+            json={"agent_id": "default-agent"},
+            headers=headers,
+        ).json()
+        conversation_service = app.state.conversation_service
+        runtime = conversation_service.agent_service.runtime
+        original_get_tools = runtime.get_tools
+        observed_permissions: list[tuple[str, ...]] = []
+        monkeypatch.setattr(
+            runtime,
+            "get_tools",
+            lambda permissions: (
+                observed_permissions.append(tuple(permissions or ())),
+                original_get_tools(permissions),
+            )[1],
+        )
+        settings = conversation_service.agent_service.settings
+        original_window = settings.llm.context_window_tokens
+        original_output = settings.llm.chat_max_tokens
+        dispatcher = conversation_service.execution_dispatcher
+        settings.llm.context_window_tokens = 6000
+        settings.llm.chat_max_tokens = 24
+        conversation_service.execution_dispatcher = None
+        try:
+            response = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "small current message"},
+                headers=headers,
+            )
+        finally:
+            conversation_service.execution_dispatcher = dispatcher
+            settings.llm.context_window_tokens = original_window
+            settings.llm.chat_max_tokens = original_output
+            monkeypatch.undo()
+
+    assert response.status_code == 202
+    assert observed_permissions == [("fetch_hotspots",)]
 
 
 def test_message_idempotency_replay_mismatch_and_transport_conflict():
@@ -941,6 +1050,21 @@ def _research_tool_call() -> AIMessage:
     )
 
 
+def _research_final_selection(claim: str) -> dict[str, list[str]]:
+    result = _research_result_for_final_evidence_tests()
+    evidence = build_supported_research_evidence(
+        SimpleNamespace(
+            id="rsp-test-selection",
+            topic="evidence-backed topic",
+            topic_hash="topic-test-selection",
+            package_data=result.package_data,
+            sources=result.sources,
+        )
+    )
+    claim_id = next(item["claim_id"] for item in evidence["claims"] if item["claim"] == claim)
+    return {"claim_ids": [claim_id]}
+
+
 def _start_research_backed_turn(
     client: TestClient,
 ) -> tuple[str, str]:
@@ -953,13 +1077,14 @@ def _start_research_backed_turn(
     return session["session_id"], response.json()["execution_id"]
 
 
-def test_plain_chat_does_not_use_research_final_protocol():
+def test_plain_chat_does_not_use_research_final_protocol(monkeypatch: pytest.MonkeyPatch):
     gateway = install_research_final_model(
         FakeModel([AIMessage(content="ordinary chat reply")]),
         final_responses=[],
     )
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         session = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
         response = client.post(
             f"/api/chat/sessions/{session['session_id']}/messages",
@@ -980,21 +1105,22 @@ def test_research_backed_final_persists_only_validated_answer(monkeypatch):
         lambda **_kwargs: _research_result_for_final_evidence_tests(),
     )
     gateway = install_research_final_model(
-        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        FakeModel([_research_tool_call()]),
         final_responses=[
-            {
-                "answer": "Evidence-backed answer",
-                "claims": [{"text": "Supported finding", "source_ids": ["S1"]}],
-            }
+            _research_final_selection("Supported finding")
         ],
     )
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         session_id, _execution_id = _start_research_backed_turn(client)
         terminal = wait_for_terminal_session(client, session_id)
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == "Evidence-backed answer"
+    assert terminal["messages"][-1]["content"] == (
+        "Research-backed findings:\n"
+        "1. Supported finding [S1](https://evidence.example/source)"
+    )
     assert gateway.final_model.calls
 
 
@@ -1005,20 +1131,21 @@ def test_research_backed_unknown_final_claim_is_terminal_and_never_persisted(mon
         lambda **_kwargs: _research_result_for_final_evidence_tests(),
     )
     gateway = install_research_final_model(
-        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        FakeModel([_research_tool_call()]),
         final_responses=[
             {
-                "answer": "Unsupported answer",
-                "claims": [{"text": "Unsupported claim", "source_ids": ["UNKNOWN"]}],
+                "claim_ids": ["clm_unknown"],
+                "answer": "raw initial selection must not escape",
             },
             {
-                "answer": "Still unsupported",
-                "claims": [{"text": "Still unsupported", "source_ids": ["UNKNOWN"]}],
+                "claim_ids": ["clm_unknown"],
+                "answer": "raw repaired selection must not escape",
             },
         ],
     )
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         session_id, execution_id = _start_research_backed_turn(client)
         terminal = wait_for_terminal_session(client, session_id)
         events = client.get(f"/api/chat/runs/{execution_id}/events")
@@ -1028,6 +1155,19 @@ def test_research_backed_unknown_final_claim_is_terminal_and_never_persisted(mon
     assert events.status_code == 200
     assert '"error_code":"CONTENT_EVIDENCE_INVALID"' in events.text
     assert len(gateway.final_model.calls) == 2
+    assert "raw initial selection must not escape" not in events.text
+    assert "raw repaired selection must not escape" not in events.text
+    with Session(get_engine()) as db_session:
+        chat = db_session.get(ChatSession, session_id)
+        assert chat is not None
+        checkpointed = checkpoint_messages(
+            app.state.runtime.get_checkpointer(),
+            thread_id=chat.langgraph_thread_id,
+            execution_id=execution_id,
+        )
+    checkpoint_text = "\n".join(str(message.content) for message in checkpointed)
+    assert "raw initial selection must not escape" not in checkpoint_text
+    assert "raw repaired selection must not escape" not in checkpoint_text
 
 
 def test_research_backed_final_repairs_once_with_supported_evidence_only(monkeypatch):
@@ -1037,25 +1177,26 @@ def test_research_backed_final_repairs_once_with_supported_evidence_only(monkeyp
         lambda **_kwargs: _research_result_for_final_evidence_tests(),
     )
     gateway = install_research_final_model(
-        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        FakeModel([_research_tool_call()]),
         final_responses=[
             {
-                "answer": "First unsupported answer",
-                "claims": [{"text": "Unknown claim", "source_ids": ["UNKNOWN"]}],
+                "claim_ids": ["clm_unknown"],
+                "answer": "invalid repair precursor",
             },
-            {
-                "answer": "Repaired evidence-backed answer",
-                "claims": [{"text": "Supported finding", "source_ids": ["S1"]}],
-            },
+            _research_final_selection("Supported finding"),
         ],
     )
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         session_id, _execution_id = _start_research_backed_turn(client)
         terminal = wait_for_terminal_session(client, session_id)
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == "Repaired evidence-backed answer"
+    assert terminal["messages"][-1]["content"] == (
+        "Research-backed findings:\n"
+        "1. Supported finding [S1](https://evidence.example/source)"
+    )
     assert len(gateway.final_model.calls) == 2
     repair_messages = gateway.final_model.calls[1]
     repair_content = "\n".join(str(message.content) for message in repair_messages)
