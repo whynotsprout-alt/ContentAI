@@ -12,7 +12,6 @@ from core.config.auth import AuthSettings
 from core.config.database import DatabaseSettings, validate_connection_budget
 from core.config.llm import LLMSettings
 from core.config.logging import LoggingSettings
-from core.config.model_configuration import ModelConfigurationSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
 from core.config.server import ServerSettings
@@ -50,9 +49,6 @@ class Settings(BaseSettings):
     search: SearchSettings = Field(default_factory=SearchSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
-    model_configuration: ModelConfigurationSettings = Field(
-        default_factory=ModelConfigurationSettings
-    )
     model_config_encryption_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY",
@@ -287,10 +283,7 @@ class Settings(BaseSettings):
             ModelConfigurationSecretProtector,
         )
 
-        encryption_key = (
-            self.model_configuration.encryption_key.get_secret_value().strip()
-            or self.model_config_encryption_key.get_secret_value().strip()
-        )
+        encryption_key = self.model_config_encryption_key.get_secret_value().strip()
         if not encryption_key:
             raise ValueError("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY is required.")
         try:
@@ -299,7 +292,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY must be a valid Fernet key."
             ) from exc
-        self.model_configuration.encryption_key = SecretStr(encryption_key)
+        self.model_config_encryption_key = SecretStr(encryption_key)
 
     def _validate_frontend_origins(self) -> None:
         for origin in self.server.frontend_origins:

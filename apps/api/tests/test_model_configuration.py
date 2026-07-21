@@ -5,12 +5,13 @@ import hashlib
 from importlib import import_module
 
 import pytest
-from core.config import Settings
+from core.config import Settings, get_settings
 from db.session import get_engine
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, TEST_MODEL_CONFIG_API_KEY
 from pydantic import ValidationError
-from sqlalchemy import inspect, text
+from sqlalchemy import func, inspect, text
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 
 def _fernet_key(seed: int) -> str:
@@ -87,6 +88,7 @@ def test_development_settings_reject_missing_model_config_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("CONTENTAI_MODEL_CONFIGURATION__ENCRYPTION_KEY", raising=False)
 
     with pytest.raises(ValidationError, match="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY"):
         _development_settings()
@@ -108,10 +110,67 @@ def test_test_settings_accept_explicit_deterministic_model_config_key() -> None:
         database={
             "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
         },
-        model_configuration={"encryption_key": _fernet_key(4)},
+        **{"CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": _fernet_key(4)},
     )
 
-    assert settings.model_configuration.encryption_key.get_secret_value() == _fernet_key(4)
+    assert settings.model_config_encryption_key.get_secret_value() == _fernet_key(4)
+
+
+def test_undeclared_model_configuration_environment_key_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv(
+        "CONTENTAI_MODEL_CONFIGURATION__ENCRYPTION_KEY",
+        _fernet_key(5),
+    )
+
+    with pytest.raises(ValidationError, match="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY"):
+        _development_settings()
+
+
+def test_single_underscore_model_config_environment_key_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("CONTENTAI_MODEL_CONFIG_ENCRYPTION_KEY", _fernet_key(5))
+
+    with pytest.raises(ValidationError, match="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY"):
+        _development_settings()
+
+
+def test_only_declared_model_config_environment_key_controls_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY", "malformed-test-value")
+    monkeypatch.setenv(
+        "CONTENTAI_MODEL_CONFIGURATION__ENCRYPTION_KEY",
+        _fernet_key(6),
+    )
+    with pytest.raises(ValidationError, match="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY"):
+        _development_settings()
+
+    monkeypatch.setenv("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY", _fernet_key(6))
+    monkeypatch.setenv(
+        "CONTENTAI_MODEL_CONFIGURATION__ENCRYPTION_KEY",
+        "malformed-test-value",
+    )
+    settings = _development_settings()
+    assert settings.model_config_encryption_key.get_secret_value() == _fernet_key(6)
+
+
+def test_default_active_model_configuration_fixture_uses_consistent_secret_material() -> None:
+    crypto = _crypto_module()
+    with Session(get_engine()) as session:
+        configuration = session.get(_model_class(), DEFAULT_MODEL_CONFIG_ID)
+
+    assert configuration is not None
+    protector = crypto.ModelConfigurationSecretProtector(
+        get_settings().model_config_encryption_key
+    )
+    assert protector.decrypt(configuration.api_key_ciphertext) == TEST_MODEL_CONFIG_API_KEY
+    assert configuration.api_key_fingerprint == protector.fingerprint(TEST_MODEL_CONFIG_API_KEY)
+    assert configuration.api_key_hint == protector.hint(TEST_MODEL_CONFIG_API_KEY)
 
 
 def test_model_configuration_serialization_and_repr_exclude_secret_material() -> None:
@@ -253,3 +312,60 @@ def test_execution_outbox_model_configuration_mismatch_is_rejected() -> None:
             ).scalar_one()
             == 0
         )
+
+
+def _constraint_test_configuration(**overrides: object):
+    # These rows exercise database constraints, not secret decryption.
+    values: dict[str, object] = {
+        "version": 201,
+        "base_url": "https://constraint.example.test/v1",
+        "model_name": "constraint-model",
+        "api_key_ciphertext": "constraint-test-ciphertext",
+        "api_key_fingerprint": "c" * 64,
+        "api_key_hint": "...test",
+        "is_active": False,
+        "created_by_user_id": "local-user",
+    }
+    values.update(overrides)
+    return _model_class()(**values)
+
+
+def test_postgres_allows_multiple_inactive_model_configurations() -> None:
+    with Session(get_engine()) as session:
+        session.add_all(
+            [
+                _constraint_test_configuration(id="inactive-one", version=201),
+                _constraint_test_configuration(id="inactive-two", version=202),
+            ]
+        )
+        session.flush()
+        count = session.exec(
+            select(func.count()).select_from(_model_class()).where(
+                _model_class().is_active.is_(False)
+            )
+        ).one()
+        assert count == 2
+        session.rollback()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "constraint_name"),
+    [
+        ({"id": "second-active", "version": 210, "is_active": True}, "active"),
+        ({"id": "duplicate-version", "version": 1}, "version"),
+        ({"id": "invalid-provider", "provider": "unsupported"}, "provider"),
+        ({"id": "invalid-fingerprint", "api_key_fingerprint": "short"}, "fingerprint"),
+        ({"id": "invalid-creator", "created_by_user_id": "missing-user"}, "creator"),
+    ],
+)
+def test_postgres_rejects_invalid_model_configuration_rows_without_poisoning_session(
+    overrides: dict[str, object],
+    constraint_name: str,
+) -> None:
+    with Session(get_engine()) as session:
+        with pytest.raises(IntegrityError):
+            with session.begin_nested():
+                session.add(_constraint_test_configuration(**overrides))
+                session.flush()
+
+        assert session.get(_model_class(), DEFAULT_MODEL_CONFIG_ID) is not None, constraint_name

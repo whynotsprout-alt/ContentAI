@@ -2,6 +2,7 @@ import base64
 from pathlib import Path
 
 import pytest
+from model_config_helpers import TEST_MODEL_CONFIG_API_KEY
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -73,8 +74,17 @@ def _ensure_test_database_exists() -> None:
 
 @pytest.fixture(autouse=True)
 def reset_database() -> None:
+    from core.config import get_settings
+    from core.model_config_crypto import ModelConfigurationSecretProtector
     from db.session import get_engine
     from sqlalchemy import text
+
+    protector = ModelConfigurationSecretProtector(
+        get_settings().model_config_encryption_key
+    )
+    api_key_ciphertext = protector.encrypt(TEST_MODEL_CONFIG_API_KEY)
+    api_key_fingerprint = protector.fingerprint(TEST_MODEL_CONFIG_API_KEY)
+    api_key_hint = protector.hint(TEST_MODEL_CONFIG_API_KEY)
 
     with get_engine().begin() as connection:
         connection.execute(
@@ -136,11 +146,16 @@ def reset_database() -> None:
                 VALUES (
                     'default-model-config', 1, 'openai_compatible',
                     'https://models.test.invalid/v1', 'test-model',
-                    'test-only-ciphertext', repeat('0', 64), '...test',
+                    :api_key_ciphertext, :api_key_fingerprint, :api_key_hint,
                     true, now(), now(), NULL, 'local-user'
                 )
                 """
-            )
+            ),
+            {
+                "api_key_ciphertext": api_key_ciphertext,
+                "api_key_fingerprint": api_key_fingerprint,
+                "api_key_hint": api_key_hint,
+            },
         )
         connection.execute(
             text(
