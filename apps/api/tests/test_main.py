@@ -48,8 +48,8 @@ def test_ready_endpoint_reflects_lifespan_state():
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "database": True,
-        "alembic_version": "202607170002",
-        "alembic_head": "202607170002",
+        "alembic_version": "202607210001",
+        "alembic_head": "202607210001",
         "database_revision_current": True,
         "checkpoint": True,
         "checkpoint_tables": {

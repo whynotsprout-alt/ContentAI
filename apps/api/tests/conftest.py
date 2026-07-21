@@ -109,12 +109,13 @@ def reset_database() -> None:
                 """
                 INSERT INTO appuser (
                     id, email, email_normalized, password_hash,
-                    role, status, email_verified_at, password_changed_at,
+                    role, status, email_verified_at, password_changed_at, must_change_password,
                     failed_login_count, created_at, updated_at
                 )
                 VALUES (
                     'local-user', 'local@test.invalid', 'local@test.invalid',
-                    'test-only-password-hash', 'user', 'active', now(), now(), 0, now(), now()
+                    'test-only-password-hash', 'user', 'active', now(), now(), false, 0,
+                    now(), now()
                 )
                 """
             )

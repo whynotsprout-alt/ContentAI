@@ -9,7 +9,7 @@ $archive = Join-Path $root "dist/$name.tar.gz"
 $requiredPaths = @(
   "apps/api/src", "apps/web/src", "apps/web/index.html",
   "apps/api/src/contentai_migrations/env.py",
-  "apps/api/src/contentai_migrations/versions/202607150001_initial_schema.py",
+  "apps/api/src/contentai_migrations/versions/202607210001_v050_initial_schema.py",
   "apps/web/package.json", "apps/web/package-lock.json", "apps/web/tsconfig.json",
   "apps/web/tsconfig.node.json", "apps/web/vite.config.ts",
   "docs", "infra", "infra/ubuntu/deploy.sh", "infra/ubuntu/health.sh",

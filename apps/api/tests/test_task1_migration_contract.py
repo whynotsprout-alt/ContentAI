@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from core.alembic import build_alembic_config
 from db.session import get_engine
 from models.base import utcnow
@@ -20,6 +22,36 @@ from sqlalchemy import inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 VERSIONS_DIR = PROJECT_ROOT / "apps" / "api" / "src" / "contentai_migrations" / "versions"
+
+EXPECTED_BUSINESS_TABLES = {
+    "adminauditlog",
+    "agentexecution",
+    "agentexecutionattempt",
+    "agentinvocation",
+    "agentprofile",
+    "agentversion",
+    "appuser",
+    "authsession",
+    "checkpointdeletionoutbox",
+    "chatmessage",
+    "chatsession",
+    "executionoutbox",
+    "executionresumerequest",
+    "memoryrecord",
+    "modelusage",
+    "researchpackage",
+    "serviceheartbeat",
+    "sideeffectreceipt",
+    "toolexecution",
+}
+LANGGRAPH_OWNED_TABLES = {
+    "checkpoint_blobs",
+    "checkpoint_migrations",
+    "checkpoint_writes",
+    "checkpoints",
+    "store",
+    "store_migrations",
+}
 
 
 def _column_names(inspector, table: str) -> set[str]:
@@ -52,19 +84,65 @@ def _foreign_key_column_sets(
     }
 
 
-def test_release_version_and_two_linear_revisions():
+def test_release_version_and_single_fresh_revision():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
         assert tomllib.load(stream)["project"]["version"] == "0.5.0-rc.1"
 
-    revisions = sorted(VERSIONS_DIR.glob("20260717*.py"))
-    assert len(revisions) == 2
-    expand = revisions[0].read_text(encoding="utf-8")
-    contract = revisions[1].read_text(encoding="utf-8")
-    assert '= "202607150001"' in expand
-    assert f'= "{revisions[0].stem.split("_", 1)[0]}"' in contract
-    assert "AT TIME ZONE 'UTC'" in expand
-    assert "NOT VALID" in expand
-    assert "VALIDATE CONSTRAINT" in contract
+    revisions = sorted(VERSIONS_DIR.glob("*.py"))
+    assert [revision.name for revision in revisions] == [
+        "202607210001_v050_initial_schema.py"
+    ]
+    script = ScriptDirectory.from_config(build_alembic_config())
+    assert script.get_heads() == ["202607210001"]
+    revision = script.get_revision("202607210001")
+    assert revision is not None
+    assert revision.down_revision is None
+
+
+def test_fresh_baseline_roundtrip_preserves_langgraph_owned_tables():
+    config = build_alembic_config()
+    engine = get_engine()
+    before = set(inspect(engine).get_table_names())
+    preserved = before & LANGGRAPH_OWNED_TABLES
+    assert {
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+    } <= preserved
+
+    try:
+        command.downgrade(config, "base")
+        at_base = set(inspect(engine).get_table_names())
+        assert EXPECTED_BUSINESS_TABLES.isdisjoint(at_base)
+        assert preserved <= at_base
+        command.upgrade(config, "head")
+        at_head = set(inspect(engine).get_table_names())
+        assert EXPECTED_BUSINESS_TABLES <= at_head
+        assert preserved <= at_head
+    finally:
+        command.upgrade(config, "head")
+
+
+def test_old_revision_stamp_fails_before_schema_changes():
+    config = build_alembic_config()
+    engine = get_engine()
+    before = set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        original_revision = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        connection.execute(text("UPDATE alembic_version SET version_num = '202607170002'"))
+    try:
+        with pytest.raises(CommandError, match="Can't locate revision identified by"):
+            command.upgrade(config, "head")
+        assert set(inspect(engine).get_table_names()) == before
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = :revision"),
+                {"revision": original_revision},
+            )
 
 
 def test_utcnow_is_aware_and_api_datetimes_serialize_with_z():
@@ -199,268 +277,3 @@ def test_removed_token_table_and_operational_foundation_tables():
     tables = set(inspect(get_engine()).get_table_names())
     assert "useractiontoken" not in tables
     assert {"serviceheartbeat", "checkpointdeletionoutbox", "sideeffectreceipt"} <= tables
-
-
-def test_v043_preflight_aborts_and_names_non_empty_action_token_rows():
-    engine = get_engine()
-    config = build_alembic_config()
-    command.downgrade(config, "202607150001")
-    try:
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    """
-                    INSERT INTO useractiontoken (
-                        id, user_id, purpose, token_hash, expires_at, created_at
-                    ) VALUES (
-                        'uat_preflight_offender', 'local-user', 'reset',
-                        'preflight-token-hash', now(), now()
-                    )
-                    """
-                )
-            )
-        with pytest.raises(Exception, match="uat_preflight_offender"):
-            command.upgrade(config, "head")
-    finally:
-        with engine.begin() as connection:
-            connection.execute(
-                text("DELETE FROM useractiontoken WHERE id = 'uat_preflight_offender'")
-            )
-        command.upgrade(config, "head")
-
-
-def _seed_v043_lineage(connection) -> None:
-    statements = (
-        """
-        INSERT INTO appuser (
-            id, email, email_normalized, password_hash, role, status,
-            failed_login_count, created_at, updated_at, password_changed_at
-        ) VALUES (
-            'preflight-other-user', 'other@test.invalid', 'other@test.invalid',
-            'hash', 'user', 'active', 0, now(), now(), now()
-        )
-        """,
-        """
-        INSERT INTO agentprofile (id, user_id, name, description, created_at, updated_at)
-        VALUES ('preflight-other-agent', 'preflight-other-user', 'Other', '', now(), now())
-        """,
-        """
-        INSERT INTO agentversion (
-            id, agent_id, version, topic_scoring_prompt, content_prompt,
-            hotspot_sources, created_at
-        ) VALUES (
-            'preflight-other-version', 'preflight-other-agent', 1, '', '', '[]', now()
-        )
-        """,
-        """
-        INSERT INTO chatsession (
-            id, title, agent_id, agent_version_id, langgraph_thread_id,
-            user_id, created_at, updated_at
-        ) VALUES
-            ('preflight-session', '', 'default-agent', 'default-agent-v1',
-             'preflight-thread', 'local-user', now(), now()),
-            ('preflight-other-session', '', 'preflight-other-agent',
-             'preflight-other-version', 'preflight-other-thread',
-             'preflight-other-user', now(), now())
-        """,
-        """
-        INSERT INTO agentinvocation (id, session_id, agent_id, user_id, created_at)
-        VALUES ('preflight-invocation', 'preflight-session', 'default-agent',
-                'local-user', now())
-        """,
-    )
-    for statement in statements:
-        connection.execute(text(statement))
-
-
-def _insert_v043_execution(connection, execution_id: str = "preflight-execution") -> None:
-    connection.execute(
-        text(
-            """
-            INSERT INTO agentexecution (
-                id, invocation_id, agent_version_id, trace_id, status, error,
-                interrupt_payload, resume_payload, attempt_count, next_attempt_kind,
-                streaming_degraded, streaming_degraded_reason, created_at, updated_at
-            ) VALUES (
-                :execution_id, 'preflight-invocation', 'default-agent-v1',
-                :trace_id, 'pending', '', '{}', '{}', 0, 'initial', false, '', now(), now()
-            )
-            """
-        ),
-        {"execution_id": execution_id, "trace_id": f"trace-{execution_id}"},
-    )
-
-
-PREFLIGHT_NEGATIVE_CASES = (
-    (
-        "owner",
-        "preflight-session",
-        "chatsession",
-        ("UPDATE chatsession SET user_id = 'preflight-other-user' "
-         "WHERE id = 'preflight-session'",),
-    ),
-    (
-        "version",
-        "preflight-session",
-        "chatsession",
-        ("UPDATE chatsession SET agent_version_id = 'preflight-other-version' "
-         "WHERE id = 'preflight-session'",),
-    ),
-    (
-        "invocation",
-        "preflight-invocation",
-        "agentinvocation",
-        ("UPDATE agentinvocation SET agent_id = 'preflight-other-agent' "
-         "WHERE id = 'preflight-invocation'",),
-    ),
-    (
-        "execution",
-        "preflight-execution",
-        "agentexecution",
-        (
-            "INSERT INTO agentexecution (id, invocation_id, agent_version_id, trace_id, "
-            "status, error, interrupt_payload, resume_payload, attempt_count, "
-            "next_attempt_kind, streaming_degraded, streaming_degraded_reason, "
-            "created_at, updated_at) VALUES ('preflight-execution', "
-            "'preflight-invocation', 'preflight-other-version', 'trace-bad', "
-            "'pending', '', '{}', '{}', 0, 'initial', false, '', now(), now())",
-        ),
-    ),
-    (
-        "memory",
-        "preflight-memory",
-        "memoryrecord",
-        (
-            "INSERT INTO memoryrecord (id, user_id, agent_id, memory_key, kind, payload, "
-            "content, confidence, importance_score, source_type, version, access_count, "
-            "created_at, updated_at) VALUES ('preflight-memory', 'preflight-other-user', "
-            "'default-agent', 'bad-owner', 'semantic', '{}', '', 1, 0, 'manual', "
-            "1, 0, now(), now())",
-        ),
-    ),
-    (
-        "research",
-        "preflight-research",
-        "researchpackage",
-        (
-            "__INSERT_EXECUTION__",
-            "INSERT INTO researchpackage (id, session_id, execution_id, agent_version_id, "
-            "topic, topic_hash, package_data, sources, provider_diagnostics, "
-            "rendered_content, valid_source_count, isolated_source_count, "
-            "removed_unknown_reference_count, created_at, updated_at) VALUES "
-            "('preflight-research', 'preflight-other-session', 'preflight-execution', "
-            "'preflight-other-version', '', 'topic', '{}', '[]', '{}', '', 0, 0, 0, "
-            "now(), now())",
-        ),
-    ),
-    (
-        "multiple-executions",
-        "preflight-execution-2",
-        "agentexecution",
-        ("__INSERT_EXECUTION__", "__INSERT_SECOND_EXECUTION__"),
-    ),
-    (
-        "ambiguous-assistant",
-        "preflight-message",
-        "chatmessage",
-        (
-            "INSERT INTO chatmessage (id, session_id, invocation_id, role, message_type, "
-            "content, created_at) VALUES ('preflight-message', 'preflight-session', "
-            "'preflight-invocation', 'assistant', 'text', 'bad', now())",
-        ),
-    ),
-    (
-        "duplicate-assistant",
-        "preflight-message-2",
-        "chatmessage",
-        (
-            "__INSERT_EXECUTION__",
-            "INSERT INTO chatmessage (id, session_id, invocation_id, role, message_type, "
-            "content, created_at) VALUES "
-            "('preflight-message-1', 'preflight-session', 'preflight-invocation', "
-            "'assistant', 'text', 'one', now()), "
-            "('preflight-message-2', 'preflight-session', 'preflight-invocation', "
-            "'assistant', 'text', 'two', now())",
-        ),
-    ),
-    (
-        "nonempty-token",
-        "preflight-token",
-        "useractiontoken",
-        (
-            "INSERT INTO useractiontoken (id, user_id, purpose, token_hash, expires_at, "
-            "created_at) VALUES ('preflight-token', 'local-user', 'reset', 'hash', "
-            "now(), now())",
-        ),
-    ),
-)
-
-
-def _clean_v043_preflight_rows(connection) -> None:
-    connection.execute(
-        text(
-            "TRUNCATE researchpackage, chatmessage, agentexecution, memoryrecord, "
-            "agentinvocation, chatsession, useractiontoken CASCADE"
-        )
-    )
-    connection.execute(
-        text("DELETE FROM agentversion WHERE id = 'preflight-other-version'")
-    )
-    connection.execute(
-        text("DELETE FROM agentprofile WHERE id = 'preflight-other-agent'")
-    )
-    connection.execute(text("DELETE FROM appuser WHERE id = 'preflight-other-user'"))
-
-
-def test_v043_preflight_rejects_lineage_negatives_before_schema_changes():
-    engine = get_engine()
-    config = build_alembic_config()
-    command.downgrade(config, "202607150001")
-    try:
-        for _case_name, offender_id, table_name, statements in PREFLIGHT_NEGATIVE_CASES:
-            with engine.begin() as connection:
-                _seed_v043_lineage(connection)
-                for statement in statements:
-                    if statement == "__INSERT_EXECUTION__":
-                        _insert_v043_execution(connection)
-                    elif statement == "__INSERT_SECOND_EXECUTION__":
-                        _insert_v043_execution(connection, "preflight-execution-2")
-                    else:
-                        connection.execute(text(statement))
-                before = connection.execute(
-                    text(
-                        f"SELECT to_jsonb(row_data) FROM {table_name} row_data "
-                        "WHERE id = :id"
-                    ),
-                    {"id": offender_id},
-                ).scalar_one()
-
-            with pytest.raises(Exception, match=offender_id):
-                command.upgrade(config, "head")
-
-            with engine.connect() as connection:
-                after = connection.execute(
-                    text(
-                        f"SELECT to_jsonb(row_data) FROM {table_name} row_data "
-                        "WHERE id = :id"
-                    ),
-                    {"id": offender_id},
-                ).scalar_one()
-                assert after == before
-                assert "must_change_password" not in _column_names(
-                    inspect(connection), "appuser"
-                )
-            with engine.begin() as connection:
-                _clean_v043_preflight_rows(connection)
-    finally:
-        with engine.begin() as connection:
-            _clean_v043_preflight_rows(connection)
-        command.upgrade(config, "head")
-
-
-def test_expand_preflight_queries_are_orphan_safe():
-    source = (VERSIONS_DIR / "202607170001_v050_expand_backfill.py").read_text(
-        encoding="utf-8"
-    )
-    assert source.count("LEFT JOIN") >= 9
-    assert source.count("IS DISTINCT FROM") >= 9

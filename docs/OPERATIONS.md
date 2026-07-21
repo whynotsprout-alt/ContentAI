@@ -2,7 +2,7 @@
 
 ## 支持范围
 
-生产环境面向受支持的 Ubuntu LTS、Docker Engine 与 Docker Compose v2。源码包只支持全新数据库安装；当前单一初始迁移不承诺从 V0.3 或更早数据库原地升级。迁移旧环境前必须自行导出业务数据或保留完整数据库快照。
+生产环境面向受支持的 Ubuntu LTS、Docker Engine 与 Docker Compose v2。V0.5.0 只支持全新空数据库安装，不支持任何旧数据库或旧 Alembic revision 原地升级。部署时必须创建新的 PostgreSQL 数据库或数据卷；迁移服务不会自动删除旧数据库。
 
 生产 `compose.yaml` 启动九个服务：PostgreSQL、Redis、migration、API、dispatcher、agent worker、background worker、beat 和 Web。只有 Web 通过 `127.0.0.1:${WEB_PORT}` 暴露给宿主机，API、PostgreSQL 和 Redis不发布生产端口。TLS 由宿主机 Nginx/Caddy 或云负载均衡终止。
 
