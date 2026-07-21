@@ -27,6 +27,16 @@ class Resolver:
         return self.answers.pop(0)
 
 
+class ClosingMockTransport(httpx.MockTransport):
+    def __init__(self, handler) -> None:
+        super().__init__(handler)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -59,6 +69,16 @@ def test_model_base_url_keeps_openai_api_root_exact() -> None:
     assert "/anthropic" not in normalized
 
 
+def test_invalid_idna_endpoint_error_has_no_exception_chain() -> None:
+    network = _network_module()
+
+    with pytest.raises(network.ModelEndpointForbidden) as exc_info:
+        network.normalize_model_base_url("https://\ud800.example/v1", Resolver([]))
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
 @pytest.mark.parametrize(
     "address",
     [
@@ -70,6 +90,13 @@ def test_model_base_url_keeps_openai_api_root_exact() -> None:
         "::",
         "fe80::1",
         "ff02::1",
+        "fec0::1",
+        "fd00:ec2::254",
+        "168.63.129.16",
+        "::ffff:169.254.169.254",
+        "2002:a9fe:a9fe::1",
+        "2001:0000:4136:e378:8000:63bf:5601:5601",
+        "64:ff9b::a9fe:a9fe",
     ],
 )
 def test_model_endpoint_rejects_forbidden_address_classes(address: str) -> None:
@@ -95,6 +122,18 @@ def test_public_http_is_rejected_but_private_http_is_accepted() -> None:
         )
         == "http://models.enterprise.test/v1"
     )
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["127.0.0.1", "::1", "::ffff:10.20.30.40"],
+)
+def test_loopback_and_mapped_rfc1918_http_endpoints_are_accepted(address: str) -> None:
+    network = _network_module()
+
+    assert network.normalize_model_base_url(
+        "http://models.enterprise.test/v1", Resolver([address])
+    ) == "http://models.enterprise.test/v1"
 
 
 def test_mixed_public_and_forbidden_dns_answers_are_rejected() -> None:
@@ -132,9 +171,10 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
         }
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
+    transport = ClosingMockTransport(handle)
     prober = network.OpenAICompatibleProbe(
         resolver=resolver,
-        transport=httpx.MockTransport(handle),
+        transport=transport,
     )
 
     result = prober.probe(
@@ -149,6 +189,12 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
     ]
     assert len(resolver.calls) == 3
     assert all(request.headers["Authorization"] == "Bearer test-secret-key" for request in requests)
+    assert all(request.url.host == "93.184.216.34" for request in requests)
+    assert all(request.headers["Host"] == "api.example.test" for request in requests)
+    assert all(
+        request.extensions["sni_hostname"] == "api.example.test" for request in requests
+    )
+    assert transport.close_calls == 2
 
 
 def test_probe_rejects_dns_rebinding_before_second_outbound_request() -> None:
@@ -274,3 +320,25 @@ def test_probe_rejects_oversized_response_without_exposing_it() -> None:
         prober.probe("https://api.example.test/v1", "test-secret-key")
 
     assert "ssss" not in str(exc_info.value)
+
+
+def test_probe_rejects_malformed_successful_completion() -> None:
+    network = _network_module()
+    resolver = Resolver(
+        ["93.184.216.34"],
+        ["93.184.216.34"],
+        ["93.184.216.34"],
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(200, json={"choices": [{}]})
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=resolver,
+        transport=httpx.MockTransport(handle),
+    )
+
+    with pytest.raises(network.ModelProbeFailed):
+        prober.probe("https://api.example.test/v1", "test-secret-key", "custom-model")

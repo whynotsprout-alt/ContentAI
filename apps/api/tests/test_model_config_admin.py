@@ -11,7 +11,8 @@ from core.config import get_settings
 from core.model_config_crypto import ModelConfigurationSecretProtector
 from core.security import AuthContext, authenticate_request
 from db.session import get_engine
-from fastapi import Request
+from fastapi import HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from model_config_helpers import TEST_MODEL_CONFIG_API_KEY
 from models.model_configuration import ModelConfiguration
 from models.user import AdminAuditLog
@@ -85,15 +86,12 @@ def _delete_all_configurations() -> None:
 def test_all_model_configuration_routes_require_admin(admin_client: ApiClient) -> None:
     _set_probe(admin_client, FakeProbe())
 
-    assert admin_client.get("/api/admin/model-config").status_code == 403
-    assert (
+    responses = [
+        admin_client.get("/api/admin/model-config"),
         admin_client.post(
             "/api/admin/model-config/probe",
             json={"base_url": "https://api.example.test/v1", "api_key": "new-secret"},
-        ).status_code
-        == 403
-    )
-    assert (
+        ),
         admin_client.put(
             "/api/admin/model-config",
             json={
@@ -102,9 +100,11 @@ def test_all_model_configuration_routes_require_admin(admin_client: ApiClient) -
                 "model_name": "a-model",
                 "expected_version": 1,
             },
-        ).status_code
-        == 403
-    )
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403]
+    assert all(response.headers["Cache-Control"] == "no-store" for response in responses)
 
 
 def test_admin_get_returns_no_store_safe_active_metadata(admin_client: ApiClient) -> None:
@@ -202,6 +202,7 @@ def test_first_probe_and_save_require_api_key(admin_client: ApiClient) -> None:
     for response in (probe_response, save_response):
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == "MODEL_CREDENTIALS_REQUIRED"
+        assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_save_creates_new_immutable_version_and_secret_free_audit(
@@ -348,6 +349,7 @@ def test_probe_maps_stable_errors_without_exception_or_key_disclosure(
 
     assert response.status_code == status_code
     assert response.json()["detail"]["code"] == code
+    assert response.headers["Cache-Control"] == "no-store"
     assert "remote-secret-message" not in response.text
     assert request_key not in response.text
 
@@ -366,6 +368,7 @@ def test_validation_errors_redact_malformed_api_key(admin_client: ApiClient) -> 
 
     assert response.status_code == 422
     assert malformed_secret not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_api_key_length_is_bounded_without_echoing_oversized_secret(
@@ -384,6 +387,87 @@ def test_api_key_length_is_bounded_without_echoing_oversized_secret(
 
     assert response.status_code == 422
     assert oversized_secret not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"base_url": {"api_key": "nested-base-url-secret"}},
+        {"base_url": "https://api.example.test/v1?token=" + "s" * 2050},
+        {
+            "base_url": "https://api.example.test/v1",
+            "api_key": {"unexpected": "malformed-key-secret"},
+        },
+    ],
+)
+def test_model_config_validation_redacts_all_input_and_context(
+    admin_client: ApiClient,
+    payload: dict[str, object],
+) -> None:
+    response = admin_client.post(
+        "/api/admin/model-config/probe",
+        headers=_admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    assert all(error.get("input") == "[REDACTED]" for error in response.json()["detail"])
+    assert all(
+        error.get("ctx", "[REDACTED]") == "[REDACTED]"
+        for error in response.json()["detail"]
+    )
+    assert not any(
+        secret in response.text
+        for secret in (
+            "nested-base-url-secret",
+            "token=",
+            "malformed-key-secret",
+        )
+    )
+
+
+def test_non_model_config_validation_uses_fastapi_default_handler(
+    admin_client: ApiClient,
+) -> None:
+    response = admin_client.get(
+        "/api/admin/usage?start=not-a-datetime",
+        headers=_admin_headers(),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["input"] == "not-a-datetime"
+    assert "Cache-Control" not in response.headers
+
+
+def test_probe_error_returns_response_without_http_exception_chain() -> None:
+    app = create_app()
+    app.dependency_overrides[authenticate_request] = _auth
+    captured_http_exceptions: list[tuple[BaseException | None, BaseException | None]] = []
+
+    async def capture_http_exception(request: Request, exc: Exception):
+        assert isinstance(exc, HTTPException)
+        captured_http_exceptions.append((exc.__cause__, exc.__context__))
+        return await http_exception_handler(request, exc)
+
+    app.add_exception_handler(HTTPException, capture_http_exception)
+    with ApiClient(app) as client:
+        _set_probe(client, FakeProbe(failure=ModelProbeFailed("remote-secret-message")))
+        response = client.post(
+            "/api/admin/model-config/probe",
+            headers=_admin_headers(),
+            json={
+                "base_url": "https://api.example.test/v1",
+                "api_key": "request-secret-key",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.headers["Cache-Control"] == "no-store"
+    assert captured_http_exceptions == []
+    assert "remote-secret-message" not in response.text
+    assert "request-secret-key" not in response.text
 
 
 class BarrierProbe(FakeProbe):

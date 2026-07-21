@@ -8,6 +8,7 @@ from api.dependencies import (
     SessionDep,
 )
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from models.schemas import (
     AdminMessageListResponse,
     AdminSessionDetail,
@@ -54,15 +55,15 @@ _MODEL_ERROR_MESSAGES = {
 }
 
 
-def _raise_model_error(exc: Exception) -> None:
+def _model_error_response(exc: Exception) -> JSONResponse:
     if isinstance(exc, ModelConfigurationChanged):
         code = "MODEL_CONFIG_CHANGED"
     else:
         code = getattr(exc, "code", "MODEL_PROBE_FAILED")
-    raise HTTPException(
+    return JSONResponse(
         status_code=_MODEL_ERROR_STATUS[code],
-        detail={"code": code, "message": _MODEL_ERROR_MESSAGES[code]},
-    ) from exc
+        content={"detail": {"code": code, "message": _MODEL_ERROR_MESSAGES[code]}},
+    )
 
 
 def _model_configuration_response(active) -> ModelConfigurationResponse:
@@ -106,7 +107,7 @@ def probe_model_configuration(
     service: ModelConfigurationServiceDep,
     session: SessionDep,
     _auth: CurrentAdminDep,
-) -> ModelConfigurationProbeResponse:
+) -> ModelConfigurationProbeResponse | JSONResponse:
     response.headers["Cache-Control"] = "no-store"
     try:
         result = service.probe(
@@ -116,7 +117,7 @@ def probe_model_configuration(
             model_name=payload.model_name,
         )
     except (ModelProbeError, ModelCredentialsRequired) as exc:
-        _raise_model_error(exc)
+        return _model_error_response(exc)
     return ModelConfigurationProbeResponse(
         base_url=result.base_url,
         models=list(result.models),
@@ -138,7 +139,7 @@ def update_model_configuration(
     session: SessionDep,
     auth: CurrentAdminDep,
     request_context: RequestContextDep,
-) -> ModelConfigurationResponse:
+) -> ModelConfigurationResponse | JSONResponse:
     response.headers["Cache-Control"] = "no-store"
     try:
         service.update(
@@ -152,7 +153,7 @@ def update_model_configuration(
         )
     except (ModelProbeError, ModelCredentialsRequired, ModelConfigurationChanged) as exc:
         session.rollback()
-        _raise_model_error(exc)
+        return _model_error_response(exc)
     return _model_configuration_response(service.get_active(session))
 
 

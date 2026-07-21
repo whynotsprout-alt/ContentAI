@@ -12,6 +12,7 @@ from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimite
 from db.session import close_database, get_engine, init_database
 from fastapi import FastAPI, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -125,19 +126,16 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def redact_sensitive_validation_errors(
-        _request: Request, exc: RequestValidationError
+        request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        if not _is_model_config_path(request.url.path):
+            return await request_validation_exception_handler(request, exc)
         errors = []
         for raw_error in exc.errors():
             error = dict(raw_error)
-            location = tuple(str(item).lower() for item in error.get("loc", ()))
-            is_sensitive = any(
-                token in item.replace("-", "_")
-                for item in location
-                for token in ("api_key", "authorization", "ciphertext")
-            )
-            if is_sensitive or error.get("type") == "json_invalid":
-                error["input"] = "[REDACTED]"
+            error["input"] = "[REDACTED]"
+            if "ctx" in error:
+                error["ctx"] = "[REDACTED]"
             errors.append(error)
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
@@ -178,6 +176,8 @@ def create_app(
                     content={"detail": str(exc), "request_id": request_id},
                 )
         response = await call_next(request)
+        if _is_model_config_path(request.url.path):
+            response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request_id
         return response
 
@@ -193,6 +193,12 @@ def _rate_limit_rule(method: str, path: str) -> RateLimitRule | None:
     }:
         return RateLimitRule(limit=10, window_seconds=60)
     return None
+
+
+def _is_model_config_path(path: str) -> bool:
+    return path == "/api/admin/model-config" or path.startswith(
+        "/api/admin/model-config/"
+    )
 
 
 app = create_app()
