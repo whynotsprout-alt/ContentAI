@@ -799,6 +799,7 @@ class AgentPostExecutionService:
             if outbox is None:
                 outbox = ExecutionOutbox(
                     execution_id=execution.id,
+                    model_config_id=execution.model_config_id,
                     kind="postprocess",
                     request_id=request_id or "",
                 )

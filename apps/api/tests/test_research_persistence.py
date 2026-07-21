@@ -13,6 +13,7 @@ from agent.workflows.deep_research import ContentEvidenceInvalidError, DeepResea
 from agent.workflows.research_repository import ResearchPackageRepository, topic_digest
 from db.session import get_engine
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.agent import AgentProfile, AgentVersion
 from models.chat import AgentExecution, AgentInvocation, ChatSession
 from models.research import ResearchPackage
@@ -57,6 +58,7 @@ def seed_execution() -> tuple[str, str]:
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(execution)
         session.commit()
@@ -207,6 +209,7 @@ def test_research_package_load_requires_package_execution_and_topic_hash_match()
             invocation_id=invocation.id,
             session_id=chat_id,
             agent_version_id="default-agent-v1",
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(later_execution)
         session.commit()

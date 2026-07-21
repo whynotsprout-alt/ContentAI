@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 from db.session import get_engine
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
@@ -243,6 +244,7 @@ def test_bounded_purge_removes_old_execution_cohorts_in_fk_order() -> None:
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id=chat.agent_version_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.completed,
                 created_at=created_at,
                 updated_at=created_at,
@@ -269,6 +271,7 @@ def test_bounded_purge_removes_old_execution_cohorts_in_fk_order() -> None:
                     ExecutionOutbox(
                         id=f"outbox-purge-cohort-{suffix}",
                         execution_id=execution.id,
+                        model_config_id=DEFAULT_MODEL_CONFIG_ID,
                         created_at=created_at,
                         updated_at=created_at,
                     ),

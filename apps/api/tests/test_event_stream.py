@@ -9,6 +9,7 @@ from typing import Any
 import agent.runtime.events as runtime_events
 from agent.runtime.events import AgentEventWriter, PersistentAgentEventWriter
 from db.session import get_engine
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.chat import AgentExecution, AgentInvocation, ChatSession
 from services.event_stream import (
     RedisEventStream,
@@ -133,6 +134,7 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
         chat = ChatSession(
             agent_id="default-agent",
             agent_version_id="default-agent-v1",
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             user_id="local-user",
         )
         session.add(chat)
@@ -148,6 +150,7 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id="default-agent-v1",
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(execution)
         session.commit()

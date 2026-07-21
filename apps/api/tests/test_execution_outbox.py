@@ -11,6 +11,7 @@ from core.config import Settings, get_settings
 from db.session import get_engine
 from langchain_core.messages import HumanMessage, message_to_dict
 from memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
@@ -116,6 +117,7 @@ def _seed_execution(
                 id=session_id,
                 agent_id=agent_id,
                 agent_version_id=version_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 user_id=user_id,
             )
         )
@@ -135,6 +137,7 @@ def _seed_execution(
                 invocation_id=invocation_id,
                 session_id=session_id,
                 agent_version_id=version_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=status,
                 attempt_count=attempt_count,
                 lease_expires_at=lease_expires_at,
@@ -161,6 +164,7 @@ def test_claim_restores_tool_permissions_only_from_validated_durable_outbox_payl
         session.add(
             ExecutionOutbox(
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 payload=_durable_turn_context_payload(
                     execution_id=execution_id,
@@ -195,7 +199,14 @@ def test_claim_fails_closed_for_missing_or_malformed_durable_outbox_payload(
     execution_id = f"execution-invalid-durable-payload-{len(payload)}"
     _seed_execution(settings, execution_id=execution_id)
     with Session(get_engine(settings)) as session:
-        session.add(ExecutionOutbox(execution_id=execution_id, kind="execute", payload=payload))
+        session.add(
+            ExecutionOutbox(
+                execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
+                kind="execute",
+                payload=payload,
+            )
+        )
         session.commit()
 
     assert (
@@ -224,6 +235,7 @@ def test_postprocess_processing_retries_are_separate_from_broker_attempts() -> N
             ExecutionOutbox(
                 id="outbox-postprocess-retry",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="postprocess",
                 status="processing",
                 attempts=7,
@@ -254,6 +266,7 @@ def test_postprocess_third_processing_failure_is_terminal() -> None:
             ExecutionOutbox(
                 id="outbox-postprocess-failed",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="postprocess",
                 status="processing",
                 processing_attempts=3,
@@ -286,6 +299,7 @@ def test_dispatcher_retries_after_publish_failure(
             ExecutionOutbox(
                 id="outbox-dispatch-retry",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 request_id="request-dispatch-retry",
             )
         )
@@ -353,6 +367,7 @@ def test_duplicate_delivery_only_claims_execution_once() -> None:
         session.add(
             ExecutionOutbox(
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 payload=_durable_turn_context_payload(
                     execution_id=execution_id,
@@ -434,6 +449,7 @@ def test_dispatcher_reclaims_expired_publishing_row(
             ExecutionOutbox(
                 id="outbox-expired-publish-lock",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status="publishing",
                 locked_by="dead-dispatcher",
                 locked_until=utcnow() - timedelta(seconds=1),
@@ -472,6 +488,7 @@ def test_stale_dispatcher_cannot_overwrite_new_outbox_lock() -> None:
             ExecutionOutbox(
                 id="outbox-dispatch-fence",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status="publishing",
                 locked_by="dispatcher-new",
                 locked_until=utcnow() + timedelta(seconds=30),
@@ -537,6 +554,7 @@ def test_recover_expired_lease_requeues_execution(
             ExecutionOutbox(
                 id="outbox-expired-lease",
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status="published",
                 published_at=utcnow() - timedelta(minutes=1),
             )
@@ -603,6 +621,7 @@ def test_recovery_fails_execution_that_no_worker_claimed(
         session.add(
             ExecutionOutbox(
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 status="published",
                 published_at=utcnow() - timedelta(seconds=2),
@@ -636,6 +655,7 @@ def test_recovery_does_not_fail_execution_before_outbox_is_published(
         session.add(
             ExecutionOutbox(
                 execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 status="pending",
                 available_at=utcnow() - timedelta(seconds=30),

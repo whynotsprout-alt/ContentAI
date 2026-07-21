@@ -15,6 +15,7 @@ from agent.workflows.deep_research import ContentEvidenceInvalidError
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
 from memory import LongTermMemory, MemoryRepository
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -53,6 +54,7 @@ def _seed_execution(execution_id: str) -> None:
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.running,
             )
         )

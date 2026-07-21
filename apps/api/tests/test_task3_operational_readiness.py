@@ -10,6 +10,7 @@ from db.session import (
     engine_options_for_role,
     get_engine,
 )
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -91,6 +92,7 @@ def _seed_published_outbox(
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             claimed_at=claimed_at,
             status=RunStatus.completed if claimed_at else RunStatus.pending,
         )
@@ -100,6 +102,7 @@ def _seed_published_outbox(
             ExecutionOutbox(
                 id=f"outbox-readiness-{suffix}",
                 execution_id=execution.id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 status=status,
                 published_at=published_at if status == "published" else None,

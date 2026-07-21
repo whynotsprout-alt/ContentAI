@@ -28,6 +28,7 @@ from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
 from memory.message_persister import MessagePersister
 from memory.repository import MemoryRepository
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
@@ -688,11 +689,16 @@ def test_lightweight_run_status_exposes_queue_stages():
                 invocation_id=invocation.id,
                 session_id=chat["session_id"],
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.pending,
             )
             session.add(execution)
             session.flush()
-            outbox = ExecutionOutbox(execution_id=execution.id, kind="execute")
+            outbox = ExecutionOutbox(
+                execution_id=execution.id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
+                kind="execute",
+            )
             session.add(outbox)
             session.commit()
             execution_id = execution.id
@@ -1746,6 +1752,7 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.waiting_input,
             )
         )
@@ -1831,6 +1838,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id="default-agent-v1",
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             status=RunStatus.completed,
         )
 
@@ -2004,6 +2012,7 @@ def test_chat_session_delete_commits_business_rows_before_checkpoint_cleanup():
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.completed,
             )
         )
@@ -2080,6 +2089,7 @@ def test_chat_session_delete_rejects_active_run():
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.running,
             )
         )
@@ -2490,6 +2500,7 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             status=RunStatus.waiting_input,
             interrupt_payload={
                 "interrupts": interrupts_payload,
@@ -2948,6 +2959,7 @@ def test_running_run_can_be_cancel_requested():
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id="default-agent-v1",
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             status=RunStatus.running,
         )
 

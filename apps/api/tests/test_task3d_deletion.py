@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from core.config import get_settings
 from core.security import AuthContext
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -220,6 +221,7 @@ def test_session_delete_rollback_does_not_touch_checkpoint_or_business_rows(
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id=chat.agent_version_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.completed,
             )
         )
@@ -281,6 +283,7 @@ def test_session_delete_enqueues_one_namespace_per_execution_and_drain_is_idempo
                     invocation_id=invocation.id,
                     session_id=chat.id,
                     agent_version_id=chat.agent_version_id,
+                    model_config_id=DEFAULT_MODEL_CONFIG_ID,
                     status=RunStatus.completed,
                 )
             )

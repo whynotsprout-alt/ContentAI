@@ -38,6 +38,7 @@ EXPECTED_BUSINESS_TABLES = {
     "executionoutbox",
     "executionresumerequest",
     "memoryrecord",
+    "modelconfiguration",
     "modelusage",
     "researchpackage",
     "serviceheartbeat",
@@ -229,6 +230,8 @@ def test_tenant_and_execution_lineage_constraints_are_database_enforced():
     assert "session_id" in _column_names(inspector, "agentexecution")
     assert "execution_id" in _column_names(inspector, "chatmessage")
     assert "payload" in _column_names(inspector, "executionoutbox")
+    assert "model_config_id" in _column_names(inspector, "agentexecution")
+    assert "model_config_id" in _column_names(inspector, "executionoutbox")
     assert {"decision", "message_id"} <= _column_names(inspector, "executionresumerequest")
 
     assert ("id", "user_id") in _unique_column_sets(inspector, "agentprofile")
@@ -266,6 +269,16 @@ def test_tenant_and_execution_lineage_constraints_are_database_enforced():
         "chatsession",
         ("id", "agent_version_id"),
     ) in execution_fks
+    assert (
+        ("model_config_id",),
+        "modelconfiguration",
+        ("id",),
+    ) in execution_fks
+    assert (
+        ("execution_id", "model_config_id"),
+        "agentexecution",
+        ("id", "model_config_id"),
+    ) in _foreign_key_column_sets(inspector, "executionoutbox")
     assert (
         ("execution_id", "session_id", "agent_version_id"),
         "agentexecution",

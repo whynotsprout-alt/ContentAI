@@ -24,6 +24,7 @@ from models.enums import (
     ToolExecutionStatus,
 )
 from models.memory import MemoryRecord
+from models.model_configuration import ModelConfiguration
 from models.research import ResearchPackage
 from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
 
@@ -44,6 +45,7 @@ __all__ = [
     "ServiceHeartbeat",
     "SideEffectReceipt",
     "MemoryRecord",
+    "ModelConfiguration",
     "ResearchPackage",
     "AppUser",
     "AuthSession",

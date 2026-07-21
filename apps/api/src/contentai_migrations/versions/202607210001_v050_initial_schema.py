@@ -49,6 +49,29 @@ def upgrade() -> None:
     op.create_index(op.f('ix_appuser_status'), 'appuser', ['status'], unique=False)
     op.create_index('ix_appuser_status_created_id', 'appuser', ['status', 'created_at', 'id'], unique=False)
     op.create_index(op.f('ix_appuser_temporary_password_expires_at'), 'appuser', ['temporary_password_expires_at'], unique=False)
+    op.create_table('modelconfiguration',
+    sa.Column('id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('version', sa.Integer(), nullable=False),
+    sa.Column('provider', sa.String(length=32), nullable=False),
+    sa.Column('base_url', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('model_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('api_key_ciphertext', sa.Text(), nullable=False),
+    sa.Column('api_key_fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('api_key_hint', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('is_active', sa.Boolean(), nullable=False),
+    sa.Column('validated_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('superseded_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('created_by_user_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.CheckConstraint("char_length(api_key_fingerprint) = 64", name='ck_modelconfiguration_fingerprint_length'),
+    sa.CheckConstraint("provider = 'openai_compatible'", name='ck_modelconfiguration_provider'),
+    sa.CheckConstraint('version > 0', name='ck_modelconfiguration_version_positive'),
+    sa.ForeignKeyConstraint(['created_by_user_id'], ['appuser.id'], ondelete='RESTRICT'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('version', name='ux_modelconfiguration_version')
+    )
+    op.create_index(op.f('ix_modelconfiguration_created_by_user_id'), 'modelconfiguration', ['created_by_user_id'], unique=False)
+    op.create_index('ux_modelconfiguration_active', 'modelconfiguration', ['is_active'], unique=True, postgresql_where=sa.text('is_active'))
     op.create_table('serviceheartbeat',
     sa.Column('id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('service_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
@@ -295,6 +318,7 @@ def upgrade() -> None:
     sa.Column('invocation_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('session_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('agent_version_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('model_config_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('trace_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('latest_checkpoint_id', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('status', sa.Enum('pending', 'running', 'waiting_input', 'completed', 'failed', 'cancelled', name='runstatus'), nullable=False),
@@ -322,6 +346,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['agent_version_id'], ['agentversion.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['invocation_id', 'session_id'], ['agentinvocation.id', 'agentinvocation.session_id'], name='fk_agentexecution_invocation_session', ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['invocation_id'], ['agentinvocation.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['model_config_id'], ['modelconfiguration.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['session_id', 'agent_version_id'], ['chatsession.id', 'chatsession.agent_version_id'], name='fk_agentexecution_session_version', ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )
@@ -337,6 +362,7 @@ def upgrade() -> None:
     op.create_index('ix_agentexecution_invocation_status', 'agentexecution', ['invocation_id', 'status'], unique=False)
     op.create_index(op.f('ix_agentexecution_latest_checkpoint_id'), 'agentexecution', ['latest_checkpoint_id'], unique=False)
     op.create_index(op.f('ix_agentexecution_lease_expires_at'), 'agentexecution', ['lease_expires_at'], unique=False)
+    op.create_index(op.f('ix_agentexecution_model_config_id'), 'agentexecution', ['model_config_id'], unique=False)
     op.create_index(op.f('ix_agentexecution_next_attempt_kind'), 'agentexecution', ['next_attempt_kind'], unique=False)
     op.create_index(op.f('ix_agentexecution_postprocess_completed_at'), 'agentexecution', ['postprocess_completed_at'], unique=False)
     op.create_index(op.f('ix_agentexecution_session_id'), 'agentexecution', ['session_id'], unique=False)
@@ -347,6 +373,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_agentexecution_streaming_degraded_at'), 'agentexecution', ['streaming_degraded_at'], unique=False)
     op.create_index(op.f('ix_agentexecution_trace_id'), 'agentexecution', ['trace_id'], unique=False)
     op.create_index(op.f('ix_agentexecution_worker_id'), 'agentexecution', ['worker_id'], unique=False)
+    op.create_index('ux_agentexecution_id_model_config', 'agentexecution', ['id', 'model_config_id'], unique=True)
     op.create_index('ux_agentexecution_id_session_version', 'agentexecution', ['id', 'session_id', 'agent_version_id'], unique=True)
     op.create_index('ux_agentexecution_invocation', 'agentexecution', ['invocation_id'], unique=True)
     op.create_table('agentexecutionattempt',
@@ -392,6 +419,7 @@ def upgrade() -> None:
     op.create_table('executionoutbox',
     sa.Column('id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('execution_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('model_config_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('kind', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('request_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -405,7 +433,9 @@ def upgrade() -> None:
     sa.Column('last_error', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['execution_id', 'model_config_id'], ['agentexecution.id', 'agentexecution.model_config_id'], name='fk_executionoutbox_execution_model_config', ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['execution_id'], ['agentexecution.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['model_config_id'], ['modelconfiguration.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('execution_id', 'kind', name='ux_executionoutbox_execution_kind')
     )
@@ -414,6 +444,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_executionoutbox_kind'), 'executionoutbox', ['kind'], unique=False)
     op.create_index(op.f('ix_executionoutbox_locked_by'), 'executionoutbox', ['locked_by'], unique=False)
     op.create_index(op.f('ix_executionoutbox_locked_until'), 'executionoutbox', ['locked_until'], unique=False)
+    op.create_index(op.f('ix_executionoutbox_model_config_id'), 'executionoutbox', ['model_config_id'], unique=False)
     op.create_index(op.f('ix_executionoutbox_published_at'), 'executionoutbox', ['published_at'], unique=False)
     op.create_index(op.f('ix_executionoutbox_request_id'), 'executionoutbox', ['request_id'], unique=False)
     op.create_index(op.f('ix_executionoutbox_status'), 'executionoutbox', ['status'], unique=False)
@@ -578,6 +609,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_executionoutbox_request_id'), table_name='executionoutbox')
     op.drop_index(op.f('ix_executionoutbox_published_at'), table_name='executionoutbox')
     op.drop_index(op.f('ix_executionoutbox_locked_until'), table_name='executionoutbox')
+    op.drop_index(op.f('ix_executionoutbox_model_config_id'), table_name='executionoutbox')
     op.drop_index(op.f('ix_executionoutbox_locked_by'), table_name='executionoutbox')
     op.drop_index(op.f('ix_executionoutbox_kind'), table_name='executionoutbox')
     op.drop_index(op.f('ix_executionoutbox_execution_id'), table_name='executionoutbox')
@@ -597,6 +629,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_agentexecutionattempt_execution_id'), table_name='agentexecutionattempt')
     op.drop_table('agentexecutionattempt')
     op.drop_index('ux_agentexecution_invocation', table_name='agentexecution')
+    op.drop_index('ux_agentexecution_id_model_config', table_name='agentexecution')
     op.drop_index('ux_agentexecution_id_session_version', table_name='agentexecution')
     op.drop_index(op.f('ix_agentexecution_worker_id'), table_name='agentexecution')
     op.drop_index(op.f('ix_agentexecution_trace_id'), table_name='agentexecution')
@@ -610,6 +643,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_agentexecution_next_attempt_kind'), table_name='agentexecution')
     op.drop_index(op.f('ix_agentexecution_lease_expires_at'), table_name='agentexecution')
     op.drop_index(op.f('ix_agentexecution_latest_checkpoint_id'), table_name='agentexecution')
+    op.drop_index(op.f('ix_agentexecution_model_config_id'), table_name='agentexecution')
     op.drop_index('ix_agentexecution_invocation_status', table_name='agentexecution')
     op.drop_index(op.f('ix_agentexecution_invocation_id'), table_name='agentexecution')
     op.drop_index('ix_agentexecution_invocation_created', table_name='agentexecution')
@@ -710,6 +744,9 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_serviceheartbeat_instance_id'), table_name='serviceheartbeat')
     op.drop_index(op.f('ix_serviceheartbeat_heartbeat_at'), table_name='serviceheartbeat')
     op.drop_table('serviceheartbeat')
+    op.drop_index('ux_modelconfiguration_active', table_name='modelconfiguration', postgresql_where=sa.text('is_active'))
+    op.drop_index(op.f('ix_modelconfiguration_created_by_user_id'), table_name='modelconfiguration')
+    op.drop_table('modelconfiguration')
     op.drop_index(op.f('ix_appuser_temporary_password_expires_at'), table_name='appuser')
     op.drop_index('ix_appuser_status_created_id', table_name='appuser')
     op.drop_index(op.f('ix_appuser_status'), table_name='appuser')

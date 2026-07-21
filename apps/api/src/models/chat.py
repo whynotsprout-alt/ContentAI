@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from models.base import new_id, utcnow
 from models.enums import (
@@ -23,7 +23,10 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, Relationship, SQLModel
+
+if TYPE_CHECKING:
+    from models.model_configuration import ModelConfiguration
 
 
 class ChatSession(SQLModel, table=True):
@@ -99,6 +102,12 @@ class AgentExecution(SQLModel, table=True):
     __table_args__ = (
         Index("ux_agentexecution_invocation", "invocation_id", unique=True),
         Index(
+            "ux_agentexecution_id_model_config",
+            "id",
+            "model_config_id",
+            unique=True,
+        ),
+        Index(
             "ux_agentexecution_id_session_version",
             "id",
             "session_id",
@@ -131,6 +140,11 @@ class AgentExecution(SQLModel, table=True):
     )
     session_id: str = Field(index=True)
     agent_version_id: str = Field(index=True, foreign_key="agentversion.id", ondelete="RESTRICT")
+    model_config_id: str = Field(
+        index=True,
+        foreign_key="modelconfiguration.id",
+        ondelete="RESTRICT",
+    )
     trace_id: str = Field(default_factory=lambda: new_id("trc"), index=True)
     latest_checkpoint_id: str | None = Field(default=None, index=True)
     status: RunStatus = Field(default=RunStatus.pending, index=True)
@@ -180,6 +194,8 @@ class AgentExecution(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+
+    model_configuration: ModelConfiguration = Relationship(back_populates="executions")
 
     def touch_updated_at(self, at: datetime | None = None) -> None:
         self.updated_at = utcnow() if at is None else at
@@ -283,6 +299,12 @@ class ExecutionOutbox(SQLModel, table=True):
             "kind",
             name="ux_executionoutbox_execution_kind",
         ),
+        ForeignKeyConstraint(
+            ["execution_id", "model_config_id"],
+            ["agentexecution.id", "agentexecution.model_config_id"],
+            name="fk_executionoutbox_execution_model_config",
+            ondelete="CASCADE",
+        ),
     )
 
     id: str = Field(default_factory=lambda: new_id("out"), primary_key=True)
@@ -290,6 +312,11 @@ class ExecutionOutbox(SQLModel, table=True):
         index=True,
         foreign_key="agentexecution.id",
         ondelete="CASCADE",
+    )
+    model_config_id: str = Field(
+        index=True,
+        foreign_key="modelconfiguration.id",
+        ondelete="RESTRICT",
     )
     kind: str = Field(default="execute", index=True)
     request_id: str = Field(default="", index=True)

@@ -31,6 +31,7 @@ from models.chat import (
 )
 from models.enums import ExecutionAttemptKind, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
+from models.model_configuration import ModelConfiguration
 from models.schemas import (
     AgentExecutionState,
     AgentMessageRequest,
@@ -733,6 +734,12 @@ class ConversationService:
         request_sha256: str | None = None,
         request_id: str | None = None,
     ) -> tuple[ChatMessage, AgentInvocation, AgentExecution]:
+        model_configuration = session.exec(
+            select(ModelConfiguration).where(ModelConfiguration.is_active.is_(True))
+        ).one_or_none()
+        if model_configuration is None:
+            raise RuntimeError("An active model configuration is required to create an execution.")
+
         invocation = AgentInvocation(
             **({"id": invocation_id} if invocation_id else {}),
             session_id=chat.id,
@@ -763,12 +770,14 @@ class ConversationService:
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=model_configuration.id,
         )
         session.add(execution)
         session.flush()
         session.add(
             ExecutionOutbox(
                 execution_id=execution.id,
+                model_config_id=execution.model_config_id,
                 kind="execute",
                 request_id=request_id or "",
                 payload=turn_context_snapshot or {},

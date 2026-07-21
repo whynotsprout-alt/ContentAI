@@ -30,6 +30,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import interrupt
 from memory.long_term import is_sensitive_memory
 from memory.message_persister import MessagePersister
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
@@ -733,6 +734,7 @@ def test_unclaimed_watchdog_uses_publish_time_not_execution_creation(
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             created_at=now - timedelta(hours=1),
         )
         session.add(execution)
@@ -740,6 +742,7 @@ def test_unclaimed_watchdog_uses_publish_time_not_execution_creation(
         session.add(
             ExecutionOutbox(
                 execution_id=execution.id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 kind="execute",
                 status="published",
                 published_at=now - timedelta(seconds=5),
@@ -880,6 +883,7 @@ def test_historical_key_without_digest_is_not_replayable() -> None:
                 invocation_id=invocation.id,
                 session_id=chat.id,
                 agent_version_id=chat.agent_version_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
             )
         )
         session.commit()
@@ -928,6 +932,7 @@ def test_resume_acceptance_is_one_transaction_with_one_decision_message(
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
             status=RunStatus.waiting_input,
             interrupt_payload={
                 "interrupts": [
@@ -1060,6 +1065,7 @@ def test_final_assistant_materialization_insert_or_reads_one_execution_message()
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(execution)
         session.commit()
@@ -1206,6 +1212,7 @@ def test_claim_fence_rejects_mismatched_aggregate_before_runtime_access() -> Non
             invocation_id=invocation.id,
             session_id=first.id,
             agent_version_id=first.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(execution)
         session.commit()
@@ -1250,12 +1257,14 @@ def test_claim_and_watchdog_row_fence_have_exactly_one_winner(
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
         )
         session.add(execution)
         session.flush()
         session.add(
             ExecutionOutbox(
                 execution_id=execution.id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status="published",
                 published_at=utcnow() - timedelta(seconds=5),
             )

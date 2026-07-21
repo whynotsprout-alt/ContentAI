@@ -12,10 +12,11 @@ from core.config.auth import AuthSettings
 from core.config.database import DatabaseSettings, validate_connection_budget
 from core.config.llm import LLMSettings
 from core.config.logging import LoggingSettings
+from core.config.model_configuration import ModelConfigurationSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
 from core.config.server import ServerSettings
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 LOCAL_FRONTEND_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
@@ -49,6 +50,15 @@ class Settings(BaseSettings):
     search: SearchSettings = Field(default_factory=SearchSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    model_configuration: ModelConfigurationSettings = Field(
+        default_factory=ModelConfigurationSettings
+    )
+    model_config_encryption_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY",
+        exclude=True,
+        repr=False,
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -95,6 +105,7 @@ class Settings(BaseSettings):
         self._validate_redis()
         self._validate_search()
         self._validate_auth()
+        self._validate_model_configuration()
         self._validate_frontend_origins()
         return self
 
@@ -269,6 +280,26 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL is required in production."
                 )
+
+    def _validate_model_configuration(self) -> None:
+        from core.model_config_crypto import (
+            ModelConfigurationSecretError,
+            ModelConfigurationSecretProtector,
+        )
+
+        encryption_key = (
+            self.model_configuration.encryption_key.get_secret_value().strip()
+            or self.model_config_encryption_key.get_secret_value().strip()
+        )
+        if not encryption_key:
+            raise ValueError("CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY is required.")
+        try:
+            ModelConfigurationSecretProtector(encryption_key)
+        except ModelConfigurationSecretError as exc:
+            raise ValueError(
+                "CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY must be a valid Fernet key."
+            ) from exc
+        self.model_configuration.encryption_key = SecretStr(encryption_key)
 
     def _validate_frontend_origins(self) -> None:
         for origin in self.server.frontend_origins:

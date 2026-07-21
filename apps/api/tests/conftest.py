@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 import pytest
@@ -5,11 +6,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+TEST_MODEL_CONFIG_ENCRYPTION_KEY = base64.urlsafe_b64encode(bytes([7]) * 32).decode("ascii")
 TEST_ENV_VARS = {
     "CONTENTAI_ENV": "test",
     "CONTENTAI_DATABASE__URL": TEST_DATABASE_URL,
     "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY": "test-key",
     "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL": "https://example.test/v1",
+    "CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": TEST_MODEL_CONFIG_ENCRYPTION_KEY,
 }
 
 
@@ -81,6 +84,7 @@ def reset_database() -> None:
                     checkpoint_writes,
                     checkpoint_blobs,
                     checkpoints,
+                    modelconfiguration,
                     modelusage,
                     adminauditlog,
                     authsession,
@@ -116,6 +120,24 @@ def reset_database() -> None:
                     'local-user', 'local@test.invalid', 'local@test.invalid',
                     'test-only-password-hash', 'user', 'active', now(), now(), false, 0,
                     now(), now()
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO modelconfiguration (
+                    id, version, provider, base_url, model_name,
+                    api_key_ciphertext, api_key_fingerprint, api_key_hint,
+                    is_active, validated_at, created_at, superseded_at,
+                    created_by_user_id
+                )
+                VALUES (
+                    'default-model-config', 1, 'openai_compatible',
+                    'https://models.test.invalid/v1', 'test-model',
+                    'test-only-ciphertext', repeat('0', 64), '...test',
+                    true, now(), now(), NULL, 'local-user'
                 )
                 """
             )
