@@ -1,3 +1,5 @@
+import json
+
 import agent.graph.nodes as graph_nodes
 import httpx
 import pytest
@@ -99,3 +101,25 @@ def test_graph_builder_accepts_invokable_model_contract():
 
 def test_graph_nodes_no_longer_embed_memory_side_effects():
     assert not hasattr(graph_nodes, "build_memory_node")
+
+
+def test_research_tool_result_is_carried_in_execution_graph_state():
+    result = graph_nodes._research_state_update(
+        {
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(
+                        {
+                            "research_pack_id": "rsp-local",
+                            "research_topic_hash": "hash-local",
+                        }
+                    ),
+                    name="prepare_topic_research",
+                    tool_call_id="call-research",
+                )
+            ]
+        }
+    )
+
+    assert result["research_package_id"] == "rsp-local"
+    assert result["research_topic_hash"] == "hash-local"

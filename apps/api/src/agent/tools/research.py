@@ -6,7 +6,7 @@ from agent.workflows.deep_research import (
     SearchNoResultsError,
     run_deep_research_package_workflow,
 )
-from agent.workflows.research_repository import ResearchPackageRepository
+from agent.workflows.research_repository import ResearchPackageRepository, topic_digest
 from langchain_core.tools import tool
 
 
@@ -55,6 +55,7 @@ def prepare_topic_research(topic: str) -> dict[str, object]:
     return {
         "topic": topic,
         "research_pack_id": research_package.id,
+        "research_topic_hash": topic_digest(topic),
         "research_pack": {
             "topic": topic,
             "package": result.package_data,

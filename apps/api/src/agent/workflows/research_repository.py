@@ -16,12 +16,19 @@ def topic_digest(topic: str) -> str:
 
 class ResearchPackageRepository:
     @staticmethod
-    def latest_for_session(session: Session, session_id: str) -> ResearchPackage | None:
+    def for_execution(
+        session: Session,
+        *,
+        package_id: str,
+        execution_id: str,
+        topic_hash: str,
+    ) -> ResearchPackage | None:
         return session.exec(
-            select(ResearchPackage)
-            .where(ResearchPackage.session_id == session_id)
-            .order_by(ResearchPackage.created_at.desc(), ResearchPackage.id.desc())
-            .limit(1)
+            select(ResearchPackage).where(
+                ResearchPackage.id == package_id,
+                ResearchPackage.execution_id == execution_id,
+                ResearchPackage.topic_hash == topic_hash,
+            )
         ).first()
 
     @staticmethod

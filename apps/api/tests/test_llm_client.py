@@ -1,6 +1,7 @@
 import httpx
 import pytest
 from agent.infrastructure.llm.client import LangChainChatClient, RelayCompatibleChatAnthropic
+from agent.infrastructure.llm.gateway import ModelGateway
 from agent.runtime.errors import (
     MODEL_STREAM_INTERRUPTED_CODE,
     MODEL_STREAM_INTERRUPTED_MESSAGE,
@@ -8,6 +9,7 @@ from agent.runtime.errors import (
 )
 from anthropic.types import MessageDeltaUsage, RawMessageDeltaEvent
 from core.config import Settings
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
 
@@ -65,6 +67,32 @@ def test_agent_model_keeps_provider_streaming_when_tools_are_bound():
 
     assert plain_model.disable_streaming is False
     assert tool_model.bound.disable_streaming is False
+
+
+def test_model_gateway_exposes_provider_token_counter_with_tools():
+    observed: list[tuple[list[object], list[object]]] = []
+
+    class ProviderModel:
+        def get_num_tokens_from_messages(self, messages, *, tools=None):
+            observed.append((messages, tools or []))
+            return 11
+
+    class Client:
+        def build_chat_model(self, **_kwargs):
+            return ProviderModel()
+
+    settings = Settings(
+        database={
+            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+        },
+        search={"traffic_relay_api_key": "test-key"},
+    )
+    tools = [object()]
+    counter = ModelGateway(settings=settings, client=Client()).build_token_counter(tools=tools)
+    messages = [HumanMessage(content="count me")]
+
+    assert counter.count_messages(messages) == 11
+    assert observed == [(messages, tools)]
 
 
 @pytest.mark.parametrize(

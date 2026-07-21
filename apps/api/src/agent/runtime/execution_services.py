@@ -41,6 +41,29 @@ LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 logger = logging.getLogger(__name__)
 
 
+def _execution_research_package(
+    db_session: Session,
+    *,
+    execution_id: str,
+    graph: Any,
+    config: dict[str, Any],
+) -> Any | None:
+    snapshot = graph.get_state(config)
+    values = getattr(snapshot, "values", None)
+    if not isinstance(values, dict):
+        return None
+    package_id = str(values.get("research_package_id") or "").strip()
+    topic_hash = str(values.get("research_topic_hash") or "").strip()
+    if not package_id or not topic_hash:
+        return None
+    return ResearchPackageRepository.for_execution(
+        db_session,
+        package_id=package_id,
+        execution_id=execution_id,
+        topic_hash=topic_hash,
+    )
+
+
 @dataclass(frozen=True)
 class ExecutionTurnResult:
     new_messages: list[BaseMessage]
@@ -267,6 +290,12 @@ class AgentExecutionEngine:
             conversation_id=chat.id,
             execution_id=execution.id,
         )
+        research_package = _execution_research_package(
+            db_session,
+            execution_id=execution.id,
+            graph=runtime.graph,
+            config=runtime.config,
+        )
         long_term = LongTermMemory(repository)
 
         short_summary, db_messages = short_term.load(
@@ -281,6 +310,12 @@ class AgentExecutionEngine:
             limit=8,
         )
         tool_names = list(runtime.tool_permissions)
+        build_token_counter = getattr(self.container.model_gateway, "build_token_counter", None)
+        token_counter = (
+            build_token_counter(tools=self.container.get_tools(tool_permissions))
+            if callable(build_token_counter)
+            else None
+        )
         agent_context = self.context_assembler.assemble(
             agent_profile=agent_profile,
             agent_version=agent_version,
@@ -293,7 +328,8 @@ class AgentExecutionEngine:
             conversation_id=str(chat.id),
             run_id=execution.id,
             permissions=tool_names,
-            research_package=ResearchPackageRepository.latest_for_session(db_session, chat.id),
+            research_package=research_package,
+            token_counter=token_counter,
         )
 
         graph_input = self._build_graph_input(
@@ -549,6 +585,8 @@ class AgentExecutionEngine:
         llm_spans = 0
 
         stream_config = dict(config) if isinstance(config, dict) else {}
+        status_clock = getattr(self, "_status_clock", time.monotonic)
+        last_status_poll_at: float | None = None
         for item in graph.stream(
             stream_input,
             config=stream_config,
@@ -556,11 +594,17 @@ class AgentExecutionEngine:
             version="v2",
         ):
             if db_session is not None:
-                self.state_manager.ensure_execution_not_cancelled(
-                    db_session,
-                    execution,
-                    expected_worker_id=expected_worker_id,
-                )
+                status_poll_at = status_clock()
+                if (
+                    last_status_poll_at is None
+                    or status_poll_at - last_status_poll_at >= 1.0
+                ):
+                    self.state_manager.ensure_execution_not_cancelled(
+                        db_session,
+                        execution,
+                        expected_worker_id=expected_worker_id,
+                    )
+                    last_status_poll_at = status_poll_at
             stream_mode, payload = _stream_mode_and_payload(item)
             if stream_mode is None:
                 continue

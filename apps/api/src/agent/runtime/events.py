@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
+from time import monotonic
 from typing import Any
 
 from core.config import get_settings
@@ -23,6 +24,8 @@ EventPayload = dict[str, Any]
 RealtimeEmit = Callable[[str, EventPayload], None]
 
 _EVENT_SCHEMA_VERSION = 1
+_STREAM_BATCH_INTERVAL_SECONDS = 0.05
+_STREAM_BATCH_MAX_CHARS = 256
 _CONTRACT_EVENT_TYPES = {
     "state",
     "token",
@@ -104,6 +107,25 @@ class AgentEventWriter:
         self._realtime_emit = realtime_emit
         self._closed = False
         self._closing = False
+        agent_settings = getattr(settings, "agent", None)
+        configured_interval_ms = max(
+            1,
+            int(getattr(agent_settings, "event_flush_interval_ms", 50) or 50),
+        )
+        configured_max_chars = max(
+            1,
+            int(getattr(agent_settings, "event_flush_max_chars", 256) or 256),
+        )
+        self._stream_batch_interval_seconds = min(
+            _STREAM_BATCH_INTERVAL_SECONDS,
+            configured_interval_ms / 1000,
+        )
+        self._stream_batch_max_chars = min(
+            _STREAM_BATCH_MAX_CHARS,
+            configured_max_chars,
+        )
+        self._pending_delta: EventPayload | None = None
+        self._pending_delta_started_at = 0.0
 
     def emit(self, event: str, data: EventPayload) -> None:
         if self._closed:
@@ -125,6 +147,15 @@ class AgentEventWriter:
             conversation_id=self.conversation_id,
         )
 
+        if event_name == "assistant_message_delta" and not bool(payload.get("done")):
+            self._buffer_assistant_delta(payload)
+            return
+        self._flush_pending_delta()
+
+        self._emit_now(event_name, payload)
+
+    def _emit_now(self, event_name: str, payload: EventPayload) -> None:
+
         contract_event, contract_payload = self._normalize_contract_event(
             event_name,
             payload,
@@ -132,10 +163,38 @@ class AgentEventWriter:
         self._emit_realtime(contract_event, contract_payload)
         self._safe_write_event(contract_event, contract_payload)
 
+    def _buffer_assistant_delta(self, payload: EventPayload) -> None:
+        now = monotonic()
+        message_id = str(payload.get("message_id") or "")
+        pending_message_id = str((self._pending_delta or {}).get("message_id") or "")
+        if self._pending_delta is not None and message_id != pending_message_id:
+            self._flush_pending_delta()
+
+        if self._pending_delta is None:
+            self._pending_delta = dict(payload)
+            self._pending_delta["chunk"] = ""
+            self._pending_delta["done"] = False
+            self._pending_delta_started_at = now
+        chunk = _coerce_content(payload)
+        self._pending_delta["chunk"] = str(self._pending_delta.get("chunk") or "") + chunk
+        if (
+            len(str(self._pending_delta["chunk"])) >= self._stream_batch_max_chars
+            or now - self._pending_delta_started_at >= self._stream_batch_interval_seconds
+        ):
+            self._flush_pending_delta()
+
+    def _flush_pending_delta(self) -> None:
+        if self._pending_delta is None:
+            return
+        payload = self._pending_delta
+        self._pending_delta = None
+        self._pending_delta_started_at = 0.0
+        self._emit_now("assistant_message_delta", payload)
+
     def flush(self) -> None:
         if self._closed and not self._closing:
             raise ClosedWriterError(f"Event writer is closed: execution_id={self.execution_id}")
-        return None
+        self._flush_pending_delta()
 
     def close(self) -> None:
         if self._closed:

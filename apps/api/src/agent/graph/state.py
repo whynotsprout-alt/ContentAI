@@ -19,6 +19,8 @@ class AgentStateOptional(TypedDict, total=False):
     human_approved: bool | None
     tool_error: str | dict[str, str] | None
     tool_error_count: int
+    research_package_id: str
+    research_topic_hash: str
 
 
 class AgentState(AgentStateCore, AgentStateOptional):

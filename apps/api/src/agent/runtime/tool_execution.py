@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from agent.runtime.context import get_tool_runtime_context
+from agent.runtime.errors import PUBLIC_RUNTIME_ERROR_CODES
 from agent.runtime.events import emit_event
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
@@ -97,6 +98,8 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         except GraphBubbleUp:
             raise
         except Exception as exc:  # noqa: BLE001
+            if _is_public_terminal_error(exc):
+                raise
             return ToolMessage(
                 content={"status": "failed", "error": str(exc)},
                 name=tool_name,
@@ -241,6 +244,8 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
             stage="failed",
             error=error,
         )
+        if _is_public_terminal_error(exc):
+            raise
         return ToolMessage(
             content={"status": "failed", "error": error},
             name=tool_name,
@@ -266,6 +271,11 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
     )
     return bounded
+
+
+def _is_public_terminal_error(exc: Exception) -> bool:
+    code = str(getattr(exc, "code", "") or "").strip()
+    return code in PUBLIC_RUNTIME_ERROR_CODES
 
 
 def _execute_side_effect_remotely(

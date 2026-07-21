@@ -3,7 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from agent.runtime.errors import classify_runtime_error
 from agent.runtime.execution_services import AgentExecutionEngine, AgentRuntimeEventService
+from agent.workflows.deep_research import ContentEvidenceInvalidError
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -78,6 +80,14 @@ def test_execution_failed_event_carries_retryable_marker():
             "retryable": True,
         },
     )
+
+
+def test_content_evidence_error_keeps_public_terminal_code():
+    detail = classify_runtime_error(ContentEvidenceInvalidError())
+
+    assert detail.code == "CONTENT_EVIDENCE_INVALID"
+    assert detail.message == "Research evidence could not be validated."
+    assert detail.retryable is False
 
 
 def test_build_graph_input_keeps_system_prompt_for_fresh_thread():
@@ -230,3 +240,54 @@ def test_stream_graph_dedups_cumulative_ai_message_chunks():
         if event_name == "assistant_message_delta"
     ]
     assert delta_payloads == ["This is a ", "test", " response"]
+
+
+def test_stream_graph_polls_cancellation_at_most_once_per_second():
+    class _BusyGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            for index in range(20):
+                yield ("updates", {"tools": {"messages": [AIMessage(content=str(index))]}})
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.current = 0.0
+
+        def __call__(self) -> float:
+            self.current += 0.2
+            return self.current
+
+    class _StateManager:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+            self.polls: list[float] = []
+
+        def ensure_execution_not_cancelled(self, *_args, **_kwargs) -> None:
+            self.polls.append(self.clock.current)
+
+    clock = _Clock()
+    state_manager = _StateManager(clock)
+    engine = _make_engine()
+    engine._status_clock = clock
+    engine.state_manager = state_manager
+
+    engine._stream_graph(
+        graph=_BusyGraph(),
+        db_session=object(),
+        execution=SimpleNamespace(id="execution-poll"),
+        execution_id="execution-poll",
+        graph_input=[],
+        state={},
+        config={},
+        event_writer=_EventWriter(),
+        event_service=AgentRuntimeEventService(),
+    )
+
+    assert 1 < len(state_manager.polls) < 20
+    assert all(
+        current - previous >= 1.0
+        for previous, current in zip(
+            state_manager.polls,
+            state_manager.polls[1:],
+            strict=False,
+        )
+    )

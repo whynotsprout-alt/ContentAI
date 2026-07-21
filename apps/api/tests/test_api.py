@@ -713,6 +713,37 @@ def test_message_contract_rejects_agent_id_and_creates_no_execution():
     assert after == before
 
 
+def test_oversized_current_input_returns_413_before_turn_is_persisted():
+    with TestClient(app) as client:
+        chat = client.post(
+            "/api/chat/sessions",
+            json={"agent_id": "default-agent"},
+        ).json()
+        settings = app.state.conversation_service.agent_service.settings
+        original_window = settings.llm.context_window_tokens
+        original_output = settings.llm.chat_max_tokens
+        settings.llm.context_window_tokens = 12
+        settings.llm.chat_max_tokens = 8
+        try:
+            response = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "你好"},
+            )
+        finally:
+            settings.llm.context_window_tokens = original_window
+            settings.llm.chat_max_tokens = original_output
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "CURRENT_INPUT_TOO_LARGE"
+    with Session(get_engine()) as session:
+        assert session.exec(
+            select(ChatMessage).where(ChatMessage.session_id == chat["session_id"])
+        ).all() == []
+        assert session.exec(
+            select(AgentExecution).where(AgentExecution.session_id == chat["session_id"])
+        ).all() == []
+
+
 def test_message_idempotency_replay_mismatch_and_transport_conflict():
     with TestClient(app) as client:
         chat = client.post(

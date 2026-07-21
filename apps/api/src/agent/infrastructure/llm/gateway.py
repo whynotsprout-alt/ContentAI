@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.context.window import TokenCounter
 from agent.infrastructure.llm.client import LangChainChatClient
 from core.config import Settings, get_settings
 
@@ -38,6 +39,22 @@ class ModelGateway:
             temperature=0,
             max_tokens=self.settings.llm.structured_max_tokens,
             schema=HotspotFilterResult,
+        )
+
+    def build_token_counter(self, *, tools: list[Any] | None = None) -> TokenCounter:
+        model = self.client.build_chat_model(
+            model=self.settings.llm.chat_model,
+            temperature=0,
+            max_tokens=1,
+            timeout_seconds=5.0,
+            max_retries=0,
+        )
+        provider_count = getattr(model, "get_num_tokens_from_messages", None)
+        if not callable(provider_count):
+            return TokenCounter()
+        bound_tools = list(tools or [])
+        return TokenCounter(
+            provider_count=lambda messages: provider_count(messages, tools=bound_tools)
         )
 
     def build_structured_output_model(

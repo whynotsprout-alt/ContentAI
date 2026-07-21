@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Protocol
 
+from agent.context.window import TokenCounter
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
 from core.security import AuthContext
 from models.agent import AgentProfile, AgentVersion
@@ -41,6 +42,7 @@ from services.errors import (
     ActiveExecutionExistsError,
     AgentNotFoundError,
     ChatSessionNotFoundError,
+    CurrentInputTooLargeError,
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
@@ -99,6 +101,7 @@ class ConversationService:
         self._cursor_signer = signer_from_settings(agent_service.settings)
         self.execution_dispatcher = execution_dispatcher
         self._execution_scope_guard = ExecutionScopeGuard()
+        self._input_token_counter = TokenCounter()
 
     def close(self) -> None:
         return None
@@ -314,6 +317,7 @@ class ConversationService:
                     error=self._execution_error(execution.error),
                 ), True
         self._ensure_no_active_execution(session, chat.id, for_update=True)
+        self._ensure_current_input_fits(payload.message)
 
         message, invocation, execution = self._create_user_message_invocation_execution(
             session,
@@ -344,6 +348,23 @@ class ConversationService:
         if self.execution_dispatcher is not None:
             self.execution_dispatcher.dispatch(execution.id, request_id)
         return response, False
+
+    def _ensure_current_input_fits(self, content: str) -> None:
+        settings = getattr(self.agent_service, "settings", None)
+        llm = getattr(settings, "llm", None)
+        if llm is None:
+            return
+        input_budget = int(llm.context_window_tokens) - int(llm.chat_max_tokens)
+        from langchain_core.messages import HumanMessage
+
+        if (
+            input_budget <= 0
+            or self._input_token_counter.count_messages([HumanMessage(content=content)])
+            > input_budget
+        ):
+            raise CurrentInputTooLargeError(
+                "Current input exceeds the model context budget."
+            )
 
     def submit_user_message_background(
         self,

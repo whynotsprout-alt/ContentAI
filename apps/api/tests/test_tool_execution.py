@@ -11,6 +11,7 @@ import pytest
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.tool_execution import execute_tool_call
 from agent.tools.memory import remember
+from agent.workflows.deep_research import ContentEvidenceInvalidError
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
 from memory import LongTermMemory, MemoryRepository
@@ -215,6 +216,25 @@ def test_tool_timeout_returns_structured_error_and_marks_audit_failed() -> None:
         assert audit.status == ToolExecutionStatus.failed
         assert audit.result_digest == ""
         assert "TOOL_TIMEOUT" in audit.error
+
+
+def test_public_terminal_tool_error_propagates_to_execution_runner() -> None:
+    execution_id = "execution-terminal-tool-error"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "prepare_topic_research", "id": "call-evidence", "args": {}}
+    )
+
+    with tool_runtime_scope(
+        _runtime(
+            execution_id,
+            {"prepare_topic_research": {"timeout_seconds": 1, "max_output_chars": 100}},
+        )
+    ), pytest.raises(ContentEvidenceInvalidError):
+        execute_tool_call(
+            request,
+            lambda _request: (_ for _ in ()).throw(ContentEvidenceInvalidError()),
+        )
 
 
 def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> None:

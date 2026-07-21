@@ -1,3 +1,4 @@
+import json
 import uuid
 from collections.abc import Sequence
 from time import sleep
@@ -87,6 +88,7 @@ def build_tools_node(tools: Sequence[BaseTool]):
         output = tool_node.invoke(state, config=config)
         tool_error = _extract_tool_error(output)
         update = _messages_update_to_state_update(output)
+        research_state = _research_state_update(output)
         _emit_node_event(
             "tools_node",
             {"status": "finished", "tool_error": tool_error is not None},
@@ -94,6 +96,7 @@ def build_tools_node(tools: Sequence[BaseTool]):
         )
         return {
             **update,
+            **research_state,
             "human_approved": None,
             "tool_error": tool_error,
             "tool_error_count": int(state.get("tool_error_count", 0)) + (1 if tool_error else 0),
@@ -207,6 +210,31 @@ def _extract_tool_error(output: Any) -> str | None:
         if isinstance(message, ToolMessage) and getattr(message, "status", None) == "error":
             return _coerce_message_text(message.content) or "tool execution failed"
     return None
+
+
+def _research_state_update(output: Any) -> dict[str, str]:
+    if not isinstance(output, dict) or not isinstance(output.get("messages"), list):
+        return {}
+    for message in reversed(output["messages"]):
+        if not isinstance(message, ToolMessage) or message.name != "prepare_topic_research":
+            continue
+        content = message.content
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError:
+                return {}
+        if not isinstance(content, dict):
+            return {}
+        package_id = str(content.get("research_pack_id") or "").strip()
+        topic_hash = str(content.get("research_topic_hash") or "").strip()
+        if package_id and topic_hash:
+            return {
+                "research_package_id": package_id,
+                "research_topic_hash": topic_hash,
+            }
+        return {}
+    return {}
 
 
 def _coerce_message_text(value: Any) -> str:

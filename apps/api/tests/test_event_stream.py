@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
-from agent.runtime.events import PersistentAgentEventWriter
+import agent.runtime.events as runtime_events
+from agent.runtime.events import AgentEventWriter, PersistentAgentEventWriter
 from db.session import get_engine
 from models.chat import AgentExecution, AgentInvocation, ChatSession
 from services.event_stream import (
@@ -28,6 +30,15 @@ class FakePipeline:
 
     def execute(self) -> list[Any]:
         return [True] * len(self.commands)
+
+
+class CapturingEventWriter(AgentEventWriter):
+    def __init__(self, settings: Any) -> None:
+        super().__init__("execution-batched", settings=settings)
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def _write_event(self, event: str, payload: dict[str, Any]) -> None:
+        self.events.append((event, payload))
 
 
 class FakeRedis:
@@ -154,3 +165,75 @@ def test_runtime_writer_does_not_persist_intermediate_events() -> None:
 
     assert publisher.sequences == [1]
     assert "agentevent" not in inspect(get_engine()).get_table_names()
+
+
+def test_assistant_stream_chunks_batch_at_256_characters(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(runtime_events, "monotonic", lambda: clock[0], raising=False)
+    writer = CapturingEventWriter(
+        SimpleNamespace(
+            agent=SimpleNamespace(event_flush_interval_ms=50, event_flush_max_chars=256)
+        )
+    )
+
+    for chunk in ("a" * 100, "b" * 100):
+        writer.emit(
+            "assistant_message_delta",
+            {"message_id": "message-1", "chunk": chunk, "done": False},
+        )
+    assert writer.events == []
+
+    writer.emit(
+        "assistant_message_delta",
+        {"message_id": "message-1", "chunk": "c" * 56, "done": False},
+    )
+
+    assert len(writer.events) == 1
+    assert writer.events[0][0] == "token"
+    assert writer.events[0][1]["content"] == "a" * 100 + "b" * 100 + "c" * 56
+
+
+def test_assistant_stream_chunks_batch_at_50_milliseconds(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(runtime_events, "monotonic", lambda: clock[0], raising=False)
+    writer = CapturingEventWriter(
+        SimpleNamespace(
+            agent=SimpleNamespace(event_flush_interval_ms=50, event_flush_max_chars=256)
+        )
+    )
+    writer.emit(
+        "assistant_message_delta",
+        {"message_id": "message-1", "chunk": "first", "done": False},
+    )
+    clock[0] = 0.051
+    writer.emit(
+        "assistant_message_delta",
+        {"message_id": "message-1", "chunk": " second", "done": False},
+    )
+
+    assert [payload["content"] for _event, payload in writer.events] == ["first second"]
+
+
+def test_terminal_events_flush_pending_assistant_chunks(monkeypatch):
+    monkeypatch.setattr(runtime_events, "monotonic", lambda: 0.0, raising=False)
+    settings = SimpleNamespace(
+        agent=SimpleNamespace(event_flush_interval_ms=50, event_flush_max_chars=256)
+    )
+
+    for terminal_event in (
+        "execution_completed",
+        "execution_failed",
+        "execution_cancelled",
+        "execution_waiting_input",
+    ):
+        writer = CapturingEventWriter(settings)
+        writer.emit(
+            "assistant_message_delta",
+            {"message_id": "message-1", "chunk": "tail", "done": False},
+        )
+        assert writer.events == []
+        writer.emit(terminal_event, {"status": terminal_event})
+
+        assert writer.events[0][0] == "token"
+        assert writer.events[0][1]["content"] == "tail"
+        assert len(writer.events) == 2

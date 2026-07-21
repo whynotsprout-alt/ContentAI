@@ -62,6 +62,10 @@ class ResponseItemTooLargeError(ConversationError):
     pass
 
 
+class CurrentInputTooLargeError(ConversationError):
+    pass
+
+
 class StreamReplayGapError(ConversationError):
     pass
 

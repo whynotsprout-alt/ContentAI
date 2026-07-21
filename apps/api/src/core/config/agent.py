@@ -9,8 +9,8 @@ class AgentSettings(BaseModel):
     context_min_focused_messages: int = 6
     max_iterations: int = 8
     recursion_limit: int = 20
-    event_flush_interval_ms: int = 250
-    event_flush_max_chars: int = 1200
+    event_flush_interval_ms: int = 50
+    event_flush_max_chars: int = 256
     runtime_cache_capacity: int = 32
     checkpoint_backend: str = "postgres"
     memory_backend: str = "postgres"

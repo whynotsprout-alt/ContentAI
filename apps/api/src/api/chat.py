@@ -33,6 +33,7 @@ from services.errors import (
     ActiveExecutionExistsError,
     AgentNotFoundError,
     ChatSessionNotFoundError,
+    CurrentInputTooLargeError,
     ExecutionNotFoundError,
     IdempotencyKeyConflictError,
     IdempotencyPayloadMismatchError,
@@ -58,6 +59,7 @@ ServiceHttpError = (
     AgentNotFoundError
     | ActiveExecutionExistsError
     | ChatSessionNotFoundError
+    | CurrentInputTooLargeError
     | ExecutionNotFoundError
     | IdempotencyKeyConflictError
     | IdempotencyPayloadMismatchError
@@ -74,6 +76,7 @@ SERVICE_HTTP_ERRORS = (
     AgentNotFoundError,
     ActiveExecutionExistsError,
     ChatSessionNotFoundError,
+    CurrentInputTooLargeError,
     ExecutionNotFoundError,
     IdempotencyKeyConflictError,
     IdempotencyPayloadMismatchError,
@@ -599,6 +602,18 @@ def _http_exception_for_service_error(
             detail=_build_service_error_detail(
                 code="RESPONSE_ITEM_TOO_LARGE",
                 message=str(exc),
+                request_id=request_id,
+                session_id=session_id,
+                thread_id=thread_id,
+                execution_id=execution_id,
+            ),
+        )
+    if isinstance(exc, CurrentInputTooLargeError):
+        return HTTPException(
+            status_code=413,
+            detail=_build_service_error_detail(
+                code="CURRENT_INPUT_TOO_LARGE",
+                message="Current input exceeds the model context budget.",
                 request_id=request_id,
                 session_id=session_id,
                 thread_id=thread_id,

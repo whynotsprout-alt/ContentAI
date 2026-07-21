@@ -10,6 +10,7 @@ HTML_TAG_RE = re.compile(r"<[^>]+>")
 MAX_ERROR_MESSAGE_LENGTH = 4000
 MODEL_STREAM_INTERRUPTED_MESSAGE = "模型服务的流式连接意外中断，请稍后重试。"
 MODEL_STREAM_INTERRUPTED_CODE = "MODEL_STREAM_INTERRUPTED"
+PUBLIC_RUNTIME_ERROR_CODES = {"CONTENT_EVIDENCE_INVALID"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,12 @@ def classify_runtime_error(exc: Exception) -> RuntimeErrorDetail:
             message=MODEL_STREAM_INTERRUPTED_MESSAGE,
             code=MODEL_STREAM_INTERRUPTED_CODE,
             retryable=True,
+        )
+    declared_code = str(getattr(exc, "code", "") or "").strip()
+    if declared_code in PUBLIC_RUNTIME_ERROR_CODES:
+        return RuntimeErrorDetail(
+            message=_normalize_runtime_error(exc),
+            code=declared_code,
         )
     return RuntimeErrorDetail(
         message=_normalize_runtime_error(exc),
