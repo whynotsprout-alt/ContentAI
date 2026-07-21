@@ -6,6 +6,10 @@ from models.schemas.admin import (
     AdminUsageBucket,
     AdminUsageResponse,
     AdminUserUpdate,
+    ModelConfigurationProbeRequest,
+    ModelConfigurationProbeResponse,
+    ModelConfigurationResponse,
+    ModelConfigurationUpdateRequest,
     TemporaryPasswordResponse,
 )
 from models.schemas.agent import (
@@ -89,4 +93,8 @@ __all__ = [
     "AdminUsageResponse",
     "AdminUserUpdate",
     "TemporaryPasswordResponse",
+    "ModelConfigurationProbeRequest",
+    "ModelConfigurationProbeResponse",
+    "ModelConfigurationResponse",
+    "ModelConfigurationUpdateRequest",
 ]

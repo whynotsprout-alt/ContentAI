@@ -11,12 +11,16 @@ from core.logging import configure_logging
 from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
 from db.session import close_database, get_engine, init_database
 from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from services.admin_service import AdminService
 from services.agent_service import AgentService
 from services.auth_service import AuthService
 from services.catalog_service import CatalogService
 from services.conversation_service import ConversationService, ExecutionDispatcher
+from services.model_configuration_service import ModelConfigurationService
 from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,7 @@ def _register_services(app: FastAPI) -> None:
     app.state.conversation_service = conversation_service
     app.state.auth_service = auth_service
     app.state.admin_service = AdminService(auth_service)
+    app.state.model_configuration_service = ModelConfigurationService(app.state.settings)
     app.state.rate_limiter = RedisRateLimiter(app.state.settings)
 
 
@@ -117,6 +122,24 @@ def create_app(
     app.state.settings = settings
     app.state.runtime = runtime
     app.state.execution_dispatcher_factory = execution_dispatcher_factory
+
+    @app.exception_handler(RequestValidationError)
+    async def redact_sensitive_validation_errors(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = []
+        for raw_error in exc.errors():
+            error = dict(raw_error)
+            location = tuple(str(item).lower() for item in error.get("loc", ()))
+            is_sensitive = any(
+                token in item.replace("-", "_")
+                for item in location
+                for token in ("api_key", "authorization", "ciphertext")
+            )
+            if is_sensitive or error.get("type") == "json_invalid":
+                error["input"] = "[REDACTED]"
+            errors.append(error)
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
     app.add_middleware(
         CORSMiddleware,

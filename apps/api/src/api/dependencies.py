@@ -10,6 +10,7 @@ from services.agent_service import AgentService
 from services.auth_service import AuthService
 from services.catalog_service import CatalogService
 from services.conversation_service import ConversationService
+from services.model_configuration_service import ModelConfigurationService
 from sqlmodel import Session
 
 AuthContextDep = Annotated[AuthContext, Depends(authenticate_request)]
@@ -92,6 +93,10 @@ def get_admin_service(request: Request) -> AdminService:
     return request.app.state.admin_service
 
 
+def get_model_configuration_service(request: Request) -> ModelConfigurationService:
+    return request.app.state.model_configuration_service
+
+
 SessionDep = Annotated[Session, Depends(get_request_session)]
 RequestContextDep = Annotated[RequestContext, Depends(get_request_context)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
@@ -99,3 +104,6 @@ CatalogServiceDep = Annotated[CatalogService, Depends(get_catalog_service)]
 ConversationServiceDep = Annotated[ConversationService, Depends(get_conversation_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 AdminServiceDep = Annotated[AdminService, Depends(get_admin_service)]
+ModelConfigurationServiceDep = Annotated[
+    ModelConfigurationService, Depends(get_model_configuration_service)
+]

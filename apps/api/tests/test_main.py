@@ -87,6 +87,7 @@ def test_startup_registers_only_runtime_services():
         "conversation_service",
         "auth_service",
         "admin_service",
+        "model_configuration_service",
         "rate_limiter",
     ]
 

@@ -1,6 +1,12 @@
 from typing import Annotated
 
-from api.dependencies import AdminServiceDep, CurrentAdminDep, RequestContextDep, SessionDep
+from api.dependencies import (
+    AdminServiceDep,
+    CurrentAdminDep,
+    ModelConfigurationServiceDep,
+    RequestContextDep,
+    SessionDep,
+)
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from models.schemas import (
     AdminMessageListResponse,
@@ -10,13 +16,144 @@ from models.schemas import (
     AdminUserListResponse,
     AdminUserSummary,
     AdminUserUpdate,
+    ModelConfigurationProbeRequest,
+    ModelConfigurationProbeResponse,
+    ModelConfigurationResponse,
+    ModelConfigurationUpdateRequest,
     TemporaryPasswordResponse,
 )
 from models.schemas.base import AwareDatetime
 from services.auth_service import AuthServiceError
 from services.errors import InvalidCursorError, ResponseItemTooLargeError
+from services.model_config_network import ModelProbeError
+from services.model_configuration_repository import ModelConfigurationChanged
+from services.model_configuration_service import ModelCredentialsRequired
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+_MODEL_ERROR_STATUS = {
+    "MODEL_NOT_CONFIGURED": 503,
+    "MODEL_CREDENTIALS_REQUIRED": 422,
+    "MODEL_ENDPOINT_FORBIDDEN": 422,
+    "MODEL_CONFIG_CHANGED": 409,
+    "MODEL_AUTH_FAILED": 422,
+    "MODEL_NOT_FOUND": 422,
+    "MODEL_PROVIDER_UNREACHABLE": 502,
+    "MODEL_PROBE_FAILED": 502,
+}
+
+_MODEL_ERROR_MESSAGES = {
+    "MODEL_NOT_CONFIGURED": "A model provider has not been configured.",
+    "MODEL_CREDENTIALS_REQUIRED": "Model provider credentials are required.",
+    "MODEL_ENDPOINT_FORBIDDEN": "The model endpoint is not permitted.",
+    "MODEL_CONFIG_CHANGED": "The model configuration changed. Refresh and try again.",
+    "MODEL_AUTH_FAILED": "The model provider rejected the credentials.",
+    "MODEL_NOT_FOUND": "The requested model was not found.",
+    "MODEL_PROVIDER_UNREACHABLE": "The model provider could not be reached.",
+    "MODEL_PROBE_FAILED": "The model provider probe failed.",
+}
+
+
+def _raise_model_error(exc: Exception) -> None:
+    if isinstance(exc, ModelConfigurationChanged):
+        code = "MODEL_CONFIG_CHANGED"
+    else:
+        code = getattr(exc, "code", "MODEL_PROBE_FAILED")
+    raise HTTPException(
+        status_code=_MODEL_ERROR_STATUS[code],
+        detail={"code": code, "message": _MODEL_ERROR_MESSAGES[code]},
+    ) from exc
+
+
+def _model_configuration_response(active) -> ModelConfigurationResponse:
+    if active is None:
+        return ModelConfigurationResponse(configured=False)
+    configuration = active.configuration
+    return ModelConfigurationResponse(
+        configured=True,
+        id=configuration.id,
+        version=configuration.version,
+        provider=configuration.provider,
+        base_url=configuration.base_url,
+        model_name=configuration.model_name,
+        api_key_hint=configuration.api_key_hint,
+        validated_at=configuration.validated_at,
+        created_at=configuration.created_at,
+        created_by_user_id=configuration.created_by_user_id,
+        created_by_email=active.created_by_email,
+    )
+
+
+@router.get(
+    "/model-config",
+    response_model=ModelConfigurationResponse,
+    response_model_exclude_none=True,
+)
+def get_model_configuration(
+    response: Response,
+    service: ModelConfigurationServiceDep,
+    session: SessionDep,
+    _auth: CurrentAdminDep,
+) -> ModelConfigurationResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return _model_configuration_response(service.get_active(session))
+
+
+@router.post("/model-config/probe", response_model=ModelConfigurationProbeResponse)
+def probe_model_configuration(
+    payload: ModelConfigurationProbeRequest,
+    response: Response,
+    service: ModelConfigurationServiceDep,
+    session: SessionDep,
+    _auth: CurrentAdminDep,
+) -> ModelConfigurationProbeResponse:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = service.probe(
+            session,
+            base_url=payload.base_url,
+            api_key=payload.api_key.get_secret_value() if payload.api_key is not None else None,
+            model_name=payload.model_name,
+        )
+    except (ModelProbeError, ModelCredentialsRequired) as exc:
+        _raise_model_error(exc)
+    return ModelConfigurationProbeResponse(
+        base_url=result.base_url,
+        models=list(result.models),
+        models_truncated=result.models_truncated,
+        model_validated=result.model_validated,
+        latency_ms=result.latency_ms,
+    )
+
+
+@router.put(
+    "/model-config",
+    response_model=ModelConfigurationResponse,
+    response_model_exclude_none=True,
+)
+def update_model_configuration(
+    payload: ModelConfigurationUpdateRequest,
+    response: Response,
+    service: ModelConfigurationServiceDep,
+    session: SessionDep,
+    auth: CurrentAdminDep,
+    request_context: RequestContextDep,
+) -> ModelConfigurationResponse:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        service.update(
+            session,
+            actor_user_id=auth.user_id,
+            request_id=request_context.request_id or "",
+            base_url=payload.base_url,
+            api_key=payload.api_key.get_secret_value() if payload.api_key is not None else None,
+            model_name=payload.model_name,
+            expected_version=payload.expected_version,
+        )
+    except (ModelProbeError, ModelCredentialsRequired, ModelConfigurationChanged) as exc:
+        session.rollback()
+        _raise_model_error(exc)
+    return _model_configuration_response(service.get_active(session))
 
 
 def _raise_admin_error(exc: AuthServiceError) -> None:

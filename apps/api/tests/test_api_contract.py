@@ -31,7 +31,11 @@ EXPECTED_API_OPERATIONS = {
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/users/{user_id}/sessions"),
     ("GET", "/api/admin/sessions/{session_id}"),
+    ("GET", "/api/admin/sessions/{session_id}/messages"),
     ("GET", "/api/admin/usage"),
+    ("GET", "/api/admin/model-config"),
+    ("POST", "/api/admin/model-config/probe"),
+    ("PUT", "/api/admin/model-config"),
 }
 
 
@@ -45,5 +49,5 @@ def test_openapi_matches_documented_business_api() -> None:
         if method in {"get", "post", "patch", "delete", "put"}
     }
 
-    assert len(EXPECTED_API_OPERATIONS) == 31
+    assert len(EXPECTED_API_OPERATIONS) == 35
     assert actual == EXPECTED_API_OPERATIONS
