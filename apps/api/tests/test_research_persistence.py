@@ -12,7 +12,7 @@ from agent.tools.research import prepare_topic_research
 from agent.workflows.deep_research import ContentEvidenceInvalidError, DeepResearchResult
 from agent.workflows.research_repository import ResearchPackageRepository, topic_digest
 from db.session import get_engine
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from models.agent import AgentProfile, AgentVersion
 from models.chat import AgentExecution, AgentInvocation, ChatSession
 from models.research import ResearchPackage
@@ -303,7 +303,7 @@ def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelo
     )
 
     assert execution_services._validated_research_backed_final_answer(
-        [deterministic_message], research_package=package
+        [_research_tool_boundary(package), deterministic_message], research_package=package
     ) == deterministic_message.content
 
     forged_legacy_message = AIMessage(
@@ -317,7 +317,101 @@ def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelo
     )
     with pytest.raises(ContentEvidenceInvalidError):
         execution_services._validated_research_backed_final_answer(
-            [forged_legacy_message], research_package=package
+            [_research_tool_boundary(package), forged_legacy_message], research_package=package
+        )
+
+
+def _research_tool_boundary(package: SimpleNamespace) -> ToolMessage:
+    from agent.workflows.final_evidence import build_supported_research_evidence
+
+    evidence = build_supported_research_evidence(package)
+    return ToolMessage(
+        name="prepare_topic_research",
+        tool_call_id="call-research-boundary",
+        content=json.dumps(
+            {
+                "research_pack_id": package.id,
+                "research_topic_hash": package.topic_hash,
+                "supported_evidence": evidence,
+            }
+        ),
+    )
+
+
+def _research_final_proof_message(package: SimpleNamespace) -> AIMessage:
+    from agent.workflows.final_evidence import (
+        build_research_final_proof,
+        build_supported_research_evidence,
+        render_deterministic_research_answer,
+    )
+
+    evidence = build_supported_research_evidence(package)
+    claim_id = evidence["claims"][0]["claim_id"]
+    return AIMessage(
+        content=render_deterministic_research_answer(evidence, [claim_id]),
+        additional_kwargs={
+            "research_backed_final_proof": build_research_final_proof(evidence, [claim_id])
+        },
+    )
+
+
+def test_runner_final_proof_scope_ignores_assistants_before_current_research_boundary():
+    package = _durable_final_package()
+    current_final = _research_final_proof_message(package)
+    historical_final = AIMessage(
+        content="A prior turn's ordinary or proof-bearing assistant content is not current."
+    )
+
+    assert execution_services._validated_research_backed_final_answer(
+        [
+            historical_final,
+            ToolMessage(
+                name="prepare_topic_research",
+                tool_call_id="call-historical-research",
+                content={
+                    "research_pack_id": "rsp-historical",
+                    "research_topic_hash": "hash-historical",
+                },
+            ),
+            _research_tool_boundary(package),
+            current_final,
+        ],
+        research_package=package,
+    ) == current_final.content
+
+
+@pytest.mark.parametrize(
+    ("messages"),
+    [
+        [],
+        [AIMessage(content="assistant without a current research boundary")],
+        [_research_tool_boundary(_durable_final_package())],
+        [
+            _research_tool_boundary(_durable_final_package()),
+            _research_final_proof_message(_durable_final_package()),
+            AIMessage(content="a second assistant after the current research boundary"),
+        ],
+    ],
+)
+def test_runner_final_proof_scope_rejects_missing_boundary_proof_or_extra_assistant(messages):
+    with pytest.raises(ContentEvidenceInvalidError):
+        execution_services._validated_research_backed_final_answer(
+            messages,
+            research_package=_durable_final_package(),
+        )
+
+
+def test_runner_final_proof_scope_rejects_current_boundary_identity_mismatch():
+    package = _durable_final_package()
+    boundary = _research_tool_boundary(package)
+    boundary_content = json.loads(boundary.content)
+    boundary_content["research_topic_hash"] = "tampered-topic-hash"
+    boundary.content = json.dumps(boundary_content)
+
+    with pytest.raises(ContentEvidenceInvalidError):
+        execution_services._validated_research_backed_final_answer(
+            [boundary, _research_final_proof_message(package)],
+            research_package=package,
         )
 
 

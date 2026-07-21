@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 from agent.runtime.checkpoint import execution_checkpoint_config
+from agent.runtime.turn_context import DurableTurnContext, load_turn_context_snapshot
 from core.security import AuthContext
 from db.session import get_engine
 from models.agent import AgentVersion
@@ -15,11 +16,12 @@ from models.chat import (
     AgentExecution,
     AgentExecutionAttempt,
     AgentInvocation,
+    ChatMessage,
     ChatSession,
     ExecutionOutbox,
     ExecutionResumeRequest,
 )
-from models.enums import ExecutionAttemptStatus, RunStatus
+from models.enums import ExecutionAttemptStatus, MessageRole, RunStatus
 from models.user import AppUser
 from services.execution_resume import load_resume_value, pending_interrupt_descriptors
 from sqlmodel import Session, select
@@ -31,6 +33,7 @@ TERMINAL_STATUSES = {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
 @dataclass(frozen=True)
 class ClaimedExecution:
     auth: AuthContext
+    turn_context: DurableTurnContext
     resume_value: Any = None
     resume_request_id: str | None = None
     continue_from_checkpoint: bool = False
@@ -83,6 +86,45 @@ def claim_execution(
         user = session.get(AppUser, invocation.user_id)
         if user is None or user.status != "active":
             _cancel_disabled_user_execution(session, execution, now)
+            return None
+
+        outbox = session.exec(
+            select(ExecutionOutbox)
+            .where(ExecutionOutbox.execution_id == execution.id)
+            .where(ExecutionOutbox.kind == "execute")
+            .with_for_update()
+        ).one_or_none()
+        message_id = _snapshot_message_id(outbox.payload) if outbox is not None else None
+        user_message = (
+            session.exec(
+                select(ChatMessage)
+                .where(ChatMessage.id == message_id)
+                .where(ChatMessage.invocation_id == invocation.id)
+                .where(ChatMessage.role == MessageRole.user)
+                .with_for_update()
+            ).one_or_none()
+            if message_id is not None
+            else None
+        )
+        if user_message is None or outbox is None:
+            _fail_execution(session, execution, "TURN_CONTEXT_SNAPSHOT_INVALID", now)
+            return None
+        try:
+            turn_context = load_turn_context_snapshot(
+                outbox.payload,
+                execution_id=execution.id,
+                invocation_id=invocation.id,
+                session_id=chat.id,
+                user_id=invocation.user_id,
+                agent_id=chat.agent_id,
+                agent_version_id=execution.agent_version_id,
+                message_id=user_message.id,
+            )
+        except Exception:  # noqa: BLE001
+            _fail_execution(session, execution, "TURN_CONTEXT_SNAPSHOT_INVALID", now)
+            return None
+        if turn_context.role != user.role:
+            _fail_execution(session, execution, "TURN_CONTEXT_SNAPSHOT_INVALID", now)
             return None
 
         resume_request = session.exec(
@@ -185,10 +227,11 @@ def claim_execution(
         return ClaimedExecution(
             auth=AuthContext(
                 user_id=invocation.user_id,
-                role=user.role,
+                role=turn_context.role,
                 allowed_agent_ids=(chat.agent_id,),
-                tool_permissions=("*",),
+                tool_permissions=turn_context.tool_permissions,
             ),
+            turn_context=turn_context,
             resume_value=resume_value,
             resume_request_id=resume_request.id if resume_request is not None else None,
             continue_from_checkpoint=continue_from_checkpoint,
@@ -207,6 +250,14 @@ def _fail_execution(
     execution.touch_updated_at(now)
     session.add(execution)
     session.commit()
+
+
+def _snapshot_message_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    lineage = payload.get("lineage")
+    message_id = lineage.get("message_id") if isinstance(lineage, dict) else None
+    return message_id if isinstance(message_id, str) and message_id.strip() else None
 
 
 def _cancel_disabled_user_execution(

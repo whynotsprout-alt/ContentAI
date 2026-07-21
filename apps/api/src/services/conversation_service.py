@@ -10,7 +10,13 @@ from typing import Any, Protocol
 from agent.context.assembler import ContextAssembler
 from agent.context.window import TokenCounter
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
-from agent.runtime.turn_context import assemble_turn_context, load_turn_prompt_inputs
+from agent.runtime.turn_context import (
+    TurnContextSnapshotError,
+    assemble_turn_context,
+    build_turn_context_snapshot,
+    fallback_turn_context,
+    load_turn_prompt_inputs,
+)
 from core.security import AuthContext
 from models.agent import AgentProfile, AgentVersion
 from models.base import new_id
@@ -321,12 +327,14 @@ class ConversationService:
                 ), True
         self._ensure_no_active_execution(session, chat.id, for_update=True)
         message_id = payload.message_id or new_id("msg")
+        invocation_id = new_id("inv")
         execution_id = new_id("exe")
-        self._ensure_current_input_fits(
+        turn_context_snapshot = self._ensure_current_input_fits(
             session,
             chat=chat,
             content=payload.message,
             message_id=message_id,
+            invocation_id=invocation_id,
             execution_id=execution_id,
             auth=auth,
         )
@@ -336,7 +344,9 @@ class ConversationService:
             chat=chat,
             content=payload.message,
             message_id=message_id,
+            invocation_id=invocation_id,
             execution_id=execution_id,
+            turn_context_snapshot=turn_context_snapshot,
             auth=auth,
             idempotency_key=normalized_key,
             request_sha256=request_sha256,
@@ -369,20 +379,19 @@ class ConversationService:
         chat: ChatSession,
         content: str,
         message_id: str,
+        invocation_id: str,
         execution_id: str,
         auth: AuthContext,
-    ) -> None:
+    ) -> dict[str, Any]:
         settings = getattr(self.agent_service, "settings", None)
         llm = getattr(settings, "llm", None)
-        if llm is None:
-            return
-        input_budget = int(llm.context_window_tokens) - int(llm.chat_max_tokens)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         runtime = getattr(self.agent_service, "runtime", None)
         profile = session.get(AgentProfile, chat.agent_id)
         version = session.get(AgentVersion, chat.agent_version_id)
         if runtime is None or profile is None or version is None:
+            prompt_inputs, context = fallback_turn_context(content=content)
             input_tokens = self._input_token_counter.count_messages([HumanMessage(content=content)])
         else:
             tools = runtime.get_tools(auth.tool_permissions)
@@ -419,10 +428,32 @@ class ConversationService:
             input_tokens = token_counter.count_messages(
                 [SystemMessage(content=context.system_prompt), *context.messages]
             )
-        if input_budget <= 0 or input_tokens > input_budget:
+        input_budget = (
+            int(llm.context_window_tokens) - int(llm.chat_max_tokens) if llm is not None else None
+        )
+        if input_budget is not None and (input_budget <= 0 or input_tokens > input_budget):
             raise CurrentInputTooLargeError(
                 "Current input exceeds the model context budget."
             )
+        try:
+            return build_turn_context_snapshot(
+                context=context,
+                prompt_inputs=prompt_inputs,
+                tool_permissions=auth.tool_permissions,
+                role=auth.role,
+                execution_id=execution_id,
+                invocation_id=invocation_id,
+                session_id=chat.id,
+                user_id=auth.user_id,
+                agent_id=chat.agent_id,
+                agent_version_id=chat.agent_version_id,
+                message_id=message_id,
+                focus_message=content,
+            )
+        except TurnContextSnapshotError as exc:
+            raise CurrentInputTooLargeError(
+                "Current input exceeds the model context budget."
+            ) from exc
 
     def submit_user_message_background(
         self,
@@ -694,13 +725,16 @@ class ConversationService:
         chat: ChatSession,
         content: str,
         message_id: str | None = None,
+        invocation_id: str | None = None,
         execution_id: str | None = None,
+        turn_context_snapshot: dict[str, Any] | None = None,
         auth: AuthContext,
         idempotency_key: str | None = None,
         request_sha256: str | None = None,
         request_id: str | None = None,
     ) -> tuple[ChatMessage, AgentInvocation, AgentExecution]:
         invocation = AgentInvocation(
+            **({"id": invocation_id} if invocation_id else {}),
             session_id=chat.id,
             agent_id=chat.agent_id,
             user_id=auth.user_id,
@@ -737,6 +771,7 @@ class ConversationService:
                 execution_id=execution.id,
                 kind="execute",
                 request_id=request_id or "",
+                payload=turn_context_snapshot or {},
             )
         )
 
@@ -931,7 +966,13 @@ class ConversationService:
             )
         ).first()
         if outbox is None:
-            outbox = ExecutionOutbox(execution_id=locked.id, kind="execute")
+            locked.status = RunStatus.failed
+            locked.error = "TURN_CONTEXT_SNAPSHOT_INVALID"
+            locked.finished_at = locked.updated_at
+            session.add(locked)
+            session.commit()
+            session.refresh(locked)
+            return locked
         outbox.status = "pending"
         outbox.available_at = locked.updated_at
         outbox.locked_by = None

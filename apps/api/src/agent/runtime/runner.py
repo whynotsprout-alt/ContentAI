@@ -11,6 +11,7 @@ from agent.runtime.execution_services import (
     AgentPostExecutionService,
     AgentRuntimeEventService,
 )
+from agent.runtime.turn_context import DurableTurnContext
 from core.security import AGENT_WILDCARD, AuthContext
 from memory.execution_state import (
     TERMINAL_RUN_STATUSES,
@@ -54,6 +55,7 @@ class AgentRunner:
         execution_id: str,
         event_writer: Any | None = None,
         tool_permissions: tuple[str, ...] = ("*",),
+        turn_context: DurableTurnContext | None = None,
         resume_value: Any = None,
         resume_request_id: str | None = None,
         continue_from_checkpoint: bool = False,
@@ -62,6 +64,8 @@ class AgentRunner:
         thread_id: str | None = None,
     ) -> None:
         tool_permissions = tuple(tool_permissions)
+        if turn_context is None:
+            raise RuntimeError("TURN_CONTEXT_SNAPSHOT_INVALID")
         loaded = self._load_execution_context(db_session, execution_id, auth, thread_id=thread_id)
         if loaded is None:
             return
@@ -118,6 +122,7 @@ class AgentRunner:
                 chat=chat,
                 user_message=user_message,
                 tool_permissions=tool_permissions,
+                turn_context=turn_context,
                 resume_value=resume_value,
                 continue_from_checkpoint=continue_from_checkpoint,
                 event_writer=event_writer,

@@ -187,6 +187,16 @@ def upgrade() -> None:
 
     op.add_column("agentinvocation", sa.Column("request_sha256", sa.String(length=64)))
 
+    op.add_column(
+        "executionoutbox",
+        sa.Column(
+            "payload",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+    )
+
     op.add_column("chatmessage", sa.Column("execution_id", sa.String(), nullable=True))
     op.execute(
         """
@@ -441,6 +451,7 @@ def downgrade() -> None:
     op.drop_column("chatmessage", "execution_id")
     op.drop_index("ix_agentexecution_session_id", table_name="agentexecution")
     op.drop_column("agentexecution", "session_id")
+    op.execute("ALTER TABLE executionoutbox DROP COLUMN IF EXISTS payload")
     op.drop_column("agentinvocation", "request_sha256")
     op.drop_index("ix_appuser_temporary_password_expires_at", table_name="appuser")
     op.drop_column("appuser", "temporary_password_expires_at")

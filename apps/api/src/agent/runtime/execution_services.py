@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -7,14 +8,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from agent.context.assembler import ContextAssembler
+from agent.context.assembler import AgentContext, ContextAssembler
 from agent.runtime.checkpoint import checkpoint_messages
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
 from agent.runtime.events import (
     PersistentAgentEventWriter,
     now_utc,
 )
-from agent.runtime.turn_context import assemble_turn_context, load_turn_prompt_inputs
+from agent.runtime.turn_context import (
+    DurableTurnContext,
+)
 from agent.workflows.deep_research import ContentEvidenceInvalidError
 from agent.workflows.final_evidence import (
     build_supported_research_evidence,
@@ -30,6 +33,7 @@ from langchain_core.messages import (
     BaseMessage,
     RemoveMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
@@ -283,6 +287,7 @@ class AgentExecutionEngine:
         user_message: ChatMessage,
         tool_permissions: tuple[str, ...],
         resume_value: Any,
+        turn_context: DurableTurnContext,
         continue_from_checkpoint: bool = False,
         event_writer: Any,
         event_service: AgentRuntimeEventService,
@@ -305,38 +310,19 @@ class AgentExecutionEngine:
             conversation_id=chat.id,
             execution_id=execution.id,
         )
-        research_package = _execution_research_package(
-            db_session,
-            execution_id=execution.id,
-            graph=runtime.graph,
-            config=runtime.config,
-        )
-        prompt_inputs = load_turn_prompt_inputs(
-            db_session,
-            session_id=chat.id,
-            user_id=chat.user_id,
-            agent_id=chat.agent_id,
-            focus_message=user_message.content,
-        )
         tool_names = list(runtime.tool_permissions)
-        build_token_counter = getattr(self.container.model_gateway, "build_token_counter", None)
-        token_counter = (
-            build_token_counter(tools=self.container.get_tools(tool_permissions))
-            if callable(build_token_counter)
-            else None
-        )
-        agent_context = assemble_turn_context(
-            context_assembler=self.context_assembler,
-            agent_profile=agent_profile,
-            agent_version=agent_version,
-            prompt_inputs=prompt_inputs,
-            tool_names=tool_names,
-            focus_message=user_message.content,
+        if tool_permissions != turn_context.tool_permissions:
+            raise RuntimeError("TURN_CONTEXT_SNAPSHOT_INVALID")
+        agent_context = AgentContext(
+            system_prompt=turn_context.system_prompt,
+            messages=turn_context.messages,
+            short_term_summary="",
+            long_term_memories=[],
             user_id=invocation.user_id,
-            conversation_id=str(chat.id),
-            research_package=research_package,
-            token_counter=token_counter,
-            execution_id=execution.id,
+            agent_id=chat.agent_id,
+            conversation_id=chat.id,
+            run_id=execution.id,
+            permissions=tool_names,
         )
 
         graph_input = self._build_graph_input(
@@ -1410,27 +1396,65 @@ def _validated_research_backed_final_answer(
     research_package: Any,
 ) -> str:
     evidence = build_supported_research_evidence(research_package)
-    validated_answer: str | None = None
-    for message in messages:
-        if not isinstance(message, AIMessage) or getattr(message, "tool_calls", None):
-            continue
-        additional_kwargs = getattr(message, "additional_kwargs", {})
-        if not isinstance(additional_kwargs, dict) or set(additional_kwargs) != {
-            "research_backed_final_proof"
-        }:
-            raise ContentEvidenceInvalidError
-        expected_answer = validate_research_final_proof(
-            additional_kwargs["research_backed_final_proof"],
-            evidence=evidence,
-        )
-        if not isinstance(message.content, str) or message.content != expected_answer:
-            raise ContentEvidenceInvalidError
-        if validated_answer is not None:
-            raise ContentEvidenceInvalidError
-        validated_answer = expected_answer
-    if validated_answer is None:
+    expected_identity = parse_research_identity(
+        evidence.get("research_pack_id"), evidence.get("topic_hash")
+    )
+    if expected_identity is None:
         raise ContentEvidenceInvalidError
-    return validated_answer
+    boundary_index = _current_research_tool_boundary(messages, expected_identity=expected_identity)
+    assistants = [
+        message for message in messages[boundary_index + 1 :] if isinstance(message, AIMessage)
+    ]
+    if len(assistants) != 1:
+        raise ContentEvidenceInvalidError
+    final_message = assistants[0]
+    if getattr(final_message, "tool_calls", None):
+        raise ContentEvidenceInvalidError
+    additional_kwargs = getattr(final_message, "additional_kwargs", {})
+    if not isinstance(additional_kwargs, dict) or set(additional_kwargs) != {
+        "research_backed_final_proof"
+    }:
+        raise ContentEvidenceInvalidError
+    expected_answer = validate_research_final_proof(
+        additional_kwargs["research_backed_final_proof"],
+        evidence=evidence,
+    )
+    if not isinstance(final_message.content, str) or final_message.content != expected_answer:
+        raise ContentEvidenceInvalidError
+    return expected_answer
+
+
+def _current_research_tool_boundary(
+    messages: list[BaseMessage],
+    *,
+    expected_identity: tuple[str, str],
+) -> int:
+    """Return the latest current-turn research tool boundary, never a historical one."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, ToolMessage) or message.name != "prepare_topic_research":
+            continue
+        content = message.content
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise ContentEvidenceInvalidError from exc
+        if not isinstance(content, dict):
+            raise ContentEvidenceInvalidError
+        tool_identity = parse_research_identity(
+            content.get("research_pack_id"), content.get("research_topic_hash")
+        )
+        evidence = content.get("supported_evidence")
+        if not isinstance(evidence, dict):
+            raise ContentEvidenceInvalidError
+        evidence_identity = parse_research_identity(
+            evidence.get("research_pack_id"), evidence.get("topic_hash")
+        )
+        if tool_identity != expected_identity or evidence_identity != expected_identity:
+            raise ContentEvidenceInvalidError
+        return index
+    raise ContentEvidenceInvalidError
 
 
 def _recent_conversation_context(messages: list[BaseMessage], limit: int = 8) -> str:

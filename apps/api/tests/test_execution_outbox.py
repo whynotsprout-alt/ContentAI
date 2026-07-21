@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -7,21 +9,63 @@ import pytest
 from agent.runtime.execution_services import AgentPostExecutionService
 from core.config import Settings, get_settings
 from db.session import get_engine
+from langchain_core.messages import HumanMessage, message_to_dict
 from memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
 from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
     AgentInvocation,
+    ChatMessage,
     ChatSession,
     ExecutionOutbox,
 )
-from models.enums import RunStatus
+from models.enums import MessageRole, RunStatus
 from models.user import AppUser
 from services import dispatcher as dispatcher_module
 from services import tasks as tasks_module
 from services.execution_claim import claim_execution
 from sqlmodel import Session, select
+
+
+def _durable_turn_context_payload(
+    *,
+    execution_id: str,
+    invocation_id: str,
+    session_id: str,
+    user_id: str,
+    agent_id: str,
+    agent_version_id: str,
+    message_id: str,
+    tool_permissions: list[str] | None = None,
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "version": 1,
+        "lineage": {
+            "execution_id": execution_id,
+            "invocation_id": invocation_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "agent_version_id": agent_version_id,
+            "message_id": message_id,
+        },
+        "auth": {
+            "role": "user",
+            "tool_permissions": tool_permissions or ["prepare_topic_research"],
+        },
+        "turn_context": {
+            "focus_message": "durable snapshot input",
+            "system_prompt": "durable system prompt",
+            "messages": [message_to_dict(HumanMessage(content="durable snapshot input"))],
+            "short_term_summary": "durable summary",
+            "long_term_memories": [],
+        },
+    }
+    digest = hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return {**body, "digest": digest}
 
 
 def _settings(*, max_execution_attempts: int = 3) -> Settings:
@@ -97,7 +141,78 @@ def _seed_execution(
                 worker_id=worker_id,
             )
         )
+        session.add(
+            ChatMessage(
+                id=f"message-{execution_id}",
+                session_id=session_id,
+                invocation_id=invocation_id,
+                role=MessageRole.user,
+                content="durable snapshot input",
+            )
+        )
         session.commit()
+
+
+def test_claim_restores_tool_permissions_only_from_validated_durable_outbox_payload() -> None:
+    settings = _settings()
+    execution_id = "execution-durable-turn-payload"
+    _seed_execution(settings, execution_id=execution_id)
+    with Session(get_engine(settings)) as session:
+        session.add(
+            ExecutionOutbox(
+                execution_id=execution_id,
+                kind="execute",
+                payload=_durable_turn_context_payload(
+                    execution_id=execution_id,
+                    invocation_id=f"invocation-{execution_id}",
+                    session_id=f"session-{execution_id}",
+                    user_id=f"user-{execution_id}",
+                    agent_id=f"agent-{execution_id}",
+                    agent_version_id=f"version-{execution_id}",
+                    message_id=f"message-{execution_id}",
+                ),
+            )
+        )
+        session.commit()
+
+    claimed = claim_execution(
+        SimpleNamespace(settings=settings),
+        execution_id,
+        "worker-durable-payload",
+        create_attempt=False,
+        use_lease=False,
+    )
+
+    assert claimed is not None
+    assert claimed.auth.tool_permissions == ("prepare_topic_research",)
+
+
+@pytest.mark.parametrize("payload", [{}, {"version": 1}])
+def test_claim_fails_closed_for_missing_or_malformed_durable_outbox_payload(
+    payload: dict[str, object],
+) -> None:
+    settings = _settings()
+    execution_id = f"execution-invalid-durable-payload-{len(payload)}"
+    _seed_execution(settings, execution_id=execution_id)
+    with Session(get_engine(settings)) as session:
+        session.add(ExecutionOutbox(execution_id=execution_id, kind="execute", payload=payload))
+        session.commit()
+
+    assert (
+        claim_execution(
+            SimpleNamespace(settings=settings),
+            execution_id,
+            "worker-invalid-payload",
+            create_attempt=False,
+            use_lease=False,
+        )
+        is None
+    )
+    with Session(get_engine(settings)) as session:
+        execution = session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.failed
+        assert execution.error == "TURN_CONTEXT_SNAPSHOT_INVALID"
 
 
 def test_postprocess_processing_retries_are_separate_from_broker_attempts() -> None:
@@ -234,6 +349,23 @@ def test_duplicate_delivery_only_claims_execution_once() -> None:
     settings = _settings()
     execution_id = "execution-duplicate-delivery"
     _seed_execution(settings, execution_id=execution_id)
+    with Session(get_engine(settings)) as session:
+        session.add(
+            ExecutionOutbox(
+                execution_id=execution_id,
+                kind="execute",
+                payload=_durable_turn_context_payload(
+                    execution_id=execution_id,
+                    invocation_id=f"invocation-{execution_id}",
+                    session_id=f"session-{execution_id}",
+                    user_id=f"user-{execution_id}",
+                    agent_id=f"agent-{execution_id}",
+                    agent_version_id=f"version-{execution_id}",
+                    message_id=f"message-{execution_id}",
+                ),
+            )
+        )
+        session.commit()
     service = SimpleNamespace(settings=settings)
 
     first_claim = claim_execution(

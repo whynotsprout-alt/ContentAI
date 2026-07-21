@@ -150,6 +150,7 @@ def test_tenant_and_execution_lineage_constraints_are_database_enforced():
     )
     assert "session_id" in _column_names(inspector, "agentexecution")
     assert "execution_id" in _column_names(inspector, "chatmessage")
+    assert "payload" in _column_names(inspector, "executionoutbox")
     assert {"decision", "message_id"} <= _column_names(inspector, "executionresumerequest")
 
     assert ("id", "user_id") in _unique_column_sets(inspector, "agentprofile")

@@ -133,6 +133,70 @@ def test_research_uses_both_tools_without_fetching_pages(monkeypatch):
     assert '"body"' not in evidence_message
 
 
+@pytest.mark.parametrize(
+    ("field", "oversized"),
+    [
+        ("url", "https://oversized.example/" + "u" * 2_000),
+        ("title", "t" * 501),
+        ("snippet", "n" * 2_001),
+        ("summary", "s" * 2_001),
+        ("source", "p" * 201),
+        ("provider", "e" * 41),
+        ("search_engines", ["metaso", "e" * 41]),
+    ],
+)
+def test_oversized_provider_item_is_dropped_before_dedupe_and_model_input(
+    monkeypatch, field: str, oversized: object
+):
+    good_url = "https://bounded.example/good"
+    known_source = source_id(good_url)
+    oversized_item = {
+        "title": "Oversized source",
+        "url": "https://oversized.example/source",
+        "summary": "This source must be dropped before deduplication.",
+        "source": "oversized publisher",
+        "provider": "metaso",
+        field: oversized,
+    }
+    good_item = {
+        "title": "Bounded source",
+        "url": good_url,
+        "summary": "Bounded evidence for synthesis.",
+        "source": "bounded publisher",
+        "provider": "metaso",
+    }
+    install_search_tools(
+        monkeypatch,
+        provider_result("metaso", [oversized_item, good_item]),
+        provider_result("anspire", [], ok=False),
+    )
+    original_dedupe = deep_research.dedupe_sources
+    dedupe_inputs: list[dict[str, Any]] = []
+
+    def recording_dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        dedupe_inputs.extend(items)
+        return original_dedupe(items)
+
+    monkeypatch.setattr(deep_research, "dedupe_sources", recording_dedupe)
+    model = StructuredModel(
+        deep_research.DeepResearchPackage(
+            core_conclusion=deep_research.ResearchConclusion(
+                text="Only bounded evidence is eligible.",
+                source_ids=[known_source],
+            )
+        )
+    )
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Provider field limits",
+        model_gateway=Gateway(model),
+    )
+
+    assert dedupe_inputs == [good_item]
+    assert [source["url"] for source in result.sources] == [good_url]
+    assert str(oversized) not in model.calls[0][0][1].content
+
+
 def test_unknown_reference_claims_get_one_repair_before_generation(monkeypatch):
     known_source = source_id("https://a.example/a")
     install_search_tools(

@@ -46,6 +46,7 @@ class DirectDispatcher:
                 execution_id=execution_id,
                 auth=claimed.auth,
                 tool_permissions=claimed.auth.tool_permissions,
+                turn_context=claimed.turn_context,
                 resume_value=claimed.resume_value,
                 resume_request_id=claimed.resume_request_id,
                 continue_from_checkpoint=claimed.continue_from_checkpoint,

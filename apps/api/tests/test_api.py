@@ -22,7 +22,7 @@ from api.chat import router as chat_router
 from auth_helpers import auth_headers, default_test_auth_context, resolve_test_auth_context
 from client import ApiClient as TestClient
 from core.config import Settings, get_settings
-from core.security import authenticate_request
+from core.security import AuthContext, authenticate_request
 from db.session import get_engine
 from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
@@ -43,9 +43,11 @@ from models.chat import (
 )
 from models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
+from models.schemas.chat import AgentMessageRequest
 from models.user import AdminAuditLog, AppUser
 from services.agent_service import AgentService
 from services.checkpoint_deletion import drain_checkpoint_deletion_outbox
+from services.conversation_service import ConversationService
 from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
 from services.execution_claim import claim_execution
 from sqlalchemy import event, text
@@ -1122,6 +1124,139 @@ def test_research_backed_final_persists_only_validated_answer(monkeypatch):
         "1. Supported finding [S1](https://evidence.example/source)"
     )
     assert gateway.final_model.calls
+
+
+def test_research_turn_after_ordinary_chat_uses_only_its_current_tool_boundary(monkeypatch):
+    monkeypatch.setattr(
+        research_tool_module,
+        "run_deep_research_package_workflow",
+        lambda **_kwargs: _research_result_for_final_evidence_tests(),
+    )
+    gateway = install_research_final_model(
+        FakeModel([AIMessage(content="ordinary history"), _research_tool_call()]),
+        final_responses=[_research_final_selection("Supported finding")],
+    )
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        session = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        ordinary = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "ordinary chat first"},
+        )
+        assert ordinary.status_code == 202
+        assert wait_for_terminal_session(client, session["session_id"])["latest_execution"][
+            "status"
+        ] == "completed"
+
+        research = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "research this topic next"},
+        )
+        assert research.status_code == 202
+        terminal = wait_for_terminal_session(client, session["session_id"])
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert terminal["messages"][-1]["content"] == (
+        "Research-backed findings:\n"
+        "1. Supported finding [S1](https://evidence.example/source)"
+    )
+    assert len(gateway.final_model.calls) == 1
+
+
+def test_second_research_turn_ignores_the_prior_research_final_proof(monkeypatch):
+    monkeypatch.setattr(
+        research_tool_module,
+        "run_deep_research_package_workflow",
+        lambda **_kwargs: _research_result_for_final_evidence_tests(),
+    )
+    gateway = install_research_final_model(
+        FakeModel([_research_tool_call(), _research_tool_call()]),
+        final_responses=[
+            _research_final_selection("Supported finding"),
+            _research_final_selection("Supported finding"),
+        ],
+    )
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        session = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        first = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "research this topic first"},
+        )
+        assert first.status_code == 202
+        assert wait_for_terminal_session(client, session["session_id"])["latest_execution"][
+            "status"
+        ] == "completed"
+
+        second = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "research this topic again"},
+        )
+        assert second.status_code == 202
+        terminal = wait_for_terminal_session(client, session["session_id"])
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert len(gateway.final_model.calls) == 2
+
+
+def test_worker_uses_persisted_turn_snapshot_after_summary_changes(monkeypatch):
+    model = FakeModel([AIMessage(content="snapshot reply")])
+    install_fake_model(model)
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        session_payload = client.post(
+            "/api/chat/sessions", json={"agent_id": "default-agent"}
+        ).json()
+        session_id = session_payload["session_id"]
+        with Session(get_engine()) as db_session:
+            db_session.add(
+                MemoryRecord(
+                    user_id="local-user",
+                    session_id=session_id,
+                    memory_key="summary",
+                    kind="summary",
+                    content="summary captured before dispatch",
+                    payload={"scope": "thread"},
+                )
+            )
+            db_session.commit()
+
+        service = ConversationService(app.state.agent_service)
+        with Session(get_engine()) as db_session:
+            created, replayed = service.create_turn(
+                db_session,
+                AgentMessageRequest(
+                    session_id=session_id,
+                    message="snapshot input",
+                ),
+                AuthContext(user_id="local-user"),
+            )
+            assert replayed is False
+            outbox = db_session.exec(
+                select(ExecutionOutbox).where(ExecutionOutbox.execution_id == created.execution_id)
+            ).one()
+            assert outbox.payload["turn_context"]["short_term_summary"] == (
+                "summary captured before dispatch"
+            )
+
+        with Session(get_engine()) as db_session:
+            summary = db_session.exec(
+                select(MemoryRecord)
+                .where(MemoryRecord.session_id == session_id)
+                .where(MemoryRecord.memory_key == "summary")
+            ).one()
+            summary.content = "summary mutated after dispatch was queued"
+            db_session.add(summary)
+            db_session.commit()
+
+        DirectDispatcher(app.state.agent_service).dispatch(created.execution_id)
+
+    model_input = "\n".join(str(message.content) for message in model.calls[0])
+    assert "summary captured before dispatch" in model_input
+    assert "summary mutated after dispatch was queued" not in model_input
 
 
 def test_research_backed_unknown_final_claim_is_terminal_and_never_persisted(monkeypatch):
@@ -2548,6 +2683,7 @@ def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt(
 )
 def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
     fault_window: str,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     class _CrashPersister(MessagePersister):
         def __init__(self, *, after_flush: bool) -> None:
@@ -2592,6 +2728,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
     event_writer = _CountingWriter()
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         dispatcher = app.state.conversation_service.execution_dispatcher
         app.state.conversation_service.execution_dispatcher = None
         service = app.state.agent_service
@@ -2607,6 +2744,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                 f"/api/chat/sessions/{chat['session_id']}/messages",
                 json={"message": f"fault window {fault_window}"},
             )
+            assert started.status_code == 202, started.text
             execution_id = started.json()["execution_id"]
             initial_claim = claim_execution(
                 service,
@@ -2621,6 +2759,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                     execution_id=execution_id,
                     auth=initial_claim.auth,
                     tool_permissions=initial_claim.auth.tool_permissions,
+                    turn_context=initial_claim.turn_context,
                     event_writer=event_writer,
                 )
             waiting = client.get(f"/api/chat/runs/{execution_id}/status").json()
@@ -2673,6 +2812,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                             execution_id=execution_id,
                             auth=claimed.auth,
                             tool_permissions=claimed.auth.tool_permissions,
+                            turn_context=claimed.turn_context,
                             resume_value=claimed.resume_value,
                             resume_request_id=claimed.resume_request_id,
                             continue_from_checkpoint=claimed.continue_from_checkpoint,

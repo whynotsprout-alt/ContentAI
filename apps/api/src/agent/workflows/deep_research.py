@@ -26,6 +26,19 @@ MAX_RESEARCH_SOURCES = 20
 RESEARCH_MODEL_MAX_ATTEMPTS = 2
 RESEARCH_MODEL_RETRY_DELAY_SECONDS = 0.25
 
+_PROVIDER_SOURCE_TEXT_LIMITS = {
+    "url": 2_000,
+    "title": 500,
+    "source": 200,
+    "snippet": 2_000,
+    "summary": 2_000,
+    "provider": 40,
+    "source_id": 40,
+}
+_MAX_PROVIDER_SEARCH_ENGINES = 2
+_MAX_PROVIDER_SEARCH_ENGINE_CHARS = 40
+_MAX_PROVIDER_SCORE_CHARS = 64
+
 _BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain", "metadata.google.internal"}
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
 
@@ -96,12 +109,15 @@ async def run_deep_research_package_workflow_async(
     )
     _ensure_active(ensure_not_cancelled)
 
-    raw_items = [
-        item
-        for result in provider_results.values()
-        for item in result.get("items", [])
-        if isinstance(item, dict)
-    ]
+    raw_items: list[dict[str, Any]] = []
+    for result in provider_results.values():
+        items = result.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            bounded = _bounded_provider_item(item)
+            if bounded is not None:
+                raw_items.append(bounded)
     if not raw_items:
         raise SearchNoResultsError("Both search providers returned no results.")
     normalized = dedupe_sources(raw_items)[:MAX_RESEARCH_SOURCES]
@@ -376,6 +392,41 @@ def _safe_source(source: dict[str, Any]) -> dict[str, Any] | None:
         ][:2],
         "isolated": isolated,
         "isolation_reason": "prompt_injection_pattern" if isolated else "",
+    }
+
+
+def _bounded_provider_item(item: Any) -> dict[str, Any] | None:
+    """Reject oversized raw provider fields before URL parsing or deduplication."""
+    if not isinstance(item, dict):
+        return None
+    for field, max_chars in _PROVIDER_SOURCE_TEXT_LIMITS.items():
+        value = item.get(field)
+        if value is not None and (not isinstance(value, str) or len(value) > max_chars):
+            return None
+
+    search_engines = item.get("search_engines")
+    if search_engines is not None:
+        if (
+            not isinstance(search_engines, list)
+            or len(search_engines) > _MAX_PROVIDER_SEARCH_ENGINES
+            or any(
+                not isinstance(engine, str) or len(engine) > _MAX_PROVIDER_SEARCH_ENGINE_CHARS
+                for engine in search_engines
+            )
+        ):
+            return None
+
+    score = item.get("score")
+    if score is not None and (
+        not isinstance(score, (int, float, str))
+        or (isinstance(score, str) and len(score) > _MAX_PROVIDER_SCORE_CHARS)
+    ):
+        return None
+
+    return {
+        field: item[field]
+        for field in (*_PROVIDER_SOURCE_TEXT_LIMITS, "search_engines", "score")
+        if field in item
     }
 
 

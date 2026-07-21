@@ -293,6 +293,10 @@ class ExecutionOutbox(SQLModel, table=True):
     )
     kind: str = Field(default="execute", index=True)
     request_id: str = Field(default="", index=True)
+    payload: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False),
+    )
     status: str = Field(default="pending", index=True)
     attempts: int = Field(default=0)
     processing_attempts: int = Field(default=0)

@@ -136,6 +136,7 @@ def execute_agent(
                 execution_id=execution_id,
                 auth=claimed.auth,
                 tool_permissions=claimed.auth.tool_permissions,
+                turn_context=claimed.turn_context,
                 resume_value=claimed.resume_value,
                 resume_request_id=claimed.resume_request_id,
                 continue_from_checkpoint=claimed.continue_from_checkpoint,
@@ -216,14 +217,17 @@ def recover_expired_executions() -> int:
                     )
                 ).first()
                 if outbox is None:
-                    outbox = ExecutionOutbox(execution_id=execution.id, kind="execute")
-                outbox.status = "pending"
-                outbox.available_at = now
-                outbox.locked_by = None
-                outbox.locked_until = None
-                outbox.updated_at = now
-                session.add(outbox)
-                recovered += 1
+                    execution.status = RunStatus.failed
+                    execution.error = "TURN_CONTEXT_SNAPSHOT_INVALID"
+                    execution.finished_at = now
+                else:
+                    outbox.status = "pending"
+                    outbox.available_at = now
+                    outbox.locked_by = None
+                    outbox.locked_until = None
+                    outbox.updated_at = now
+                    session.add(outbox)
+                    recovered += 1
             execution.touch_updated_at(now)
             session.add(execution)
 
