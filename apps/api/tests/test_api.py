@@ -5,9 +5,11 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import agent.tools.research as research_tool_module
 import pytest
 from agent.runtime.checkpoint import RuntimePersistence, checkpoint_interrupts
 from agent.runtime.container import RuntimeContainer
+from agent.workflows.deep_research import DeepResearchResult
 from api.app import create_app
 from api.chat import _stream_channel, _stream_exception_payload
 from api.chat import router as chat_router
@@ -123,6 +125,19 @@ class FakeHotspotFilterModel:
         return AIMessage(content="Filtered hotspots")
 
 
+class FakeResearchFinalModel:
+    def __init__(self, responses: Iterable[Any]) -> None:
+        self.responses = iter(responses)
+        self.calls: list[list[Any]] = []
+
+    def invoke(self, messages: list[Any]) -> Any:
+        self.calls.append(messages)
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class FakeGateway:
     def __init__(self, *, title: str = "Generated Title", error: Exception | None = None) -> None:
         self.title = title
@@ -147,6 +162,17 @@ class FakeGateway:
         return FakeHotspotFilterModel()
 
 
+class FakeResearchFinalGateway(FakeGateway):
+    def __init__(self, *, final_responses: Iterable[Any]) -> None:
+        super().__init__()
+        self.final_model = FakeResearchFinalModel(final_responses)
+
+    def build_structured_output_model(self, schema: type[Any], **kwargs: Any) -> Any:
+        if schema.__name__ == "ResearchBackedFinalResponse":
+            return self.final_model
+        return super().build_structured_output_model(schema)
+
+
 def install_fake_model(
     model: FakeModel,
     *,
@@ -168,6 +194,23 @@ def install_fake_model(
     _TEST_RUNTIME = RuntimeContainer(settings=get_settings(), model_gateway=gateway)
 
     app.state.runtime = _TEST_RUNTIME
+
+
+def install_research_final_model(
+    model: FakeModel,
+    *,
+    final_responses: Iterable[Any],
+) -> FakeResearchFinalGateway:
+    global _TEST_RUNTIME
+
+    if _TEST_RUNTIME is not None:
+        _TEST_RUNTIME.close()
+
+    gateway = FakeResearchFinalGateway(final_responses=final_responses)
+    gateway.model = model
+    _TEST_RUNTIME = RuntimeContainer(settings=get_settings(), model_gateway=gateway)
+    app.state.runtime = _TEST_RUNTIME
+    return gateway
 
 
 def wait_for_terminal_session(client: TestClient, session_id: str) -> dict[str, Any]:
@@ -744,6 +787,44 @@ def test_oversized_current_input_returns_413_before_turn_is_persisted():
         ).all() == []
 
 
+def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn():
+    with TestClient(app) as client:
+        chat = client.post(
+            "/api/chat/sessions",
+            json={"agent_id": "default-agent"},
+        ).json()
+        conversation_service = app.state.conversation_service
+        settings = conversation_service.agent_service.settings
+        original_window = settings.llm.context_window_tokens
+        original_output = settings.llm.chat_max_tokens
+        dispatcher = conversation_service.execution_dispatcher
+        settings.llm.context_window_tokens = 1024
+        settings.llm.chat_max_tokens = 24
+        conversation_service.execution_dispatcher = None
+        try:
+            response = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "small current message"},
+            )
+        finally:
+            conversation_service.execution_dispatcher = dispatcher
+            settings.llm.context_window_tokens = original_window
+            settings.llm.chat_max_tokens = original_output
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "CURRENT_INPUT_TOO_LARGE"
+    with Session(get_engine()) as session:
+        assert session.exec(
+            select(ChatMessage).where(ChatMessage.session_id == chat["session_id"])
+        ).all() == []
+        assert session.exec(
+            select(AgentInvocation).where(AgentInvocation.session_id == chat["session_id"])
+        ).all() == []
+        assert session.exec(
+            select(AgentExecution).where(AgentExecution.session_id == chat["session_id"])
+        ).all() == []
+
+
 def test_message_idempotency_replay_mismatch_and_transport_conflict():
     with TestClient(app) as client:
         chat = client.post(
@@ -814,6 +895,172 @@ def test_chat_run_completes_with_plain_reply():
     assert [message["role"] for message in payload["messages"]] == ["user", "assistant"]
 
     assert payload["messages"][-1]["content"] == "plain reply"
+
+
+def _research_result_for_final_evidence_tests() -> DeepResearchResult:
+    return DeepResearchResult(
+        content="research package",
+        package_data={
+            "core_conclusion": {"text": "Supported conclusion", "source_ids": ["S1"]},
+            "findings": [
+                {
+                    "claim": "Supported finding",
+                    "evidence": "Supported evidence",
+                    "source_ids": ["S1"],
+                }
+            ],
+            "risks_and_disputes": [],
+        },
+        sources=[
+            {
+                "source_id": "S1",
+                "title": "Supported source",
+                "url": "https://evidence.example/source",
+                "summary": "Supported summary",
+                "isolated": False,
+            }
+        ],
+        provider_diagnostics={"metaso": {"ok": True}},
+        valid_source_count=1,
+        isolated_source_count=0,
+        removed_unknown_reference_count=0,
+    )
+
+
+def _research_tool_call() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "call-final-evidence",
+                "name": "prepare_topic_research",
+                "args": {"topic": "evidence-backed topic"},
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _start_research_backed_turn(
+    client: TestClient,
+) -> tuple[str, str]:
+    session = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+    response = client.post(
+        f"/api/chat/sessions/{session['session_id']}/messages",
+        json={"message": "research this topic"},
+    )
+    assert response.status_code == 202
+    return session["session_id"], response.json()["execution_id"]
+
+
+def test_plain_chat_does_not_use_research_final_protocol():
+    gateway = install_research_final_model(
+        FakeModel([AIMessage(content="ordinary chat reply")]),
+        final_responses=[],
+    )
+
+    with TestClient(app) as client:
+        session = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
+        response = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "ordinary chat"},
+        )
+        assert response.status_code == 202
+        terminal = wait_for_terminal_session(client, session["session_id"])
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert terminal["messages"][-1]["content"] == "ordinary chat reply"
+    assert gateway.final_model.calls == []
+
+
+def test_research_backed_final_persists_only_validated_answer(monkeypatch):
+    monkeypatch.setattr(
+        research_tool_module,
+        "run_deep_research_package_workflow",
+        lambda **_kwargs: _research_result_for_final_evidence_tests(),
+    )
+    gateway = install_research_final_model(
+        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        final_responses=[
+            {
+                "answer": "Evidence-backed answer",
+                "claims": [{"text": "Supported finding", "source_ids": ["S1"]}],
+            }
+        ],
+    )
+
+    with TestClient(app) as client:
+        session_id, _execution_id = _start_research_backed_turn(client)
+        terminal = wait_for_terminal_session(client, session_id)
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert terminal["messages"][-1]["content"] == "Evidence-backed answer"
+    assert gateway.final_model.calls
+
+
+def test_research_backed_unknown_final_claim_is_terminal_and_never_persisted(monkeypatch):
+    monkeypatch.setattr(
+        research_tool_module,
+        "run_deep_research_package_workflow",
+        lambda **_kwargs: _research_result_for_final_evidence_tests(),
+    )
+    gateway = install_research_final_model(
+        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        final_responses=[
+            {
+                "answer": "Unsupported answer",
+                "claims": [{"text": "Unsupported claim", "source_ids": ["UNKNOWN"]}],
+            },
+            {
+                "answer": "Still unsupported",
+                "claims": [{"text": "Still unsupported", "source_ids": ["UNKNOWN"]}],
+            },
+        ],
+    )
+
+    with TestClient(app) as client:
+        session_id, execution_id = _start_research_backed_turn(client)
+        terminal = wait_for_terminal_session(client, session_id)
+        events = client.get(f"/api/chat/runs/{execution_id}/events")
+
+    assert terminal["latest_execution"]["status"] == "failed"
+    assert all(message["role"] != "assistant" for message in terminal["messages"])
+    assert events.status_code == 200
+    assert '"error_code":"CONTENT_EVIDENCE_INVALID"' in events.text
+    assert len(gateway.final_model.calls) == 2
+
+
+def test_research_backed_final_repairs_once_with_supported_evidence_only(monkeypatch):
+    monkeypatch.setattr(
+        research_tool_module,
+        "run_deep_research_package_workflow",
+        lambda **_kwargs: _research_result_for_final_evidence_tests(),
+    )
+    gateway = install_research_final_model(
+        FakeModel([_research_tool_call(), AIMessage(content="unvalidated raw answer")]),
+        final_responses=[
+            {
+                "answer": "First unsupported answer",
+                "claims": [{"text": "Unknown claim", "source_ids": ["UNKNOWN"]}],
+            },
+            {
+                "answer": "Repaired evidence-backed answer",
+                "claims": [{"text": "Supported finding", "source_ids": ["S1"]}],
+            },
+        ],
+    )
+
+    with TestClient(app) as client:
+        session_id, _execution_id = _start_research_backed_turn(client)
+        terminal = wait_for_terminal_session(client, session_id)
+
+    assert terminal["latest_execution"]["status"] == "completed"
+    assert terminal["messages"][-1]["content"] == "Repaired evidence-backed answer"
+    assert len(gateway.final_model.calls) == 2
+    repair_messages = gateway.final_model.calls[1]
+    repair_content = "\n".join(str(message.content) for message in repair_messages)
+    assert "S1" in repair_content
+    assert "UNKNOWN" not in repair_content
 
 
 def test_session_pins_agent_version_across_later_turns():

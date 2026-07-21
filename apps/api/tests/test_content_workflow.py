@@ -45,6 +45,9 @@ def test_research_pack_returns_as_a_normal_tool_result(monkeypatch):
     with tool_runtime_scope(context):
         result = prepare_topic_research.invoke({"topic": "测试选题"})
 
-    assert result["research_pack"]["rendered_content"] == "## 深度搜索资料包：测试选题"
-    assert result["research_pack"]["package"]["core_conclusion"]["text"] == "结论"
     assert result["research_pack_id"] == "rsp_1"
+    assert result["supported_evidence"] == {
+        "topic": "测试选题",
+        "claims": [],
+        "sources": [],
+    }

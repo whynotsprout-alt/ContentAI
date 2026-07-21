@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Protocol
 
+from agent.context.assembler import ContextAssembler
 from agent.context.window import TokenCounter
 from agent.runtime.errors import MODEL_STREAM_INTERRUPTED_CODE, MODEL_STREAM_INTERRUPTED_MESSAGE
 from core.security import AuthContext
@@ -317,7 +318,7 @@ class ConversationService:
                     error=self._execution_error(execution.error),
                 ), True
         self._ensure_no_active_execution(session, chat.id, for_update=True)
-        self._ensure_current_input_fits(payload.message)
+        self._ensure_current_input_fits(session, chat=chat, content=payload.message, auth=auth)
 
         message, invocation, execution = self._create_user_message_invocation_execution(
             session,
@@ -349,19 +350,53 @@ class ConversationService:
             self.execution_dispatcher.dispatch(execution.id, request_id)
         return response, False
 
-    def _ensure_current_input_fits(self, content: str) -> None:
+    def _ensure_current_input_fits(
+        self,
+        session: Session,
+        *,
+        chat: ChatSession,
+        content: str,
+        auth: AuthContext,
+    ) -> None:
         settings = getattr(self.agent_service, "settings", None)
         llm = getattr(settings, "llm", None)
         if llm is None:
             return
         input_budget = int(llm.context_window_tokens) - int(llm.chat_max_tokens)
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
-        if (
-            input_budget <= 0
-            or self._input_token_counter.count_messages([HumanMessage(content=content)])
-            > input_budget
-        ):
+        runtime = getattr(self.agent_service, "runtime", None)
+        profile = session.get(AgentProfile, chat.agent_id)
+        version = session.get(AgentVersion, chat.agent_version_id)
+        if runtime is None or profile is None or version is None:
+            input_tokens = self._input_token_counter.count_messages([HumanMessage(content=content)])
+        else:
+            tools = runtime.get_tools(("*",))
+            build_counter = getattr(runtime.model_gateway, "build_token_counter", None)
+            token_counter = (
+                build_counter(tools=tools)
+                if callable(build_counter)
+                else TokenCounter(tools=tools)
+            )
+            # Research does not exist durably until the turn has been created. This preflight
+            # counts the deterministic system/runtime/current/tool input; the worker repeats
+            # the complete budget check once execution-local research context is available.
+            context = ContextAssembler(settings=settings).assemble(
+                agent_profile=profile,
+                agent_version=version,
+                messages=[HumanMessage(content=content)],
+                short_term_summary="",
+                long_term_memories=[],
+                tool_names=[str(getattr(tool, "name", "")) for tool in tools],
+                focus_message=content,
+                user_id=auth.user_id,
+                conversation_id=chat.id,
+                token_counter=token_counter,
+            )
+            input_tokens = token_counter.count_messages(
+                [SystemMessage(content=context.system_prompt), *context.messages]
+            )
+        if input_budget <= 0 or input_tokens > input_budget:
             raise CurrentInputTooLargeError(
                 "Current input exceeds the model context budget."
             )

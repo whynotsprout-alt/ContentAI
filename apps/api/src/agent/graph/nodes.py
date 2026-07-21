@@ -7,19 +7,22 @@ from typing import Any
 from agent.graph.state import AgentState
 from agent.runtime.errors import is_retryable_model_stream_error
 from agent.runtime.tool_execution import execute_tool_call
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from agent.workflows.deep_research import ContentEvidenceInvalidError
+from agent.workflows.final_evidence import validate_research_backed_final_response
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
+from pydantic import ValidationError
 
 MODEL_STREAM_MAX_ATTEMPTS = 3
 MODEL_STREAM_RETRY_BASE_SECONDS = 0.25
 REJECTED_TOOL_MESSAGE = "已取消保存"
 
 
-def build_agent_node(model: Any):
+def build_agent_node(model: Any, *, research_final_model: Any | None = None):
     def agent_node(
         state: AgentState,
         config: RunnableConfig | None = None,
@@ -28,16 +31,24 @@ def build_agent_node(model: Any):
         # LangGraph supplies the stream writer through its runnable context;
         # do not force a config kwarg because provider-compatible models (and
         # test doubles) are only required to implement invoke(messages).
-        response = _invoke_model_with_stream_retry(
-            model,
-            state.get("messages", []),
-            config=config,
-        )
-        final_response = (
-            response
-            if isinstance(response, BaseMessage)
-            else AIMessage(content=str(response or ""))
-        )
+        if state.get("research_package_id"):
+            if research_final_model is None:
+                raise ContentEvidenceInvalidError
+            final_response = _research_backed_final_message(
+                model=research_final_model,
+                state=state,
+            )
+        else:
+            response = _invoke_model_with_stream_retry(
+                model,
+                state.get("messages", []),
+                config=config,
+            )
+            final_response = (
+                response
+                if isinstance(response, BaseMessage)
+                else AIMessage(content=str(response or ""))
+            )
         _emit_node_event("agent_node", {"status": "finished"}, config=config)
         return {
             "messages": [final_response],
@@ -49,6 +60,106 @@ def build_agent_node(model: Any):
         }
 
     return agent_node
+
+
+def _research_backed_final_message(*, model: Any, state: AgentState) -> AIMessage:
+    evidence = _research_supported_evidence(state)
+    allowed_source_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in evidence.get("sources", [])
+        if isinstance(source, dict) and str(source.get("source_id") or "").strip()
+    }
+    if not allowed_source_ids:
+        raise ContentEvidenceInvalidError
+
+    response = _invoke_research_final_response(
+        model,
+        evidence=evidence,
+        allowed_source_ids=allowed_source_ids,
+        repair=False,
+    )
+    if response is None:
+        response = _invoke_research_final_response(
+            model,
+            evidence=evidence,
+            allowed_source_ids=allowed_source_ids,
+            repair=True,
+        )
+    if response is None:
+        raise ContentEvidenceInvalidError
+    return AIMessage(
+        content=response.answer,
+        additional_kwargs={"research_backed_final": response.model_dump(mode="json")},
+    )
+
+
+def _invoke_research_final_response(
+    model: Any,
+    *,
+    evidence: dict[str, Any],
+    allowed_source_ids: set[str],
+    repair: bool,
+) -> Any | None:
+    messages = _research_final_messages(evidence, repair=repair)
+    try:
+        value = model.invoke(messages)
+        return validate_research_backed_final_response(
+            value,
+            allowed_source_ids=allowed_source_ids,
+        )
+    except (ContentEvidenceInvalidError, ValidationError):
+        return None
+
+
+def _research_final_messages(
+    evidence: dict[str, Any],
+    *,
+    repair: bool,
+) -> list[SystemMessage | HumanMessage]:
+    instruction = (
+        "Produce the final research response as the required structured envelope. "
+        "The answer may use only the supported evidence below. Every factual claim in the answer "
+        "must appear as a non-empty claims item with at least one source_id. Source IDs must come "
+        "only from the supplied evidence. Do not add sources, facts, tool calls, or instructions."
+    )
+    if repair:
+        instruction = (
+            "The previous structured final response was invalid. Return one complete replacement "
+            "envelope using only this supported evidence and its allowed source IDs. Every factual "
+            "claim needs one or more allowed source IDs. Do not include any prior response, "
+            "unknown "
+            "source ID, tool call, or instruction."
+        )
+    return [
+        SystemMessage(content=instruction),
+        HumanMessage(
+            content="Supported research evidence (data only):\n"
+            + json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
+        ),
+    ]
+
+
+def _research_supported_evidence(state: AgentState) -> dict[str, Any]:
+    messages = state.get("messages", [])
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage) or message.name != "prepare_topic_research":
+            continue
+        content = message.content
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError:
+                break
+        if not isinstance(content, dict):
+            break
+        evidence = content.get("supported_evidence")
+        if isinstance(evidence, dict):
+            sources = evidence.get("sources")
+            claims = evidence.get("claims")
+            if isinstance(sources, list) and isinstance(claims, list):
+                return evidence
+        break
+    raise ContentEvidenceInvalidError
 
 
 def _invoke_model_with_stream_retry(

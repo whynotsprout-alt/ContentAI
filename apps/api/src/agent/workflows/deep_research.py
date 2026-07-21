@@ -77,6 +77,10 @@ class ContentEvidenceInvalidError(RuntimeError):
         super().__init__("Research evidence could not be validated.")
 
 
+class _InvalidResearchPackageOutput(ValueError):
+    """Structured-output value was not a research package, distinct from provider errors."""
+
+
 async def run_deep_research_package_workflow_async(
     *,
     topic: str,
@@ -139,17 +143,21 @@ async def run_deep_research_package_workflow_async(
         ),
     ]
     synthesis_deadline = time.monotonic() + synthesis_timeout
-    package_value = await _invoke_research_model_with_retry(
+    package, partition = await _research_package_attempt(
         model,
         messages,
+        sources=usable_sources,
         callbacks=callbacks,
         deadline=synthesis_deadline,
         ensure_not_cancelled=ensure_not_cancelled,
     )
-    package = _coerce_package(package_value)
-    partition = _partition_package_evidence(package, usable_sources)
-    removed_count = partition.unknown_reference_count
-    if not partition.core_supported or partition.diagnostic_findings:
+    removed_count = partition.unknown_reference_count if partition is not None else 0
+    if (
+        package is None
+        or partition is None
+        or not partition.core_supported
+        or partition.diagnostic_findings
+    ):
         repair_messages = [
             *messages,
             SystemMessage(
@@ -167,16 +175,20 @@ async def run_deep_research_package_workflow_async(
                 )
             ),
         ]
-        repaired_value = await _invoke_research_model_with_retry(
+        package, partition = await _research_package_attempt(
             model,
             repair_messages,
+            sources=usable_sources,
             callbacks=callbacks,
             deadline=synthesis_deadline,
             ensure_not_cancelled=ensure_not_cancelled,
         )
-        package = _coerce_package(repaired_value)
-        partition = _partition_package_evidence(package, usable_sources)
-        if not partition.core_supported or partition.diagnostic_findings:
+        if (
+            package is None
+            or partition is None
+            or not partition.core_supported
+            or partition.diagnostic_findings
+        ):
             raise ContentEvidenceInvalidError
     package.findings = partition.supported_findings
     # This schema cannot attach source IDs to risk strings, so they remain
@@ -217,8 +229,7 @@ async def _invoke_research_model_with_retry(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            retryable = isinstance(exc, ValidationError) or is_retryable_model_stream_error(exc)
-            if not retryable or attempt == RESEARCH_MODEL_MAX_ATTEMPTS:
+            if not is_retryable_model_stream_error(exc) or attempt == RESEARCH_MODEL_MAX_ATTEMPTS:
                 raise
             _ensure_active(ensure_not_cancelled)
             delay = min(
@@ -229,6 +240,29 @@ async def _invoke_research_model_with_retry(
                 raise
             await asyncio.sleep(delay)
             _ensure_active(ensure_not_cancelled)
+
+
+async def _research_package_attempt(
+    model: Any,
+    messages: list[SystemMessage | HumanMessage],
+    *,
+    sources: list[dict[str, Any]],
+    callbacks: list[Any] | None,
+    deadline: float,
+    ensure_not_cancelled: Callable[[], None] | None,
+) -> tuple[DeepResearchPackage | None, EvidencePartition | None]:
+    try:
+        package_value = await _invoke_research_model_with_retry(
+            model,
+            messages,
+            callbacks=callbacks,
+            deadline=deadline,
+            ensure_not_cancelled=ensure_not_cancelled,
+        )
+        package = _coerce_package(package_value)
+    except (ValidationError, _InvalidResearchPackageOutput):
+        return None, None
+    return package, _partition_package_evidence(package, sources)
 
 
 def run_deep_research_package_workflow(
@@ -314,12 +348,17 @@ def _safe_source(source: dict[str, Any]) -> dict[str, Any] | None:
     url = _safe_citation_url(str(source.get("url") or ""))
     if not url:
         return None
+    raw_combined = "\n".join(
+        str(source.get(field) or "") for field in ("title", "source", "snippet", "summary")
+    )
     title = sanitize_external_text(source.get("title"), max_chars=500)
     publisher = sanitize_external_text(source.get("source"), max_chars=200)
     snippet = sanitize_external_text(source.get("snippet"), max_chars=2000)
     summary = sanitize_external_text(source.get("summary"), max_chars=2000)
     combined = "\n".join((title, publisher, snippet, summary))
-    isolated = looks_like_instruction_injection(combined)
+    isolated = looks_like_instruction_injection(raw_combined) or looks_like_instruction_injection(
+        combined
+    )
     if isolated:
         title = ""
         publisher = str(urlparse(url).hostname or "")[:200]
@@ -414,7 +453,7 @@ def _coerce_package(value: Any) -> DeepResearchPackage:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         return DeepResearchPackage.model_validate(model_dump())
-    raise ValueError("Deep research model did not return a valid package.")
+    raise _InvalidResearchPackageOutput("Deep research model did not return a valid package.")
 
 
 def _partition_package_evidence(

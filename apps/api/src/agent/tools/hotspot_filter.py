@@ -45,6 +45,11 @@ def normalize_hotspot_candidates(
     for raw_item in raw_items[:bounded_limit]:
         if not isinstance(raw_item, dict):
             continue
+        raw_title = str(raw_item.get("title") or "")
+        raw_summary = str(raw_item.get("summary") or "")
+        raw_platform = str(raw_item.get("platform") or raw_item.get("platform_label") or "")
+        if looks_like_instruction_injection("\n".join((raw_title, raw_summary, raw_platform))):
+            continue
         title = sanitize_external_text(raw_item.get("title"), max_chars=240)
         if not title:
             continue

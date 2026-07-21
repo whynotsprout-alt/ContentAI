@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from typing import Any
 
 from langchain_core.messages import BaseMessage, message_to_dict
 from services.errors import CurrentInputTooLargeError
@@ -15,8 +16,10 @@ class TokenCounter:
         self,
         *,
         provider_count: Callable[[list[BaseMessage]], int] | None = None,
+        tools: list[Any] | None = None,
     ) -> None:
         self._provider_count = provider_count
+        self._tools = list(tools or [])
 
     def count_messages(self, messages: list[BaseMessage]) -> int:
         if self._provider_count is not None:
@@ -26,7 +29,10 @@ class TokenCounter:
                     return count
             except Exception:  # noqa: BLE001
                 self._provider_count = None
-        payload = [message_to_dict(message) for message in messages]
+        payload = {
+            "messages": [message_to_dict(message) for message in messages],
+            "tools": [_canonical_tool_schema(tool) for tool in self._tools],
+        }
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -34,6 +40,27 @@ class TokenCounter:
             default=str,
         ).encode("utf-8")
         return max(1, len(encoded))
+
+
+def _canonical_tool_schema(tool: Any) -> dict[str, Any]:
+    if isinstance(tool, dict):
+        return {str(key): value for key, value in tool.items()}
+    schema: Any = getattr(tool, "args_schema", None)
+    if schema is None:
+        get_input_schema = getattr(tool, "get_input_schema", None)
+        if callable(get_input_schema):
+            schema = get_input_schema()
+    model_json_schema = getattr(schema, "model_json_schema", None)
+    if callable(model_json_schema):
+        try:
+            schema = model_json_schema()
+        except Exception:  # noqa: BLE001
+            schema = str(schema)
+    return {
+        "name": str(getattr(tool, "name", "") or ""),
+        "description": str(getattr(tool, "description", "") or ""),
+        "parameters": schema if schema is not None else {},
+    }
 
 
 def _normalize_text(text: str) -> str:

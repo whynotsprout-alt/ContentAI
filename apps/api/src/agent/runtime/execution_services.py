@@ -14,6 +14,8 @@ from agent.runtime.events import (
     PersistentAgentEventWriter,
     now_utc,
 )
+from agent.workflows.deep_research import ContentEvidenceInvalidError
+from agent.workflows.final_evidence import validate_research_backed_final_response
 from agent.workflows.research_repository import ResearchPackageRepository
 from core.hotspot_sources import DEFAULT_HOTSPOT_SOURCES, partition_hotspot_sources
 from db.session import get_engine
@@ -48,6 +50,22 @@ def _execution_research_package(
     graph: Any,
     config: dict[str, Any],
 ) -> Any | None:
+    identity = _execution_research_identity(graph, config)
+    if identity is None:
+        return None
+    package_id, topic_hash = identity
+    return ResearchPackageRepository.for_execution(
+        db_session,
+        package_id=package_id,
+        execution_id=execution_id,
+        topic_hash=topic_hash,
+    )
+
+
+def _execution_research_identity(
+    graph: Any,
+    config: dict[str, Any],
+) -> tuple[str, str] | None:
     snapshot = graph.get_state(config)
     values = getattr(snapshot, "values", None)
     if not isinstance(values, dict):
@@ -56,12 +74,7 @@ def _execution_research_package(
     topic_hash = str(values.get("research_topic_hash") or "").strip()
     if not package_id or not topic_hash:
         return None
-    return ResearchPackageRepository.for_execution(
-        db_session,
-        package_id=package_id,
-        execution_id=execution_id,
-        topic_hash=topic_hash,
-    )
+    return package_id, topic_hash
 
 
 @dataclass(frozen=True)
@@ -446,6 +459,19 @@ class AgentExecutionEngine:
             new_messages = durable_messages
 
         assistant_text = _assistant_text_from_messages(new_messages) or streamed_assistant_text
+        final_research_package = _execution_research_package(
+            db_session,
+            execution_id=execution.id,
+            graph=runtime.graph,
+            config=runtime.config,
+        )
+        if _execution_research_identity(runtime.graph, runtime.config) is not None:
+            if final_research_package is None:
+                raise ContentEvidenceInvalidError
+            assistant_text = _validated_research_backed_final_answer(
+                new_messages,
+                research_package=final_research_package,
+            )
 
         self.state_manager.ensure_execution_not_cancelled(
             db_session,
@@ -1382,6 +1408,32 @@ def _assistant_text_from_messages(messages: list[BaseMessage]) -> str:
             if content:
                 return content
     return ""
+
+
+def _validated_research_backed_final_answer(
+    messages: list[BaseMessage],
+    *,
+    research_package: Any,
+) -> str:
+    allowed_source_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in getattr(research_package, "sources", [])
+        if isinstance(source, dict)
+        and not bool(source.get("isolated"))
+        and str(source.get("source_id") or "").strip()
+    }
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage) or getattr(message, "tool_calls", None):
+            continue
+        envelope = getattr(message, "additional_kwargs", {}).get("research_backed_final")
+        if envelope is None:
+            continue
+        response = validate_research_backed_final_response(
+            envelope,
+            allowed_source_ids=allowed_source_ids,
+        )
+        return response.answer
+    raise ContentEvidenceInvalidError
 
 
 def _recent_conversation_context(messages: list[BaseMessage], limit: int = 8) -> str:

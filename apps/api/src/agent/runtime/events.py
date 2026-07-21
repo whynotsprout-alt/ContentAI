@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
+from threading import RLock, Timer
 from time import monotonic
 from typing import Any
 
@@ -126,33 +127,37 @@ class AgentEventWriter:
         )
         self._pending_delta: EventPayload | None = None
         self._pending_delta_started_at = 0.0
+        self._pending_delta_timer: Timer | None = None
+        self._batch_lock = RLock()
 
     def emit(self, event: str, data: EventPayload) -> None:
-        if self._closed:
-            raise ClosedWriterError(f"Event writer is closed: execution_id={self.execution_id}")
-        if self._closing:
-            raise ClosedWriterError(f"Event writer is closing: execution_id={self.execution_id}")
-        if not isinstance(event, str) or not event.strip():
-            raise ValueError("event must be a non-empty string")
-        if not isinstance(data, dict):
-            raise TypeError("event data must be a JSON object")
+        with self._batch_lock:
+            if self._closed:
+                raise ClosedWriterError(f"Event writer is closed: execution_id={self.execution_id}")
+            if self._closing:
+                raise ClosedWriterError(
+                    f"Event writer is closing: execution_id={self.execution_id}"
+                )
+            if not isinstance(event, str) or not event.strip():
+                raise ValueError("event must be a non-empty string")
+            if not isinstance(data, dict):
+                raise TypeError("event data must be a JSON object")
 
-        event_name = event.strip()
-        payload = _sanitize_payload(
-            dict(data),
-            execution_id=self.execution_id,
-            trace_id=self.trace_id,
-            thread_id=self.thread_id,
-            request_id=self.request_id,
-            conversation_id=self.conversation_id,
-        )
+            event_name = event.strip()
+            payload = _sanitize_payload(
+                dict(data),
+                execution_id=self.execution_id,
+                trace_id=self.trace_id,
+                thread_id=self.thread_id,
+                request_id=self.request_id,
+                conversation_id=self.conversation_id,
+            )
 
-        if event_name == "assistant_message_delta" and not bool(payload.get("done")):
-            self._buffer_assistant_delta(payload)
-            return
-        self._flush_pending_delta()
-
-        self._emit_now(event_name, payload)
+            if event_name == "assistant_message_delta" and not bool(payload.get("done")):
+                self._buffer_assistant_delta(payload)
+                return
+            self._flush_pending_delta_locked()
+            self._emit_now(event_name, payload)
 
     def _emit_now(self, event_name: str, payload: EventPayload) -> None:
 
@@ -175,39 +180,66 @@ class AgentEventWriter:
             self._pending_delta["chunk"] = ""
             self._pending_delta["done"] = False
             self._pending_delta_started_at = now
+            self._schedule_pending_delta_flush_locked()
         chunk = _coerce_content(payload)
         self._pending_delta["chunk"] = str(self._pending_delta.get("chunk") or "") + chunk
         if (
             len(str(self._pending_delta["chunk"])) >= self._stream_batch_max_chars
             or now - self._pending_delta_started_at >= self._stream_batch_interval_seconds
         ):
-            self._flush_pending_delta()
+            self._flush_pending_delta_locked()
 
     def _flush_pending_delta(self) -> None:
+        with self._batch_lock:
+            self._flush_pending_delta_locked()
+
+    def _flush_pending_delta_locked(self) -> None:
         if self._pending_delta is None:
             return
         payload = self._pending_delta
         self._pending_delta = None
         self._pending_delta_started_at = 0.0
+        self._cancel_pending_delta_timer_locked()
         self._emit_now("assistant_message_delta", payload)
 
+    def _schedule_pending_delta_flush_locked(self) -> None:
+        self._cancel_pending_delta_timer_locked()
+        timer = Timer(self._stream_batch_interval_seconds, self._flush_pending_delta_deadline)
+        timer.daemon = True
+        self._pending_delta_timer = timer
+        timer.start()
+
+    def _cancel_pending_delta_timer_locked(self) -> None:
+        timer = self._pending_delta_timer
+        self._pending_delta_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _flush_pending_delta_deadline(self) -> None:
+        with self._batch_lock:
+            if self._closed or self._closing:
+                return
+            self._flush_pending_delta_locked()
+
     def flush(self) -> None:
-        if self._closed and not self._closing:
-            raise ClosedWriterError(f"Event writer is closed: execution_id={self.execution_id}")
-        self._flush_pending_delta()
+        with self._batch_lock:
+            if self._closed and not self._closing:
+                raise ClosedWriterError(f"Event writer is closed: execution_id={self.execution_id}")
+            self._flush_pending_delta_locked()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closing = True
-        try:
-            self.flush()
-        finally:
+        with self._batch_lock:
+            if self._closed:
+                return
+            self._closing = True
             try:
-                self._close_writer()
+                self._flush_pending_delta_locked()
             finally:
-                self._closing = False
-                self._closed = True
+                try:
+                    self._close_writer()
+                finally:
+                    self._closing = False
+                    self._closed = True
 
     def _write_event(self, event: str, payload: EventPayload) -> None:
         raise NotImplementedError

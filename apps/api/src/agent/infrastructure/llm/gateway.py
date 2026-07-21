@@ -54,7 +54,8 @@ class ModelGateway:
             return TokenCounter()
         bound_tools = list(tools or [])
         return TokenCounter(
-            provider_count=lambda messages: provider_count(messages, tools=bound_tools)
+            provider_count=lambda messages: provider_count(messages, tools=bound_tools),
+            tools=bound_tools,
         )
 
     def build_structured_output_model(

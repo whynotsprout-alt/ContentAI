@@ -57,6 +57,20 @@ def test_token_counter_falls_back_to_utf8_byte_upper_bound():
     assert counter.count_messages([message]) >= len("你好".encode())
 
 
+def test_token_counter_utf8_fallback_includes_canonical_tool_schemas():
+    message = HumanMessage(content="current")
+    tool_schema = {
+        "name": "large_tool",
+        "description": "tool description " * 100,
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }
+
+    without_tools = TokenCounter().count_messages([message])
+    with_tools = TokenCounter(tools=[tool_schema]).count_messages([message])
+
+    assert with_tools > without_tools
+
+
 def test_full_input_budget_trims_only_older_history():
     counter = TokenCounter(
         provider_count=lambda messages: sum(len(str(message.content)) for message in messages)

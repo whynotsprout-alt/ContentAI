@@ -6,9 +6,10 @@ import unicodedata
 from typing import Any
 
 _HTML_FRAGMENT_RE = re.compile(r"<[^>]{1,500}>")
+_MAX_HTML_UNESCAPE_PASSES = 4
 _INSTRUCTION_INJECTION_PATTERNS = (
     re.compile(
-        r"\b(?:ignore|override|disregard)\b.{0,80}\b(?:instruction|prompt|system)\b",
+        r"\b(?:ignore|override|disregard)\b.{0,80}\b(?:instructions?|prompts?|systems?)\b",
         re.I,
     ),
     re.compile(
@@ -29,18 +30,37 @@ _INSTRUCTION_INJECTION_PATTERNS = (
 
 
 def sanitize_external_text(value: Any, *, max_chars: int) -> str:
-    text = html.unescape(str(value or ""))
-    text = _HTML_FRAGMENT_RE.sub(" ", text)
+    text = _canonical_external_text(value)
+    return " ".join(text.split()).strip()[:max_chars]
+
+
+def _canonical_external_text(value: Any) -> str:
+    text = str(value or "")
+    for _ in range(_MAX_HTML_UNESCAPE_PASSES):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    text = unicodedata.normalize("NFKC", text)
+    # Tags can split a dangerous token (for example ign<b></b>ore). Removing
+    # them without a replacement preserves that canonical token for rejection.
+    text = _HTML_FRAGMENT_RE.sub("", text)
     text = "".join(
         char
         for char in text
         if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}
     )
-    return " ".join(text.split()).strip()[:max_chars]
+    return text
 
 
 def looks_like_instruction_injection(value: str) -> bool:
-    return any(pattern.search(value) for pattern in _INSTRUCTION_INJECTION_PATTERNS)
+    raw = str(value or "")
+    canonical = _canonical_external_text(raw)
+    return any(
+        pattern.search(candidate)
+        for candidate in (raw, canonical)
+        for pattern in _INSTRUCTION_INJECTION_PATTERNS
+    )
 
 
 __all__ = ["looks_like_instruction_injection", "sanitize_external_text"]

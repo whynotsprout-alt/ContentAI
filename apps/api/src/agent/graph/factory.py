@@ -20,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 class AgentGraphBuilder:
     model: Any
     tools: Sequence[BaseTool]
+    research_final_model: Any | None = None
 
     def _validate(self) -> None:
         if not callable(getattr(self.model, "invoke", None)):
@@ -31,7 +32,10 @@ class AgentGraphBuilder:
     def build(self) -> StateGraph[AgentState]:
         self._validate()
         graph = StateGraph(AgentState)
-        graph.add_node("agent", build_agent_node(self.model))
+        graph.add_node(
+            "agent",
+            build_agent_node(self.model, research_final_model=self.research_final_model),
+        )
         graph.add_node("tools", build_tools_node(self.tools))
         graph.add_node("human", build_human_node())
         graph.add_node("tool_error", build_tool_error_node())
@@ -68,6 +72,11 @@ def build_agent_graph(
     *,
     model: Any,
     tools: Sequence[BaseTool],
+    research_final_model: Any | None = None,
     **compile_kwargs: Any,
 ) -> Any:
-    return AgentGraphBuilder(model=model, tools=tools).compile(**compile_kwargs)
+    return AgentGraphBuilder(
+        model=model,
+        tools=tools,
+        research_final_model=research_final_model,
+    ).compile(**compile_kwargs)

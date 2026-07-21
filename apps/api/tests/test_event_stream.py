@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -36,9 +38,13 @@ class CapturingEventWriter(AgentEventWriter):
     def __init__(self, settings: Any) -> None:
         super().__init__("execution-batched", settings=settings)
         self.events: list[tuple[str, dict[str, Any]]] = []
+        self.flush_event = threading.Event()
+        self.flushed_at = 0.0
 
     def _write_event(self, event: str, payload: dict[str, Any]) -> None:
         self.events.append((event, payload))
+        self.flushed_at = time.monotonic()
+        self.flush_event.set()
 
 
 class FakeRedis:
@@ -212,6 +218,24 @@ def test_assistant_stream_chunks_batch_at_50_milliseconds(monkeypatch):
     )
 
     assert [payload["content"] for _event, payload in writer.events] == ["first second"]
+
+
+def test_single_short_assistant_delta_flushes_on_the_50ms_deadline_without_another_emit():
+    writer = CapturingEventWriter(
+        SimpleNamespace(
+            agent=SimpleNamespace(event_flush_interval_ms=50, event_flush_max_chars=256)
+        )
+    )
+    started_at = time.monotonic()
+    writer.emit(
+        "assistant_message_delta",
+        {"message_id": "message-1", "chunk": "short", "done": False},
+    )
+
+    assert writer.flush_event.wait(timeout=0.12)
+    assert writer.flushed_at - started_at <= 0.08
+    assert [payload["content"] for _event, payload in writer.events] == ["short"]
+    writer.close()
 
 
 def test_terminal_events_flush_pending_assistant_chunks(monkeypatch):
