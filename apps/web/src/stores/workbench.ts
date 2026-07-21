@@ -551,7 +551,9 @@ export const useWorkbenchStore = defineStore('workbench', {
         const optimisticIndex = this.messages.indexOf(optimisticUserMessage);
         if (optimisticIndex >= 0) this.messages.splice(optimisticIndex, 1);
         this.lastErrorCode = error instanceof ApiError ? error.code : '';
-        this.error = normalizeErrorMessage(error);
+        this.error = error instanceof ApiError && error.code === 'MODEL_NOT_CONFIGURED'
+          ? '模型服务尚未配置，请联系管理员'
+          : normalizeErrorMessage(error);
         this.status = 'failed';
         this.runLifecycle = 'failed';
         this._removeActiveStreamingAssistantPlaceholder();

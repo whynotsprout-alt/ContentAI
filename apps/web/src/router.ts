@@ -11,6 +11,7 @@ export const router = createRouter({
     { path: '/reset-password', name: 'reset-password', component: () => import('./views/AuthView.vue'), meta: { public: true, visualMode: 'hero' } },
     { path: '/app', name: 'app', component: () => import('./App.vue'), meta: { visualMode: 'workspace' } },
     { path: '/admin/users', name: 'admin-users', component: () => import('./views/AdminUsersView.vue'), meta: { admin: true, visualMode: 'admin' } },
+    { path: '/admin/models', name: 'admin-models', component: () => import('./views/AdminModelsView.vue'), meta: { admin: true, visualMode: 'admin' } },
     { path: '/:pathMatch(.*)*', redirect: '/app' }
   ]
 });

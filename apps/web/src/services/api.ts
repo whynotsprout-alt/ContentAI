@@ -382,9 +382,7 @@ export interface AdminUser extends CurrentUser {
 
 export interface AdminUserList {
   items: AdminUser[];
-  page: number;
-  page_size: number;
-  total: number;
+  next_cursor: string | null;
 }
 
 export interface AdminSessionSummary {
@@ -410,6 +408,39 @@ export interface AdminUsageBucket {
   call_count: number;
   failed_call_count: number;
   average_latency_ms: number | null;
+}
+
+export interface AdminModelConfiguration {
+  configured: boolean;
+  id?: string | null;
+  version?: number | null;
+  provider?: string | null;
+  base_url?: string | null;
+  model_name?: string | null;
+  api_key_hint?: string | null;
+  validated_at?: string | null;
+  created_at?: string | null;
+  created_by_user_id?: string | null;
+  created_by_email?: string | null;
+}
+
+export interface AdminModelProbeResult {
+  base_url: string;
+  models: string[];
+  models_truncated: boolean;
+  model_validated: boolean;
+  latency_ms: number;
+}
+
+export interface AdminModelProbePayload {
+  base_url: string;
+  api_key?: string;
+  model_name?: string;
+}
+
+export interface AdminModelUpdatePayload extends AdminModelProbePayload {
+  model_name: string;
+  expected_version: number;
 }
 
 export const authApi = {
@@ -443,12 +474,23 @@ export const authApi = {
 };
 
 export const adminApi = {
-  users: (params: { search?: string; status?: string; page?: number; page_size?: number }) => {
+  modelConfig: () => request<AdminModelConfiguration>('/api/admin/model-config'),
+  probeModelConfig: (payload: AdminModelProbePayload) =>
+    request<AdminModelProbeResult>('/api/admin/model-config/probe', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  updateModelConfig: (payload: AdminModelUpdatePayload) =>
+    request<AdminModelConfiguration>('/api/admin/model-config', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }),
+  users: (params: { search?: string; status?: string; cursor?: string; limit?: number }) => {
     const query = new URLSearchParams();
     if (params.search) query.set('search', params.search);
     if (params.status) query.set('status', params.status);
-    query.set('page', String(params.page ?? 1));
-    query.set('page_size', String(params.page_size ?? 20));
+    if (params.cursor) query.set('cursor', params.cursor);
+    query.set('limit', String(params.limit ?? 50));
     return request<AdminUserList>(`/api/admin/users?${query}`);
   },
   user: (userId: string) => request<AdminUser>(`/api/admin/users/${userId}`),
@@ -456,8 +498,8 @@ export const adminApi = {
     request<AdminUser>(`/api/admin/users/${userId}/disable`, { method: 'POST' }),
   enable: (userId: string) =>
     request<AdminUser>(`/api/admin/users/${userId}/enable`, { method: 'POST' }),
-  passwordReset: (userId: string) =>
-    request<{ message: string }>(`/api/admin/users/${userId}/password-reset`, {
+  temporaryPassword: (userId: string) =>
+    request<{ temporary_password: string; expires_at: string }>(`/api/admin/users/${userId}/temporary-password`, {
       method: 'POST'
     }),
   updateUser: (userId: string, role: 'user' | 'admin') =>
@@ -465,11 +507,21 @@ export const adminApi = {
       method: 'PATCH',
       body: JSON.stringify({ role })
     }),
-  sessions: (userId: string, page = 1, pageSize = 30) =>
-    request<{ items: AdminSessionSummary[]; page: number; page_size: number; total: number }>(
-      `/api/admin/users/${userId}/sessions?page=${page}&page_size=${pageSize}`
-    ),
-  sessionDetail: (sessionId: string) => request<AdminSessionDetail>(`/api/admin/sessions/${sessionId}`),
+  sessions: (userId: string, cursor = '', limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    return request<{ items: AdminSessionSummary[]; next_cursor: string | null }>(
+      `/api/admin/users/${userId}/sessions?${query}`
+    );
+  },
+  sessionDetail: (sessionId: string) => request<AdminSessionSummary>(`/api/admin/sessions/${sessionId}`),
+  sessionMessages: (sessionId: string, cursor = '', limit = 200) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    return request<{ items: Array<Record<string, unknown>>; next_cursor: string | null }>(
+      `/api/admin/sessions/${sessionId}/messages?${query}`
+    );
+  },
   usage: (params: { group_by?: 'day' | 'model' | 'category'; user_id?: string } = {}) => {
     const query = new URLSearchParams();
     query.set('group_by', params.group_by ?? 'day');

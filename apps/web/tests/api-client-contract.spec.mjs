@@ -13,8 +13,8 @@ const groups = {
     'forgotPassword', 'resetPassword', 'changePassword'
   ],
   adminApi: [
-    'users', 'user', 'disable', 'enable', 'passwordReset', 'updateUser', 'sessions',
-    'sessionDetail', 'usage'
+    'users', 'user', 'disable', 'enable', 'temporaryPassword', 'updateUser', 'sessions',
+    'sessionDetail', 'sessionMessages', 'usage', 'modelConfig', 'probeModelConfig', 'updateModelConfig'
   ]
 };
 

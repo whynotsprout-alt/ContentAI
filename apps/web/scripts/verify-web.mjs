@@ -134,6 +134,14 @@ const adminSessionSummary = {
   updated_at: fixedNow
 };
 
+const olderAdminSession = {
+  ...adminSessionSummary,
+  session_id: 'admin-session-older',
+  title: '更早的审计会话',
+  message_count: 1,
+  updated_at: '2026-07-13T08:00:00.000Z'
+};
+
 const adminSessionDetail = {
   ...adminSessionSummary,
   messages: [
@@ -143,6 +151,20 @@ const adminSessionDetail = {
     { id: 'audit-4', role: 'assistant', content: '今天值得跟进的是平台补贴、消费品牌财报和 AI 搜索产品更新。' },
     { id: 'audit-5', role: 'user', content: '先分析平台补贴。' }
   ]
+};
+
+const modelConfiguration = {
+  configured: true,
+  id: 'model-config-7',
+  version: 7,
+  provider: 'openai_compatible',
+  base_url: 'https://gateway.example.test/v1',
+  model_name: 'gpt-4.1-mini',
+  api_key_hint: 'sk-…9X2Q',
+  validated_at: fixedNow,
+  created_at: fixedNow,
+  created_by_user_id: authUser.id,
+  created_by_email: authUser.email
 };
 
 const usageBuckets = [
@@ -336,19 +358,46 @@ async function installApiMocks(page, state) {
       });
     }
     if (path === '/api/admin/users' && method === 'GET') {
-      return fulfillJson(route, { items: [targetUser], page: 1, page_size: 20, total: 1 });
+      return fulfillJson(route, { items: [targetUser], next_cursor: null });
     }
     if (path === `/api/admin/users/${targetUser.id}` && method === 'GET') {
       return fulfillJson(route, targetUser);
     }
     if (path === `/api/admin/users/${targetUser.id}/sessions` && method === 'GET') {
-      return fulfillJson(route, { items: [adminSessionSummary], page: 1, page_size: 30, total: 1 });
+      return url.searchParams.has('cursor')
+        ? fulfillJson(route, { items: [olderAdminSession], next_cursor: null })
+        : fulfillJson(route, { items: [adminSessionSummary], next_cursor: 'session-cursor-1' });
     }
     if (path === '/api/admin/usage' && method === 'GET') {
       return fulfillJson(route, { items: usageBuckets });
     }
     if (path === `/api/admin/sessions/${adminSessionSummary.session_id}` && method === 'GET') {
       return fulfillJson(route, adminSessionDetail);
+    }
+    if (path === `/api/admin/sessions/${adminSessionSummary.session_id}/messages` && method === 'GET') {
+      return url.searchParams.has('cursor')
+        ? fulfillJson(route, { items: [{ id: 'audit-6', role: 'assistant', message_type: 'text', content: '补充加载的审计消息。', created_at: fixedNow }], next_cursor: null })
+        : fulfillJson(route, { items: adminSessionDetail.messages, next_cursor: 'message-cursor-1' });
+    }
+    if (path === '/api/admin/model-config' && method === 'GET') {
+      if (state.modelLoadFailure) {
+        return fulfillJson(route, { detail: { code: 'MODEL_PROVIDER_UNREACHABLE', message: 'safe load failure' } }, 502);
+      }
+      return fulfillJson(route, { ...modelConfiguration, version: state.modelVersion });
+    }
+    if (path === '/api/admin/model-config' && method === 'PUT') {
+      state.modelPutPayloads.push(request.postDataJSON());
+      state.modelVersion = 8;
+      return fulfillJson(route, { detail: { code: 'MODEL_CONFIG_CHANGED', message: 'configuration changed' } }, 409);
+    }
+    if (path === '/api/admin/model-config/probe' && method === 'POST') {
+      return fulfillJson(route, {
+        base_url: modelConfiguration.base_url,
+        models: ['gpt-4.1', 'gpt-4.1-mini', 'o4-mini'],
+        models_truncated: false,
+        model_validated: false,
+        latency_ms: 248
+      });
     }
 
     state.unexpectedApiCalls.push(`${method} ${path}${url.search}`);
@@ -404,7 +453,10 @@ async function runDesktopAcceptance(browser) {
     pageErrors: [],
     consoleErrors: [],
     failedResponses: [],
-    failedRequests: []
+    failedRequests: [],
+    modelVersion: 7,
+    modelLoadFailure: false,
+    modelPutPayloads: []
   };
   const screenshots = [];
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
@@ -413,7 +465,9 @@ async function runDesktopAcceptance(browser) {
   });
   page.on('response', (response) => {
     const expectedAnonymousMe = !state.authenticated && response.url().includes('/api/auth/me') && response.status() === 401;
-    if (response.status() >= 400 && !expectedAnonymousMe) {
+    const expectedModelConflict = response.request().method() === 'PUT' && response.url().includes('/api/admin/model-config') && response.status() === 409;
+    const expectedModelLoadFailure = state.modelLoadFailure && response.request().method() === 'GET' && response.url().includes('/api/admin/model-config') && response.status() === 502;
+    if (response.status() >= 400 && !expectedAnonymousMe && !expectedModelConflict && !expectedModelLoadFailure) {
       state.failedResponses.push(`${response.status()} ${response.url()}`);
     }
   });
@@ -494,13 +548,49 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('heading', { name: `${targetUser.email} 的会话记录`, exact: true }), '会话审计窗口');
     await expectVisible(page.getByText(adminSessionSummary.title, { exact: true }).first(), '审计会话标题');
     await expectVisible(page.getByText('今天值得跟进的是平台补贴、消费品牌财报和 AI 搜索产品更新。', { exact: true }), '审计消息');
+    await page.getByRole('button', { name: '加载更多会话', exact: true }).click();
+    await expectVisible(page.getByText(olderAdminSession.title, { exact: true }), '追加的审计会话');
+    await page.getByRole('button', { name: '加载更多消息', exact: true }).click();
+    await expectVisible(page.getByText('补充加载的审计消息。', { exact: true }), '追加的审计消息');
     await capture(page, '05-admin-audit-1440x900.png', screenshots);
+
+    await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '模型管理', exact: true }), '模型管理标题');
+    await expectVisible(page.getByText('gpt-4.1-mini', { exact: true }).first(), '当前模型');
+    await page.getByRole('button', { name: '刷新模型', exact: true }).click();
+    await expectVisible(page.getByText('已刷新 3 个可用模型。', { exact: true }), '模型刷新反馈');
+    await capture(page, '06-admin-models-1440x900.png', screenshots);
+
+    const modelBaseUrl = page.getByRole('textbox', { name: /Base URL/ });
+    const modelName = page.getByRole('combobox', { name: '模型 ID' });
+    await modelBaseUrl.fill('https://draft.example.test/v1');
+    await modelName.fill('custom-model-draft');
+    await page.getByRole('button', { name: '测试连接', exact: true }).click();
+    await expectVisible(page.getByText(/当前模型尚未完成推理验证/), '未验证模型反馈');
+    await page.getByRole('button', { name: '保存并启用', exact: true }).click();
+    await expectVisible(page.getByText(/配置已被其他管理员更新/), '并发冲突反馈');
+    assert.equal(await modelBaseUrl.inputValue(), 'https://draft.example.test/v1', '冲突后应保留 Base URL 草稿');
+    assert.equal(await modelName.inputValue(), 'custom-model-draft', '冲突后应保留模型草稿');
+    await expectVisible(page.getByText('v8', { exact: true }).first(), '冲突后同步的配置版本');
+    assert.deepEqual(state.modelPutPayloads, [{
+      base_url: 'https://draft.example.test/v1',
+      model_name: 'custom-model-draft',
+      expected_version: 7
+    }], '更新已有配置时空 Key 不应进入请求');
+
+    state.modelLoadFailure = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByText('无法加载当前模型配置', { exact: true }), '模型配置加载错误');
+    await expectHidden(page.getByRole('button', { name: '保存并启用', exact: true }), '加载失败时保存入口');
+    state.modelLoadFailure = false;
+    await page.getByRole('button', { name: '重新加载', exact: true }).click();
+    await expectVisible(page.getByRole('button', { name: '保存并启用', exact: true }), '重新加载后的保存入口');
 
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
     await expectVisible(page.getByRole('heading', { name: '请在桌面浏览器中打开', exact: true }), '1024px 桌面门槛');
     await expectHidden(page.locator('.desktop-application'), '1024px 应用界面');
-    await capture(page, '06-desktop-gate-1024x768.png', screenshots);
+    await capture(page, '07-desktop-gate-1024x768.png', screenshots);
 
     assert.deepEqual(state.unexpectedApiCalls, [], `存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `页面脚本错误：${state.pageErrors.join(' | ')}`);
@@ -509,6 +599,10 @@ async function runDesktopAcceptance(browser) {
     assert.ok(state.apiCalls.some((call) => call === 'POST /api/auth/login'), '未覆盖登录 API');
     assert.ok(state.apiCalls.some((call) => call.startsWith(`GET /api/admin/users/${targetUser.id}/sessions`)), '未覆盖后台会话列表 API');
     assert.ok(state.apiCalls.some((call) => call === `GET /api/admin/sessions/${adminSessionSummary.session_id}`), '未覆盖会话审计 API');
+
+    assert.ok(state.apiCalls.some((call) => call === 'GET /api/admin/model-config'), '未覆盖模型配置 API');
+    assert.ok(state.apiCalls.some((call) => call === 'POST /api/admin/model-config/probe'), '未覆盖模型探测 API');
+    assert.ok(state.apiCalls.some((call) => call === 'PUT /api/admin/model-config'), '未覆盖模型并发更新 API');
 
     return { screenshots, apiCalls: state.apiCalls };
   } catch (error) {

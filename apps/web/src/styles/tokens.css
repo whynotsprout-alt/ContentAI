@@ -60,4 +60,14 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --transition-fast: 180ms var(--ease-out);
   --transition-base: 220ms var(--ease-out);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --type-caption: 0.75rem;
+  --type-body: 0.875rem;
+  --type-title: 1.25rem;
 }
