@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from agent.context.assembler import AgentContext, ContextAssembler
 from agent.runtime.checkpoint import checkpoint_messages
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from agent.runtime.errors import classify_runtime_error
 from agent.runtime.events import (
     PersistentAgentEventWriter,
     now_utc,
@@ -303,6 +304,7 @@ class AgentExecutionEngine:
 
         allowed_hotspot_sources = _allowed_hotspot_sources(agent_version)
         runtime = self.container.create_runtime(
+            model_config_id=execution.model_config_id,
             tool_permissions=tool_permissions,
             user_id=invocation.user_id,
             agent_id=chat.agent_id,
@@ -348,8 +350,12 @@ class AgentExecutionEngine:
             user_id=invocation.user_id,
             allowed_hotspot_sources=allowed_hotspot_sources,
             topic_scoring_prompt=agent_version.topic_scoring_prompt,
-            hotspot_filter_model=self.container.model_gateway.build_hotspot_filter_model(),
-            research_model_gateway=self.container.model_gateway,
+            hotspot_filter_model=self.container.gateway_for_model_config(
+                execution.model_config_id
+            ).build_hotspot_filter_model(),
+            research_model_gateway=self.container.gateway_for_model_config(
+                execution.model_config_id
+            ),
             event_writer=event_writer,
             tool_policies={
                 registration.name: {
@@ -758,8 +764,17 @@ class CeleryPostExecutionDispatcher:
     def dispatch(self, execution_id: str, request_id: str | None = None) -> None:
         from services.tasks import process_agent_post_execution
 
+        with Session(get_engine(self.settings)) as session:
+            execution = session.get(AgentExecution, execution_id)
+            if execution is None:
+                return
+            model_config_id = execution.model_config_id
         process_agent_post_execution.apply_async(
-            kwargs={"execution_id": execution_id, "request_id": request_id},
+            kwargs={
+                "execution_id": execution_id,
+                "model_config_id": model_config_id,
+                "request_id": request_id,
+            },
             queue=self.settings.agent.celery_background_queue,
             retry=False,
         )
@@ -834,12 +849,15 @@ class AgentPostExecutionService:
         self,
         *,
         execution_id: str,
+        model_config_id: str,
         request_id: str | None = None,
     ) -> None:
         try:
             with Session(get_engine(self.settings)) as session:
                 execution = session.get(AgentExecution, execution_id)
                 if execution is None or execution.postprocess_completed_at is not None:
+                    return
+                if execution.model_config_id != model_config_id:
                     return
                 outbox = session.exec(
                     select(ExecutionOutbox)
@@ -852,6 +870,8 @@ class AgentPostExecutionService:
                 now = utcnow()
                 if outbox is None:
                     raise RuntimeError("postprocess outbox is missing")
+                if outbox.model_config_id != model_config_id:
+                    return
                 if (
                     outbox.status == "processing"
                     and outbox.locked_until is not None
@@ -913,12 +933,16 @@ class AgentPostExecutionService:
                     "tool_results": [],
                     "trace_id": execution.trace_id,
                     "thread_id": chat.langgraph_thread_id,
+                    "model_config_id": execution.model_config_id,
                 }
 
+            model_gateway = self.container.gateway_for_model_config(
+                context["model_config_id"]
+            )
             if self.settings.agent.memory_after_turn_enabled:
                 _extract_memory_background(
                     **context,
-                    model_gateway=self.container.model_gateway,
+                    model_gateway=model_gateway,
                     settings=self.settings,
                     request_id=request_id,
                     conversation_id=context["session_id"],
@@ -933,11 +957,18 @@ class AgentPostExecutionService:
                 user_id=context["user_id"],
                 user_message=context["user_message"],
                 settings=self.settings,
-                model_gateway=self.container.model_gateway,
+                model_gateway=model_gateway,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Post-execution processing failed for %s.", execution_id, exc_info=True)
-            self._mark_processing_failure(execution_id, str(exc))
+            logger.warning(
+                "Post-execution processing failed: execution=%s error_type=%s",
+                execution_id,
+                type(exc).__name__,
+            )
+            self._mark_processing_failure(
+                execution_id,
+                classify_runtime_error(exc).message,
+            )
             return
 
         with Session(get_engine(self.settings)) as session:
@@ -1046,7 +1077,9 @@ def _extract_memory_background(
     model_gateway: Any,
     settings: Any,
     trace_id: str | None = None,
+    model_config_id: str | None = None,
 ) -> None:
+    _ = model_config_id
     started_at = time.perf_counter()
     with Session(get_engine(settings)) as session:
         writer = PersistentAgentEventWriter(
@@ -1114,9 +1147,9 @@ def _extract_memory_background(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Background memory extraction failed for execution %s.",
+                "Background memory extraction failed: execution=%s error_type=%s",
                 execution_id,
-                exc_info=True,
+                type(exc).__name__,
             )
             _emit_postprocess_marker(
                 writer,
@@ -1127,7 +1160,10 @@ def _extract_memory_background(
             )
             writer.emit(
                 "memory_extraction_failed",
-                {"execution_id": execution_id, "error": str(exc)[:800]},
+                {
+                    "execution_id": execution_id,
+                    "error": classify_runtime_error(exc).message,
+                },
             )
             raise
         finally:
@@ -1205,8 +1241,8 @@ def _generate_session_title(
                 raise
             result = model.invoke(prompt)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Session title generation failed: %s", exc)
-        raise
+        logger.warning("Session title generation failed: error_type=%s", type(exc).__name__)
+        raise RuntimeError("Session title generation failed.") from None
     if isinstance(result, SessionTitleResult):
         raw_title = result.title
     elif isinstance(result, dict):

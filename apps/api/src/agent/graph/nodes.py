@@ -277,8 +277,8 @@ def build_tool_error_node():
         return {
             # ToolNode has already appended an error ToolMessage. Adding an
             # AIMessage here would make the next provider request end with an
-            # assistant message (assistant prefill), which some Anthropic
-            # compatible models reject. Keep the ToolMessage as the final
+            # assistant message (assistant prefill), which some providers
+            # reject. Keep the ToolMessage as the final
             # conversational item so the agent can handle the failure safely.
             "messages": [],
             "tool_error": None,

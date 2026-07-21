@@ -31,7 +31,6 @@ from models.chat import (
 )
 from models.enums import ExecutionAttemptKind, MessageRole, MessageType, RunStatus
 from models.memory import MemoryRecord
-from models.model_configuration import ModelConfiguration
 from models.schemas import (
     AgentExecutionState,
     AgentMessageRequest,
@@ -72,6 +71,7 @@ from services.event_stream import (
 from services.execution_lineage import ExecutionLineage
 from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
+from services.model_configuration_service import ModelConfigurationService
 from services.pagination import (
     MAX_RESPONSE_BYTES,
     CursorSigner,
@@ -112,6 +112,7 @@ class ConversationService:
         self.execution_dispatcher = execution_dispatcher
         self._execution_scope_guard = ExecutionScopeGuard()
         self._input_token_counter = TokenCounter()
+        self._model_configurations = ModelConfigurationService(agent_service.settings)
 
     def close(self) -> None:
         return None
@@ -327,6 +328,7 @@ class ConversationService:
                     error=self._execution_error(execution.error),
                 ), True
         self._ensure_no_active_execution(session, chat.id, for_update=True)
+        model_configuration = self._model_configurations.get_required_active_runtime(session)
         message_id = payload.message_id or new_id("msg")
         invocation_id = new_id("inv")
         execution_id = new_id("exe")
@@ -338,6 +340,7 @@ class ConversationService:
             invocation_id=invocation_id,
             execution_id=execution_id,
             auth=auth,
+            model_config_id=model_configuration.id,
         )
 
         message, invocation, execution = self._create_user_message_invocation_execution(
@@ -352,6 +355,7 @@ class ConversationService:
             idempotency_key=normalized_key,
             request_sha256=request_sha256,
             request_id=request_id,
+            model_config_id=model_configuration.id,
         )
         try:
             session.commit()
@@ -383,6 +387,7 @@ class ConversationService:
         invocation_id: str,
         execution_id: str,
         auth: AuthContext,
+        model_config_id: str,
     ) -> dict[str, Any]:
         settings = getattr(self.agent_service, "settings", None)
         llm = getattr(settings, "llm", None)
@@ -396,7 +401,8 @@ class ConversationService:
             input_tokens = self._input_token_counter.count_messages([HumanMessage(content=content)])
         else:
             tools = runtime.get_tools(auth.tool_permissions)
-            build_counter = getattr(runtime.model_gateway, "build_token_counter", None)
+            model_gateway = runtime.gateway_for_model_config(model_config_id)
+            build_counter = getattr(model_gateway, "build_token_counter", None)
             token_counter = (
                 build_counter(tools=tools)
                 if callable(build_counter)
@@ -733,13 +739,8 @@ class ConversationService:
         idempotency_key: str | None = None,
         request_sha256: str | None = None,
         request_id: str | None = None,
+        model_config_id: str,
     ) -> tuple[ChatMessage, AgentInvocation, AgentExecution]:
-        model_configuration = session.exec(
-            select(ModelConfiguration).where(ModelConfiguration.is_active.is_(True))
-        ).one_or_none()
-        if model_configuration is None:
-            raise RuntimeError("An active model configuration is required to create an execution.")
-
         invocation = AgentInvocation(
             **({"id": invocation_id} if invocation_id else {}),
             session_id=chat.id,
@@ -770,7 +771,7 @@ class ConversationService:
             invocation_id=invocation.id,
             session_id=chat.id,
             agent_version_id=chat.agent_version_id,
-            model_config_id=model_configuration.id,
+            model_config_id=model_config_id,
         )
         session.add(execution)
         session.flush()

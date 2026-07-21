@@ -26,7 +26,7 @@ class TokenCounter:
             try:
                 count = int(self._provider_count(messages))
                 if count > 0:
-                    return count
+                    return count + _tool_schema_token_estimate(self._tools)
             except Exception:  # noqa: BLE001
                 self._provider_count = None
         payload = {
@@ -40,6 +40,18 @@ class TokenCounter:
             default=str,
         ).encode("utf-8")
         return max(1, len(encoded))
+
+
+def _tool_schema_token_estimate(tools: list[Any]) -> int:
+    if not tools:
+        return 0
+    encoded = json.dumps(
+        [_canonical_tool_schema(tool) for tool in tools],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return (len(encoded) + CHARS_PER_TOKEN_ESTIMATE - 1) // CHARS_PER_TOKEN_ESTIMATE
 
 
 def _canonical_tool_schema(tool: Any) -> dict[str, Any]:

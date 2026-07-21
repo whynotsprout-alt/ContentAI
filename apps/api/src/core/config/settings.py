@@ -156,12 +156,6 @@ class Settings(BaseSettings):
         validate_connection_budget(self.database)
 
     def _validate_llm(self) -> None:
-        if not self.llm.chat_model.strip():
-            raise ValueError("CONTENTAI_LLM__CHAT_MODEL cannot be empty.")
-        if not self.llm.planning_model.strip():
-            raise ValueError("CONTENTAI_LLM__PLANNING_MODEL cannot be empty.")
-        if not self.llm.summary_model.strip():
-            raise ValueError("CONTENTAI_LLM__SUMMARY_MODEL cannot be empty.")
         if self.llm.context_window_tokens < 1:
             raise ValueError("CONTENTAI_LLM__CONTEXT_WINDOW_TOKENS must be greater than 0.")
         if self.llm.chat_max_tokens < 1:

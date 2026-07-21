@@ -44,6 +44,7 @@ from models.enums import MessageRole, RunStatus
 from models.schemas.chat import AgentMessageRequest, ChatRequest, UserReplyRequest
 from pydantic import ValidationError
 from services import tasks as tasks_module
+from services.agent_service import AgentService
 from services.conversation_service import ConversationService
 from services.errors import (
     ChatSessionNotFoundError,
@@ -70,6 +71,15 @@ def _runtime_container() -> RuntimeContainer:
         settings=get_settings(),
         model_gateway=_Gateway(),
         checkpointer=InMemorySaver(),
+    )
+
+
+def _conversation_service() -> ConversationService:
+    return ConversationService(
+        AgentService(
+            settings=get_settings(),
+            runtime=_runtime_container(),
+        )
     )
 
 
@@ -123,6 +133,7 @@ def test_removed_free_text_resume_compatibility_symbols_stay_unreachable() -> No
 
 def test_runtime_config_uses_execution_scoped_checkpoint_namespace() -> None:
     runtime = _runtime_container().create_runtime(
+        model_config_id=DEFAULT_MODEL_CONFIG_ID,
         tool_permissions=(),
         user_id="user-1",
         agent_id="agent-1",
@@ -812,7 +823,7 @@ def test_execution_lineage_does_not_lock_another_users_session() -> None:
 
 
 def test_idempotency_key_is_bound_to_normalized_request_payload() -> None:
-    service = ConversationService(SimpleNamespace())
+    service = _conversation_service()
     auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix="digest")
@@ -856,7 +867,7 @@ def test_idempotency_key_is_bound_to_normalized_request_payload() -> None:
 
 
 def test_historical_key_without_digest_is_not_replayable() -> None:
-    service = ConversationService(SimpleNamespace())
+    service = _conversation_service()
     auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix="historical-digest")
@@ -908,7 +919,7 @@ def test_resume_acceptance_is_one_transaction_with_one_decision_message(
     decision: str,
     expected_content: str,
 ) -> None:
-    service = ConversationService(SimpleNamespace())
+    service = _conversation_service()
     auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix=f"resume-{decision}")
@@ -952,6 +963,14 @@ def test_resume_acceptance_is_one_transaction_with_one_decision_message(
             },
         )
         session.add(execution)
+        session.flush()
+        session.add(
+            ExecutionOutbox(
+                execution_id=execution.id,
+                model_config_id=execution.model_config_id,
+                kind="execute",
+            )
+        )
         session.commit()
 
         response = service.resume_execution(
@@ -1148,7 +1167,7 @@ def test_concurrent_idempotent_submissions_create_one_complete_turn_aggregate() 
 
     def submit() -> tuple[str, str, bool]:
         with Session(get_engine()) as session:
-            response, replayed = ConversationService(SimpleNamespace()).create_turn(
+            response, replayed = _conversation_service().create_turn(
                 session,
                 AgentMessageRequest(
                     session_id=session_id,

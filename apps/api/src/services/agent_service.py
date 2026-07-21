@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from agent.infrastructure.llm import ModelGateway
 from agent.runtime.container import RuntimeContainer
 from agent.runtime.runner import AgentRunner
 from core.config import Settings, get_settings
@@ -13,10 +12,7 @@ class AgentService:
         runtime: RuntimeContainer | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.runtime = runtime or RuntimeContainer(
-            settings=self.settings,
-            model_gateway=ModelGateway(self.settings),
-        )
+        self.runtime = runtime or RuntimeContainer(settings=self.settings)
         self.runner = AgentRunner(self.runtime)
 
     def start(self) -> None:

@@ -9,7 +9,7 @@ from core.config import Settings, get_settings
 from core.logging import configure_logging
 from db.session import get_engine
 from models.base import utcnow
-from models.chat import ExecutionOutbox
+from models.chat import AgentExecution, ExecutionOutbox
 from services.celery_app import celery_app
 from services.service_heartbeat import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -28,6 +28,7 @@ class OutboxDelivery:
     execution_id: str
     request_id: str | None
     kind: str
+    model_config_id: str
 
 
 class OutboxDispatcher:
@@ -45,6 +46,14 @@ class OutboxDispatcher:
             rows = list(
                 session.exec(
                     select(ExecutionOutbox)
+                    .join(
+                        AgentExecution,
+                        (ExecutionOutbox.execution_id == AgentExecution.id)
+                        & (
+                            ExecutionOutbox.model_config_id
+                            == AgentExecution.model_config_id
+                        ),
+                    )
                     .where(
                         or_(
                             ExecutionOutbox.status == "pending",
@@ -76,6 +85,7 @@ class OutboxDispatcher:
                     execution_id=row.execution_id,
                     request_id=row.request_id or None,
                     kind=row.kind,
+                    model_config_id=row.model_config_id,
                 )
                 for row in rows
             ]
@@ -99,6 +109,7 @@ class OutboxDispatcher:
                     kwargs={
                         "execution_id": delivery.execution_id,
                         "request_id": delivery.request_id,
+                        "model_config_id": delivery.model_config_id,
                     },
                     queue=queue,
                 )

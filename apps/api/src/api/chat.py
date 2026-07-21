@@ -47,6 +47,7 @@ from services.errors import (
     StreamReplayGapError,
 )
 from services.execution_resume import public_interrupt, public_interrupt_from_projection
+from services.model_configuration_service import ModelNotConfigured
 
 router = APIRouter(prefix="/chat")
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -71,6 +72,7 @@ ServiceHttpError = (
     | StreamReplayExpiredError
     | StreamReplayGapError
     | StreamingDegradedError
+    | ModelNotConfigured
 )
 SERVICE_HTTP_ERRORS = (
     AgentNotFoundError,
@@ -88,6 +90,7 @@ SERVICE_HTTP_ERRORS = (
     StreamReplayExpiredError,
     StreamReplayGapError,
     StreamingDegradedError,
+    ModelNotConfigured,
 )
 
 
@@ -548,6 +551,18 @@ def _http_exception_for_service_error(
     thread_id: str | None = None,
     execution_id: str | None = None,
 ) -> HTTPException:
+    if isinstance(exc, ModelNotConfigured):
+        return HTTPException(
+            status_code=503,
+            detail=_build_service_error_detail(
+                code="MODEL_NOT_CONFIGURED",
+                message="A model provider has not been configured.",
+                request_id=request_id,
+                session_id=session_id,
+                thread_id=thread_id,
+                execution_id=execution_id,
+            ),
+        )
     if isinstance(exc, AgentNotFoundError):
         return HTTPException(
             status_code=400,

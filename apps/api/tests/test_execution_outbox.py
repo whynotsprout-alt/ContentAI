@@ -338,6 +338,7 @@ def test_dispatcher_retries_after_publish_failure(
             {
                 "execution_id": execution_id,
                 "request_id": "request-dispatch-retry",
+                "model_config_id": DEFAULT_MODEL_CONFIG_ID,
             },
             settings.agent.celery_queue,
         ),
@@ -346,6 +347,7 @@ def test_dispatcher_retries_after_publish_failure(
             {
                 "execution_id": execution_id,
                 "request_id": "request-dispatch-retry",
+                "model_config_id": DEFAULT_MODEL_CONFIG_ID,
             },
             settings.agent.celery_queue,
         ),
@@ -404,6 +406,44 @@ def test_duplicate_delivery_only_claims_execution_once() -> None:
         assert execution.claimed_at is not None
         assert execution.heartbeat_at is not None
         assert execution.lease_expires_at is not None
+
+
+def test_worker_rejects_delivery_for_a_different_model_configuration() -> None:
+    settings = _settings()
+    execution_id = "execution-model-config-fence"
+    _seed_execution(settings, execution_id=execution_id)
+    with Session(get_engine(settings)) as session:
+        session.add(
+            ExecutionOutbox(
+                execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
+                kind="execute",
+                payload=_durable_turn_context_payload(
+                    execution_id=execution_id,
+                    invocation_id=f"invocation-{execution_id}",
+                    session_id=f"session-{execution_id}",
+                    user_id=f"user-{execution_id}",
+                    agent_id=f"agent-{execution_id}",
+                    agent_version_id=f"version-{execution_id}",
+                    message_id=f"message-{execution_id}",
+                ),
+            )
+        )
+        session.commit()
+
+    claim = claim_execution(
+        SimpleNamespace(settings=settings),
+        execution_id,
+        "worker-wrong-model",
+        model_config_id="different-model-config",
+    )
+
+    assert claim is None
+    with Session(get_engine(settings)) as session:
+        execution = session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.attempt_count == 0
+        assert execution.worker_id is None
 
 
 def test_worker_ownership_fence_rejects_stale_lease_holder() -> None:
@@ -467,7 +507,11 @@ def test_dispatcher_reclaims_expired_publishing_row(
     assert dispatcher_module.OutboxDispatcher(settings).dispatch_once() == 1
     assert calls == [
         {
-            "kwargs": {"execution_id": execution_id, "request_id": None},
+            "kwargs": {
+                "execution_id": execution_id,
+                "request_id": None,
+                "model_config_id": DEFAULT_MODEL_CONFIG_ID,
+            },
             "queue": settings.agent.celery_queue,
         }
     ]

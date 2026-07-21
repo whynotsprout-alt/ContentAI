@@ -239,6 +239,49 @@ def test_public_terminal_tool_error_propagates_to_execution_runner() -> None:
         )
 
 
+def test_tool_provider_error_is_redacted_from_message_event_and_audit() -> None:
+    execution_id = "execution-redacted-tool-error"
+    _seed_execution(execution_id)
+    writer = RecordingEventWriter()
+    request = SimpleNamespace(
+        tool_call={"name": "prepare_topic_research", "id": "call-redacted", "args": {}}
+    )
+    secret = "sk-tool-provider-secret"
+    remote_body = "provider response body must stay private"
+
+    def fail(_request: object) -> object:
+        raise RuntimeError(f"401 Authorization: Bearer {secret}; body={remote_body}")
+
+    with tool_runtime_scope(
+        _runtime(
+            execution_id,
+            {
+                "prepare_topic_research": {
+                    "timeout_seconds": 1,
+                    "max_output_chars": 1000,
+                    "execution_mode": "cooperative",
+                }
+            },
+            event_writer=writer,
+        )
+    ):
+        result = execute_tool_call(request, fail)
+
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+
+    exposed = " ".join(
+        [
+            str(result.content),
+            audit.error,
+            *(str(payload) for _event, payload in writer.events),
+        ]
+    )
+    assert secret not in exposed
+    assert remote_body not in exposed
+    assert "Authorization" not in exposed
+
+
 def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> None:
     execution_id = "execution-tool-idempotent"
     _seed_execution(execution_id)

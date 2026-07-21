@@ -44,6 +44,7 @@ def claim_execution(
     execution_id: str,
     worker_id: str,
     *,
+    model_config_id: str | None = None,
     create_attempt: bool = True,
     use_lease: bool = True,
 ) -> ClaimedExecution | None:
@@ -52,6 +53,8 @@ def claim_execution(
             select(AgentExecution).where(AgentExecution.id == execution_id).with_for_update()
         ).first()
         if execution is None or execution.status in TERMINAL_STATUSES:
+            return None
+        if model_config_id is not None and model_config_id != execution.model_config_id:
             return None
         now = utcnow()
         if execution.lease_expires_at is not None and execution.lease_expires_at > now:
@@ -108,6 +111,9 @@ def claim_execution(
         )
         if user_message is None or outbox is None:
             _fail_execution(session, execution, "TURN_CONTEXT_SNAPSHOT_INVALID", now)
+            return None
+        if outbox.model_config_id != execution.model_config_id:
+            _fail_execution(session, execution, "MODEL_CONFIGURATION_MISMATCH", now)
             return None
         try:
             turn_context = load_turn_context_snapshot(

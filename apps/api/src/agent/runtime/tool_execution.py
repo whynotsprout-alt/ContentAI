@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from agent.runtime.context import get_tool_runtime_context
-from agent.runtime.errors import PUBLIC_RUNTIME_ERROR_CODES
+from agent.runtime.errors import PUBLIC_RUNTIME_ERROR_CODES, classify_runtime_error
 from agent.runtime.events import emit_event
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
@@ -100,8 +100,9 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         except Exception as exc:  # noqa: BLE001
             if _is_public_terminal_error(exc):
                 raise
+            error = classify_runtime_error(exc).message
             return ToolMessage(
-                content={"status": "failed", "error": str(exc)},
+                content={"status": "failed", "error": error},
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",
@@ -233,7 +234,7 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         )
         raise
     except Exception as exc:  # noqa: BLE001
-        error = str(exc)
+        error = classify_runtime_error(exc).message
         _finish_audit(audit.row_id, error=error, started_at=started_at)
         _emit_tool_event(
             runtime,

@@ -11,7 +11,10 @@ from agent.infrastructure.llm import ModelGateway
 from agent.runtime.checkpoint import RuntimePersistence, execution_checkpoint_config
 from agent.tools.registry import ToolRegistry, tool_names
 from core.config import Settings
+from db.session import get_engine
 from langchain_core.tools import BaseTool
+from services.model_configuration_service import ModelConfigurationService
+from sqlmodel import Session
 
 
 class AgentModel(Protocol):
@@ -63,6 +66,10 @@ class RuntimeContainer:
         default_factory=OrderedDict,
         init=False,
     )
+    _gateway_cache: OrderedDict[str, ModelGateway] = field(
+        default_factory=OrderedDict,
+        init=False,
+    )
     _cache_lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _owns_checkpointer: bool = field(default=False, init=False)
 
@@ -70,14 +77,12 @@ class RuntimeContainer:
         self.tool_registry.default_timeout_seconds = self.settings.agent.tool_timeout_seconds
         if self.persistence is None:
             self.persistence = RuntimePersistence(self.settings)
-        if self.model_gateway is None:
-            self.model_gateway = ModelGateway(self.settings)
         if self.checkpointer is not None:
             self._owns_checkpointer = False
 
     @property
     def graph(self) -> AgentGraph:
-        return self.graph_for_permissions(("*",))
+        raise RuntimeError("model_config_id is required to build an execution graph.")
 
     def get_tools(self, tool_permissions: Sequence[str] | None = None) -> list[BaseTool]:
         return self.tool_registry.get_tools(tool_permissions)
@@ -92,24 +97,27 @@ class RuntimeContainer:
 
     def get_model(
         self,
+        model_config_id: str,
         tool_permissions: Sequence[str] | None = None,
     ) -> AgentModel:
         tools = self.get_tools(tool_permissions)
         cache_key = self._runtime_cache_key(
+            model_config_id=model_config_id,
             tool_permissions=tool_permissions,
             tools=tools,
         )
-        model = self._cache_get(self._model_cache, cache_key)
-        if model is not None:
+        with self._cache_lock:
+            model = self._cache_get(self._model_cache, cache_key)
+            if model is not None:
+                return model
+            gateway = self.gateway_for_model_config(model_config_id)
+            model = gateway.build_agent_model(tools=tools)
+            if not callable(getattr(model, "invoke", None)):
+                raise TypeError(
+                    f"Model gateway returned non-invokable model type: {type(model)!r}."
+                )
+            self._cache_put(self._model_cache, cache_key, model)
             return model
-        gateway = self.model_gateway
-        if gateway is None:
-            raise RuntimeError("Model gateway is not configured.")
-        model = gateway.build_agent_model(tools=tools)
-        if not callable(getattr(model, "invoke", None)):
-            raise TypeError(f"Model gateway returned non-invokable model type: {type(model)!r}.")
-        self._cache_put(self._model_cache, cache_key, model)
-        return model
 
     def get_checkpointer(self) -> Checkpointer:
         if self.checkpointer is None:
@@ -121,37 +129,67 @@ class RuntimeContainer:
 
     def graph_for_permissions(
         self,
+        model_config_id: str,
         tool_permissions: Sequence[str] | None = None,
     ) -> AgentGraph:
         tools = self.get_tools(tool_permissions)
         cache_key = self._runtime_cache_key(
+            model_config_id=model_config_id,
             tool_permissions=tool_permissions,
             tools=tools,
         )
-        graph = self._cache_get(self._graph_cache, cache_key)
-        if graph is not None:
+        with self._cache_lock:
+            graph = self._cache_get(self._graph_cache, cache_key)
+            if graph is not None:
+                return graph
+            graph = build_agent_graph(
+                model=self.get_model(model_config_id, tool_permissions),
+                tools=tools,
+                research_final_model=lambda: self._build_research_final_model(model_config_id),
+                checkpointer=self.get_checkpointer(),
+            )
+            self._cache_put(self._graph_cache, cache_key, graph)
             return graph
-        graph = build_agent_graph(
-            model=self.get_model(tool_permissions),
-            tools=tools,
-            research_final_model=self._build_research_final_model,
-            checkpointer=self.get_checkpointer(),
-        )
-        self._cache_put(self._graph_cache, cache_key, graph)
-        return graph
 
-    def _build_research_final_model(self) -> Any:
-        gateway = self.model_gateway
-        if gateway is None:
-            raise RuntimeError("Model gateway is not configured.")
+    def _build_research_final_model(self, model_config_id: str) -> Any:
+        gateway = self.gateway_for_model_config(model_config_id)
         build_research_final = getattr(gateway, "build_research_final_model", None)
         if not callable(build_research_final):
             raise RuntimeError("Model gateway does not support structured research final output.")
         return build_research_final()
 
+    def gateway_for_model_config(self, model_config_id: str) -> ModelGateway:
+        if not model_config_id:
+            raise RuntimeError("model_config_id is required.")
+        if self.model_gateway is not None:
+            return self.model_gateway
+        with self._cache_lock:
+            cached = self._gateway_cache.get(model_config_id)
+            if cached is not None:
+                self._gateway_cache.move_to_end(model_config_id)
+                return cached
+            with Session(get_engine(self.settings)) as session:
+                configuration = ModelConfigurationService(self.settings).get_runtime_by_id(
+                    session,
+                    model_config_id,
+                )
+            gateway = ModelGateway(
+                settings=self.settings,
+                model_config_id=configuration.id,
+                base_url=configuration.base_url,
+                api_key=configuration.api_key,
+                model_name=configuration.model_name,
+            )
+            self._gateway_cache[model_config_id] = gateway
+            self._gateway_cache.move_to_end(model_config_id)
+            while len(self._gateway_cache) > self._cache_capacity:
+                self._gateway_cache.popitem(last=False)
+            return gateway
+
     def create_runtime(
         self,
         *,
+        model_config_id: str,
         tool_permissions: Sequence[str] | None = None,
         user_id: str,
         agent_id: str,
@@ -178,7 +216,7 @@ class RuntimeContainer:
         else:
             configurable["thread_id"] = session_id
         return AgentRuntime(
-            graph=self.graph_for_permissions(tool_permissions),
+            graph=self.graph_for_permissions(model_config_id, tool_permissions),
             checkpointer=self.get_checkpointer(),
             tool_permissions=tuple(self._tool_names_signature(tools)),
             config={
@@ -194,19 +232,19 @@ class RuntimeContainer:
     def _runtime_cache_key(
         self,
         *,
+        model_config_id: str,
         tools: Sequence[Any],
         tool_permissions: Sequence[str] | None,
     ) -> tuple[str, ...]:
-        llm = self.settings.llm
-        model_signature = (
-            llm.chat_model,
-            str(llm.temperature),
-            str(llm.chat_max_tokens),
-            str(self.settings.search.traffic_relay_base_url).rstrip("/"),
-        )
         permission_signature = self._normalized_tool_signature(tool_permissions)
         resolved_tools = self._tool_names_signature(tools)
-        return ("model", *model_signature, "permissions", *permission_signature, *resolved_tools)
+        return (
+            "model_config_id",
+            model_config_id,
+            "permissions",
+            *permission_signature,
+            *resolved_tools,
+        )
 
     @property
     def _cache_capacity(self) -> int:
@@ -239,6 +277,7 @@ class RuntimeContainer:
         with self._cache_lock:
             self._model_cache.clear()
             self._graph_cache.clear()
+            self._gateway_cache.clear()
         if self._owns_checkpointer and self.persistence is not None:
             self.persistence.close()
             self._owns_checkpointer = False

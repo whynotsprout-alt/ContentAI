@@ -4,49 +4,56 @@ from typing import Any
 
 from agent.context.window import TokenCounter
 from agent.infrastructure.llm.client import LangChainChatClient
-from core.config import Settings, get_settings
+from core.config import Settings
+from pydantic import SecretStr
 
 
 class ModelGateway:
-    """Single lower-level model gateway for the LangGraph agent."""
+    """Models for one immutable execution-selected provider configuration."""
 
     def __init__(
         self,
-        settings: Settings | None = None,
+        *,
+        settings: Settings,
+        model_config_id: str,
+        base_url: str,
+        api_key: SecretStr,
+        model_name: str,
         client: LangChainChatClient | None = None,
     ) -> None:
-        self.settings = settings or get_settings()
-        self.client = client or LangChainChatClient(self.settings)
-
-    @property
-    def model_name(self) -> str:
-        return self.settings.llm.chat_model
+        self.settings = settings
+        self.model_config_id = model_config_id
+        self.base_url = base_url
+        self.model_name = model_name
+        self.client = client or LangChainChatClient(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+        )
 
     def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
         return self.client.build_chat_model(
-            model=self.settings.llm.chat_model,
+            model=self.model_name,
             temperature=self.settings.llm.temperature,
             max_tokens=self.settings.llm.chat_max_tokens,
             tools=tools or [],
         )
 
     def build_hotspot_filter_model(self) -> Any:
-        """Build the isolated structured model used only for hotspot scoring."""
         from agent.tools.hotspot_filter import HotspotFilterResult
 
         return self.client.build_structured_output_model(
-            model=self.settings.llm.summary_model,
+            model=self.model_name,
             temperature=0,
             max_tokens=self.settings.llm.structured_max_tokens,
             schema=HotspotFilterResult,
         )
 
     def build_research_final_model(self) -> Any:
-        """Build the non-streaming, selection-only model for research final rendering."""
         from agent.workflows.final_evidence import ResearchFinalSelection
 
         return self.client.build_structured_output_model(
-            model=self.settings.llm.summary_model,
+            model=self.model_name,
             temperature=0,
             max_tokens=self.settings.llm.structured_max_tokens,
             schema=ResearchFinalSelection,
@@ -55,7 +62,7 @@ class ModelGateway:
 
     def build_token_counter(self, *, tools: list[Any] | None = None) -> TokenCounter:
         model = self.client.build_chat_model(
-            model=self.settings.llm.chat_model,
+            model=self.model_name,
             temperature=0,
             max_tokens=1,
             timeout_seconds=5.0,
@@ -66,7 +73,7 @@ class ModelGateway:
         if not callable(provider_count):
             return TokenCounter(tools=bound_tools)
         return TokenCounter(
-            provider_count=lambda messages: provider_count(messages, tools=bound_tools),
+            provider_count=lambda messages: provider_count(messages),
             tools=bound_tools,
         )
 
@@ -78,13 +85,10 @@ class ModelGateway:
         max_retries: int = 2,
     ) -> Any:
         return self.client.build_structured_output_model(
-            model=self.settings.llm.summary_model,
+            model=self.model_name,
             temperature=0,
             max_tokens=self.settings.llm.structured_max_tokens,
             schema=schema,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
         )
-
-
-model_gateway = ModelGateway()

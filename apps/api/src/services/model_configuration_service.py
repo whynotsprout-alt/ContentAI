@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from core.config import Settings
 from core.model_config_crypto import ModelConfigurationSecretProtector
 from models.base import utcnow
 from models.model_configuration import ModelConfiguration
+from pydantic import SecretStr
 from services.model_config_network import ModelProbeResult, OpenAICompatibleProbe
 from services.model_configuration_repository import (
     ActiveModelConfiguration,
@@ -21,6 +24,14 @@ class ModelCredentialsRequired(RuntimeError):
 class ModelNotConfigured(RuntimeError):
     code = "MODEL_NOT_CONFIGURED"
     status_code = 503
+
+
+@dataclass(frozen=True)
+class RuntimeModelConfiguration:
+    id: str
+    base_url: str
+    model_name: str
+    api_key: SecretStr
 
 
 class ModelConfigurationService:
@@ -45,6 +56,19 @@ class ModelConfigurationService:
         if active is None:
             raise ModelNotConfigured("A model provider has not been configured.")
         return active
+
+    def get_required_active_runtime(self, session: Session) -> RuntimeModelConfiguration:
+        return self._runtime_configuration(self.get_required_active(session))
+
+    def get_runtime_by_id(
+        self,
+        session: Session,
+        model_config_id: str,
+    ) -> RuntimeModelConfiguration:
+        configuration = session.get(ModelConfiguration, model_config_id)
+        if configuration is None:
+            raise ModelNotConfigured("The execution model configuration is unavailable.")
+        return self._runtime_configuration(configuration)
 
     def probe(
         self,
@@ -115,3 +139,14 @@ class ModelConfigurationService:
         if active is None:
             raise ModelCredentialsRequired("Model provider credentials are required.")
         return self._protector.decrypt(active.api_key_ciphertext)
+
+    def _runtime_configuration(
+        self,
+        configuration: ModelConfiguration,
+    ) -> RuntimeModelConfiguration:
+        return RuntimeModelConfiguration(
+            id=configuration.id,
+            base_url=configuration.base_url,
+            model_name=configuration.model_name,
+            api_key=SecretStr(self._protector.decrypt(configuration.api_key_ciphertext)),
+        )

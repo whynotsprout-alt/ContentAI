@@ -118,12 +118,18 @@ def execute_agent(
     self: Any,
     *,
     execution_id: str,
+    model_config_id: str,
     request_id: str | None = None,
 ) -> None:
     service = _agent_service()
     task_id = str(getattr(self.request, "id", "") or "unknown")
     worker_id = f"{socket.gethostname()}:{task_id}"
-    claimed = claim_execution(service, execution_id, worker_id)
+    claimed = claim_execution(
+        service,
+        execution_id,
+        worker_id,
+        model_config_id=model_config_id,
+    )
     if claimed is None:
         return
 
@@ -271,10 +277,12 @@ def recover_expired_executions() -> int:
 def process_agent_post_execution(
     *,
     execution_id: str,
+    model_config_id: str,
     request_id: str | None = None,
 ) -> None:
     """Run low-priority title, summary, and memory work from durable execution data."""
     _agent_service().runner.post_service.process(
         execution_id=execution_id,
+        model_config_id=model_config_id,
         request_id=request_id,
     )

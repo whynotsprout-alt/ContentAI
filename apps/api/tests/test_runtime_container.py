@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 
 from agent.runtime.container import RuntimeContainer
 from core.config import get_settings
+from pydantic import SecretStr
 
 
 class _Model:
@@ -37,12 +42,14 @@ def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
     )
 
     first = container.create_runtime(
+        model_config_id="model-config-v1",
         tool_permissions=("remember",),
         user_id="user-a",
         agent_id="agent-a",
         session_id="thread-a",
     )
     second = container.create_runtime(
+        model_config_id="model-config-v1",
         tool_permissions=("remember",),
         user_id="user-b",
         agent_id="agent-b",
@@ -73,16 +80,18 @@ def test_runtime_model_and_graph_caches_are_lru_bounded(monkeypatch) -> None:
     first_permissions = ("remember",)
     second_permissions = ("recall_memory",)
     third_permissions = ("current_datetime",)
-    container.graph_for_permissions(first_permissions)
-    container.graph_for_permissions(second_permissions)
-    container.graph_for_permissions(first_permissions)
-    container.graph_for_permissions(third_permissions)
+    container.graph_for_permissions("model-config-v1", first_permissions)
+    container.graph_for_permissions("model-config-v1", second_permissions)
+    container.graph_for_permissions("model-config-v1", first_permissions)
+    container.graph_for_permissions("model-config-v1", third_permissions)
 
     second_key = container._runtime_cache_key(
+        model_config_id="model-config-v1",
         tools=container.get_tools(second_permissions),
         tool_permissions=second_permissions,
     )
     first_key = container._runtime_cache_key(
+        model_config_id="model-config-v1",
         tools=container.get_tools(first_permissions),
         tool_permissions=first_permissions,
     )
@@ -90,6 +99,116 @@ def test_runtime_model_and_graph_caches_are_lru_bounded(monkeypatch) -> None:
     assert len(container._graph_cache) == 2
     assert first_key not in container._model_cache
     assert second_key not in container._graph_cache
+
+
+def test_runtime_cache_isolates_model_configuration_versions(monkeypatch) -> None:
+    gateway = _Gateway()
+    monkeypatch.setattr(
+        "agent.runtime.container.build_agent_graph",
+        lambda **kwargs: object(),
+    )
+    container = RuntimeContainer(
+        settings=get_settings(),
+        model_gateway=gateway,
+        checkpointer=object(),
+    )
+
+    first = container.create_runtime(
+        model_config_id="model-config-v1",
+        tool_permissions=("remember",),
+        user_id="user-a",
+        agent_id="agent-a",
+        session_id="thread-a",
+    )
+    second = container.create_runtime(
+        model_config_id="model-config-v2",
+        tool_permissions=("remember",),
+        user_id="user-a",
+        agent_id="agent-a",
+        session_id="thread-b",
+    )
+
+    assert first.graph is not second.graph
+    assert gateway.build_count == 2
+
+
+def test_runtime_cache_single_flights_concurrent_same_key_builds(monkeypatch) -> None:
+    class SlowGateway(_Gateway):
+        def build_agent_model(self, *, tools: list[Any] | None = None) -> _Model:
+            time.sleep(0.03)
+            return super().build_agent_model(tools=tools)
+
+    gateway = SlowGateway()
+    compile_count = 0
+    compile_lock = threading.Lock()
+
+    def build_graph(**_kwargs: Any) -> object:
+        nonlocal compile_count
+        time.sleep(0.03)
+        with compile_lock:
+            compile_count += 1
+        return object()
+
+    monkeypatch.setattr("agent.runtime.container.build_agent_graph", build_graph)
+    container = RuntimeContainer(
+        settings=get_settings(),
+        model_gateway=gateway,
+        checkpointer=object(),
+    )
+    barrier = threading.Barrier(8)
+
+    def build(index: int) -> object:
+        barrier.wait()
+        return container.create_runtime(
+            model_config_id="model-config-v1",
+            tool_permissions=("remember",),
+            user_id=f"user-{index}",
+            agent_id="agent",
+            session_id=f"thread-{index}",
+        ).graph
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        graphs = list(executor.map(build, range(8)))
+
+    assert len({id(graph) for graph in graphs}) == 1
+    assert gateway.build_count == 1
+    assert compile_count == 1
+
+
+def test_gateway_cache_single_flights_concurrent_same_configuration(
+    monkeypatch,
+) -> None:
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def get_runtime_by_id(_service, _session, model_config_id: str):
+        nonlocal calls
+        time.sleep(0.03)
+        with calls_lock:
+            calls += 1
+        return SimpleNamespace(
+            id=model_config_id,
+            base_url="https://models.example.test/v1",
+            api_key=SecretStr("test-secret"),
+            model_name="test-model",
+        )
+
+    monkeypatch.setattr(
+        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        get_runtime_by_id,
+    )
+    container = RuntimeContainer(settings=get_settings(), checkpointer=object())
+    barrier = threading.Barrier(8)
+
+    def build(_index: int):
+        barrier.wait()
+        return container.gateway_for_model_config("model-config-v1")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        gateways = list(executor.map(build, range(8)))
+
+    assert len({id(gateway) for gateway in gateways}) == 1
+    assert calls == 1
 
 
 def test_tool_registry_exposes_complete_execution_contract() -> None:

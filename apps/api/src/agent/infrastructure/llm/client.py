@@ -2,111 +2,47 @@ from __future__ import annotations
 
 from typing import Any
 
-import anthropic
-from core.config import Settings
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessageChunk
+from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 
-def secret_value(value: str | SecretStr) -> str:
-    if isinstance(value, SecretStr):
-        return value.get_secret_value()
-    return value or ""
-
-
-def anthropic_relay_base_url(base_url: str) -> str:
-    normalized = base_url.rstrip("/")
-    return normalized if normalized.endswith("/anthropic") else f"{normalized}/anthropic"
-
-
-class _ModelDumpDict(dict[str, Any]):
-    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return _plain_json_dict(self)
-
-
-class RelayCompatibleChatAnthropic(ChatAnthropic):
-    def _make_message_chunk_from_anthropic_event(
-        self,
-        event: anthropic.types.RawMessageStreamEvent,
-        *,
-        stream_usage: bool = True,
-        coerce_content_to_string: bool,
-        block_start_event: anthropic.types.RawMessageStreamEvent | None = None,
-    ) -> tuple[AIMessageChunk | None, anthropic.types.RawMessageStreamEvent | None]:
-        _normalize_relay_event(event)
-        return super()._make_message_chunk_from_anthropic_event(
-            event,
-            stream_usage=stream_usage,
-            coerce_content_to_string=coerce_content_to_string,
-            block_start_event=block_start_event,
-        )
-
-
-def _normalize_relay_event(event: Any) -> None:
-    if getattr(event, "type", None) != "message_delta":
-        return
-
-    context_management = getattr(event, "context_management", None)
-    if isinstance(context_management, dict) and not hasattr(context_management, "model_dump"):
-        _safe_setattr(event, "context_management", _ModelDumpDict(context_management))
-
-    delta = getattr(event, "delta", None)
-    container = getattr(delta, "container", None) if delta is not None else None
-    if isinstance(container, dict) and not hasattr(container, "model_dump"):
-        _safe_setattr(delta, "container", _ModelDumpDict(container))
-
-
-def _safe_setattr(target: Any, name: str, value: Any) -> None:
-    try:
-        setattr(target, name, value)
-    except Exception:  # noqa: BLE001
-        object.__setattr__(target, name, value)
-
-
-def _plain_json_dict(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: _plain_json_value(item) for key, item in value.items() if item is not None}
-
-
-def _plain_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return _plain_json_dict(value)
-    if isinstance(value, list):
-        return [_plain_json_value(item) for item in value]
-    return value
-
-
 class LangChainChatClient:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+    """Build OpenAI-compatible chat clients from one immutable configuration."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: SecretStr,
+        model_name: str,
+    ) -> None:
+        self._base_url = base_url
+        self._api_key = api_key
+        self._model_name = model_name
 
     def build_chat_model(
         self,
         *,
-        model: str,
         temperature: float,
         max_tokens: int,
+        model: str | None = None,
         tools: list[Any] | None = None,
         timeout_seconds: float = 240.0,
         max_retries: int = 2,
         disable_streaming: bool = False,
     ) -> Any:
-        api_key = secret_value(self.settings.search.traffic_relay_api_key)
-        model_kwargs = {
-            "model_name": model,
-            "api_key": api_key,
-            "base_url": anthropic_relay_base_url(self.settings.search.traffic_relay_base_url),
-            "default_headers": {"Authorization": f"Bearer {api_key}"},
-            "max_tokens_to_sample": max_tokens,
-            "timeout": max(0.1, float(timeout_seconds)),
-            "max_retries": max(0, int(max_retries)),
-            "disable_streaming": disable_streaming,
-        }
-        if model != "claude-opus-4-8":
-            model_kwargs["temperature"] = temperature
-
-        chat_model = RelayCompatibleChatAnthropic(
-            **model_kwargs,
+        selected_model = model or self._model_name
+        if selected_model != self._model_name:
+            raise ValueError("The requested model does not match the execution configuration.")
+        chat_model = ChatOpenAI(
+            model=selected_model,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=max(0.1, float(timeout_seconds)),
+            max_retries=max(0, int(max_retries)),
+            disable_streaming=disable_streaming,
         )
         if not tools:
             return chat_model
@@ -118,10 +54,10 @@ class LangChainChatClient:
     def build_structured_output_model(
         self,
         *,
-        model: str,
         temperature: float,
         max_tokens: int,
         schema: type[Any],
+        model: str | None = None,
         timeout_seconds: float = 240.0,
         max_retries: int = 2,
         disable_streaming: bool = False,

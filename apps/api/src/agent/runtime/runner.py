@@ -222,7 +222,11 @@ class AgentRunner:
             self.event_service.emit_execution_cancelled(event_writer, execution)
             self._finish_attempt(db_session, execution, ExecutionAttemptStatus.cancelled)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Agent execution failed: %s", execution.id)
+            logger.error(
+                "Agent execution failed: execution=%s error_type=%s",
+                execution.id,
+                type(exc).__name__,
+            )
             error_detail = classify_runtime_error(exc)
             self.state_manager.set_execution_state(
                 db_session, execution, RunStatus.failed, error_detail.message

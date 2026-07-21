@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from db.session import get_engine
+from models.chat import AgentExecution
 from services.agent_service import AgentService
 from services.execution_claim import claim_execution
 from services.side_effects import execute_side_effect_job, read_side_effect_receipt
@@ -15,8 +16,14 @@ class _DirectPostExecutionDispatcher:
     service: AgentService
 
     def dispatch(self, execution_id: str, request_id: str | None = None) -> None:
+        with Session(get_engine(self.service.settings)) as session:
+            execution = session.get(AgentExecution, execution_id)
+            if execution is None:
+                return
+            model_config_id = execution.model_config_id
         self.service.runner.post_service.process(
             execution_id=execution_id,
+            model_config_id=model_config_id,
             request_id=request_id,
         )
 
