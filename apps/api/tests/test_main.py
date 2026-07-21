@@ -115,6 +115,7 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
 
     class DummyAgentService:
         def __init__(self, settings, runtime=None):
+            self.settings = settings
             agent_service_settings.append(settings)
             agent_service_runtimes.append(runtime)
             self.runtime = runtime or object()
