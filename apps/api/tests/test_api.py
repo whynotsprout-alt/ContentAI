@@ -1795,12 +1795,6 @@ def test_waiting_input_run_blocks_new_turn_until_resumed():
 
 
 def test_chat_session_is_hard_deleted_with_related_rows():
-    persistence = RuntimePersistence()
-
-    persistence.start()
-
-    persistence.close()
-
     with Session(get_engine()) as session:
         chat = ChatSession(
             title="Deletable session",
@@ -1867,13 +1861,18 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
                 )
 
-                VALUES (:thread_id, '', 'chk_test', '{}'::jsonb, '{}'::jsonb)
+                VALUES (
+                    :thread_id, :checkpoint_ns, 'chk_test', '{}'::jsonb, '{}'::jsonb
+                )
 
                 ON CONFLICT DO NOTHING
 
                 """
             ),
-            {"thread_id": chat.langgraph_thread_id},
+            {
+                "thread_id": chat.langgraph_thread_id,
+                "checkpoint_ns": execution.id,
+            },
         )
 
         session.execute(
@@ -1886,13 +1885,16 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
                 )
 
-                VALUES (:thread_id, '', 'messages', '1', 'empty', NULL)
+                VALUES (:thread_id, :checkpoint_ns, 'messages', '1', 'empty', NULL)
 
                 ON CONFLICT DO NOTHING
 
                 """
             ),
-            {"thread_id": chat.langgraph_thread_id},
+            {
+                "thread_id": chat.langgraph_thread_id,
+                "checkpoint_ns": execution.id,
+            },
         )
 
         session.execute(
@@ -1909,7 +1911,7 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
                 VALUES (
 
-                    :thread_id, '', 'chk_test', 'task_test', '', 0, 'messages',
+                    :thread_id, :checkpoint_ns, 'chk_test', 'task_test', '', 0, 'messages',
 
                     'msgpack', :blob
 
@@ -1919,7 +1921,11 @@ def test_chat_session_is_hard_deleted_with_related_rows():
 
                 """
             ),
-            {"thread_id": chat.langgraph_thread_id, "blob": b"stale"},
+            {
+                "thread_id": chat.langgraph_thread_id,
+                "checkpoint_ns": execution.id,
+                "blob": b"stale",
+            },
         )
 
         session.commit()
@@ -1963,29 +1969,46 @@ def test_chat_session_is_hard_deleted_with_related_rows():
         assert "session_hash" in tombstone.detail
         assert session_id not in str(tombstone.detail)
 
-        assert (
-            session.execute(
-                text("SELECT 1 FROM checkpoints WHERE thread_id = :thread_id"),
-                {"thread_id": thread_id},
-            ).first()
-            is None
-        )
+        outbox = session.exec(
+            select(CheckpointDeletionOutbox).where(
+                CheckpointDeletionOutbox.session_id == session_id
+            )
+        ).one()
+        assert outbox.status == "pending"
+        assert outbox.thread_id == thread_id
+        assert outbox.checkpoint_ns == execution_id
+        outbox_id = outbox.id
 
-        assert (
-            session.execute(
-                text("SELECT 1 FROM checkpoint_blobs WHERE thread_id = :thread_id"),
-                {"thread_id": thread_id},
-            ).first()
-            is None
-        )
+    persistence = RuntimePersistence()
+    try:
+        with Session(get_engine()) as session:
+            assert drain_checkpoint_deletion_outbox(
+                session,
+                persistence.get_checkpointer(),
+                worker_id="api-test-durable-cleanup",
+                batch_size=1,
+            ) == 1
+            completed = session.get(CheckpointDeletionOutbox, outbox_id)
+            assert completed is not None
+            assert completed.status == "completed"
 
-        assert (
-            session.execute(
-                text("SELECT 1 FROM checkpoint_writes WHERE thread_id = :thread_id"),
-                {"thread_id": thread_id},
-            ).first()
-            is None
-        )
+            for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                assert (
+                    session.execute(
+                        text(
+                            f"SELECT 1 FROM {table} "
+                            "WHERE thread_id = :thread_id "
+                            "AND checkpoint_ns = :checkpoint_ns"
+                        ),
+                        {
+                            "thread_id": thread_id,
+                            "checkpoint_ns": execution_id,
+                        },
+                    ).first()
+                    is None
+                )
+    finally:
+        persistence.close()
 
 
 def test_chat_session_delete_commits_business_rows_before_checkpoint_cleanup():
