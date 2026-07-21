@@ -1,6 +1,6 @@
 # ContentAI API 清单
 
-当前公开契约固定为 35 个业务/运维端点。除健康检查、注册、验证、登录、忘记密码和重置密码外，端点均要求登录 Cookie；修改状态的登录端点还要求 `X-CSRF-Token`。FastAPI 交互文档位于 `/docs`，机器可读定义位于 `/openapi.json`，二者不计入 35 个端点。
+当前公开契约固定为 35 个业务/运维端点。除健康检查、就绪检查、注册和登录外，端点均要求登录 Cookie；修改状态的登录端点还要求 `X-CSRF-Token`。FastAPI 交互文档位于 `/docs`，机器可读定义位于 `/openapi.json`，二者不计入 35 个端点。
 
 ## 系统（2）
 
@@ -9,18 +9,14 @@
 | GET | `/api/health` | 无 | Compose、外部监控 | 无 / 基础状态 | 进程存活检查 |
 | GET | `/api/ready` | 无 | Compose、运维 | 无 / 数据库、迁移、Redis、队列、outbox 检查 | 就绪检查 |
 
-## 认证（9）
+## 认证（5）
 
 | 方法 | 路径 | 认证 | 调用方 | 请求 / 响应 | 用途 |
 | --- | --- | --- | --- | --- | --- |
 | POST | `/api/auth/register` | 无 | AuthView | email、password / 提示消息 | 注册后可立即登录 |
-| POST | `/api/auth/verify-email` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的旧验证接口 |
-| POST | `/api/auth/resend-verification` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的旧验证重发接口 |
 | POST | `/api/auth/login` | 无 | Auth Store | email、password / 当前用户 + Cookie | 登录 |
 | POST | `/api/auth/logout` | 登录 + CSRF | Auth Store | 无 / 204 | 退出并撤销会话 |
 | GET | `/api/auth/me` | 登录 | Auth Store | 无 / 当前用户 | 恢复登录态 |
-| POST | `/api/auth/forgot-password` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
-| POST | `/api/auth/reset-password` | 无 | 无（兼容接口） | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
 | POST | `/api/auth/change-password` | 登录 + CSRF | App | current_password、new_password / 提示消息 | 修改当前用户密码 |
 
 ## 内容账号 Agent（6）
@@ -52,7 +48,7 @@ Agent 仅属于当前 `user_id`。创建请求包含 `name`、`description`、`t
 | POST | `/api/chat/runs/{execution_id}/cancel` | 登录 + CSRF | Workbench | 无 / 轻量执行状态 | 请求取消 |
 | POST | `/api/chat/runs/{execution_id}/resume` | 登录 + CSRF | Workbench | agent_id、message / 轻量执行状态 | 恢复等待输入的执行 |
 
-## 管理后台（9）
+## 管理后台（13）
 
 全部端点要求管理员身份。角色更新只接受 `role: "user" | "admin"`；服务端禁止管理员自降级，并保护最后一个有效管理员。
 
@@ -62,14 +58,21 @@ Agent 仅属于当前 `user_id`。创建请求包含 `name`、`description`、`t
 | GET | `/api/admin/users/{user_id}` | 管理员 | AdminUsersView | 无 / 用户详情 | 查看用户 |
 | POST | `/api/admin/users/{user_id}/enable` | 管理员 + CSRF | AdminUsersView | 无 / 用户详情 | 启用用户 |
 | POST | `/api/admin/users/{user_id}/disable` | 管理员 + CSRF | AdminUsersView | 无 / 用户详情 | 禁用用户 |
-| POST | `/api/admin/users/{user_id}/password-reset` | 无（兼容接口） | 无 | 任意请求 / `410 Gone` | 已停用的密码重置接口 |
+| POST | `/api/admin/users/{user_id}/temporary-password` | 管理员 + CSRF | AdminUsersView | 无 / 一次性临时密码、过期时间 | 签发临时密码；用户随后只能查看自身、退出或修改密码 |
 | PATCH | `/api/admin/users/{user_id}` | 管理员 + CSRF | AdminUsersView | role / 用户详情 | 升级或降级角色 |
-| GET | `/api/admin/users/{user_id}/sessions` | 管理员 | AdminUsersView | 分页 / 会话摘要 | 查看用户会话 |
-| GET | `/api/admin/sessions/{session_id}` | 管理员 | AdminUsersView | 无 / 审计消息 | 审计会话正文 |
+| GET | `/api/admin/users/{user_id}/sessions` | 管理员 | AdminUsersView | cursor、limit / 会话摘要 | 查看用户会话 |
+| GET | `/api/admin/sessions/{session_id}` | 管理员 | AdminUsersView | 无 / 会话审计摘要 | 查看会话审计摘要 |
+| GET | `/api/admin/sessions/{session_id}/messages` | 管理员 | AdminUsersView | cursor、limit / 审计消息页 | 分页读取会话消息 |
 | GET | `/api/admin/usage` | 管理员 | AdminUsersView | 用户、时间范围、粒度 / 用量桶 | 用量统计 |
+| GET | `/api/admin/model-config` | 管理员 | AdminModelsView | 无 / active 配置元数据或 `configured: false` | 获取唯一全局 OpenAI-compatible 配置；不返回 API Key 或密文，且响应不缓存 |
+| POST | `/api/admin/model-config/probe` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、可选 model_name / 标准化地址、候选模型、验证结果、延迟 | 测试候选；空 Key 只会沿用当前 active Key，首次配置会返回 `MODEL_CREDENTIALS_REQUIRED` |
+| PUT | `/api/admin/model-config` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、model_name、expected_version / 新 active 配置元数据 | 保存前服务端重做完整 probe；首次配置必须提供 Key，空 Key 仅沿用当前 active Key |
+
+模型配置的稳定错误码为：`MODEL_NOT_CONFIGURED`（503）、`MODEL_CREDENTIALS_REQUIRED`（422）、`MODEL_ENDPOINT_FORBIDDEN`（422）、`MODEL_CONFIG_CHANGED`（409）、`MODEL_AUTH_FAILED`（422）、`MODEL_NOT_FOUND`（422）、`MODEL_PROVIDER_UNREACHABLE`（502）和 `MODEL_PROBE_FAILED`（502）。这些响应、模型配置请求校验错误和成功响应均不会回显 API Key、密文、Authorization 或远端响应正文。
 
 ## 契约约束
 
 - `apps/api/tests/test_api_contract.py` 比较实际 OpenAPI 与上述 35 个端点，新增、删除或改变方法必须同步修改本文件和测试。
 - 前端客户端分为 `api`、`authApi`、`adminApi`；每个方法必须存在页面、Store、测试或运维调用方。
 - 仓库外调用方不在兼容范围内；本版本只支持最新契约和全新数据库安装。
+- 未配置 active 模型时，`POST /api/chat/sessions/{session_id}/messages` 在创建消息、execution 或 outbox 前返回 `503 MODEL_NOT_CONFIGURED`。模型切换仅影响新 execution；已 queued、running、resume 或 retry 的 execution 使用固化的历史配置版本。

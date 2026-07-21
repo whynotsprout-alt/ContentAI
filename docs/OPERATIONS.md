@@ -17,7 +17,21 @@ chmod 600 .env
 bash infra/ubuntu/deploy.sh
 ```
 
-生产配置必须通过 `docker compose config --quiet`。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 必须使用实际的前端来源。`CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 与 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD` 必须成对设置：仅在该邮箱不存在时创建已激活管理员，已有账号在重启时不会被改写。初始登录完成后，应将密码保留在受控的部署密钥管理中；系统不提供邮件验证或邮件密码重置。
+生产配置必须通过 `docker compose config --quiet` 检查；不要运行会展开或输出 `.env` 密钥的 Compose 配置命令。数据库 URL 中的密码必须与 `POSTGRES_PASSWORD` 一致；`CONTENTAI_SERVER__FRONTEND_ORIGINS` 必须使用实际的前端来源。`CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 与 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD` 必须成对设置：仅在该邮箱不存在时创建已激活管理员，已有账号在重启时不会被改写。初始登录完成后，应将密码保留在受控的部署密钥管理中；系统不提供邮件验证或邮件密码重置。
+
+## 模型配置与 Fernet 主密钥
+
+在首次启动前为 `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 生成一次 Fernet key，并把它写入受权限控制的 `.env` 或部署密钥管理：
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+将该值与数据库备份分别安全备份，并在恢复历史环境时一并恢复；丢失、格式错误或更换该值会使应用拒绝启动或无法解密已有模型凭据。首个版本没有在线主密钥轮换、模型配置删除或回滚功能。Compose 会把同一个必填值传给 migration、API、dispatcher、worker 和 beat，不能为任何一个应用服务单独设置不同值。
+
+首次部署后，管理员登录 `/admin/models` 创建全局 active 的 OpenAI-compatible Base URL、API Key 和模型名。可先 probe；保存时服务端会重做完整 probe。首次配置不能留空 API Key，后续修改留空才表示沿用当前 Key。API Key、密文、Authorization 与远端响应正文不得出现在 API、日志、审计、工单或故障报告中。Traffic Relay 是独立搜索服务凭据，不能当作模型 API Key。
+
+模型切换只影响新 execution；queued、running、resume 和 retry 按其固化的历史配置继续执行。没有 active 模型时，消息提交会在写入业务记录前返回 `503 MODEL_NOT_CONFIGURED`。
 
 ## 健康检查
 

@@ -10,7 +10,7 @@
 
 - 可通过 SSH 登录、拥有 `sudo` 权限的 Ubuntu LTS 服务器；
 - 已解析至服务器公网 IP 的域名；
-- 用于模型中继与所选搜索提供方的密钥；
+- 用于 OpenAI-compatible 模型、Fernet 主密钥与所选搜索提供方的密钥；
 - 一个强密码的默认管理员账号。
 
 开放 SSH、HTTP、HTTPS，其他端口不对公网开放：
@@ -96,10 +96,12 @@ WEB_PORT=5180
 # 浏览器访问域名（HTTPS 由反向代理终止）
 CONTENTAI_SERVER__FRONTEND_ORIGINS=https://content.example.com
 
-# 模型中继：生产环境必填
-CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=replace-with-relay-key
+# 模型凭据的 Fernet 主密钥：生成一次、保管并安全备份；不可在线轮换
+CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY=replace-with-a-generated-fernet-key
 
 # 仅填写实际启用的搜索提供方
+# Traffic Relay 仅用于搜索，不能作为模型 API Key
+CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=replace-with-search-relay-key
 CONTENTAI_SEARCH__TIKHUB_API_KEY=
 CONTENTAI_SEARCH__METASO_API_KEY=
 CONTENTAI_SEARCH__ANSPIRE_API_KEY=
@@ -109,7 +111,7 @@ CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-long-unique-password
 ~~~
 
-不要配置已下线的邮件验证、SMTP、`PUBLIC_BASE_URL` 或邮件密码重置变量。所有搜索密钥必须是对应服务提供的原始值；Metaso 密钥仅支持 ASCII 字符。
+先在受控的终端生成 Fernet key，写入 `.env` 后立即清理终端记录：`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`。该 key 必须与数据库备份一同安全备份，且所有应用服务必须共用；丢失、格式错误或替换它会使应用拒绝启动或无法解密历史模型凭据。不要配置已下线的邮件验证、SMTP、`PUBLIC_BASE_URL` 或邮件密码重置变量。所有搜索密钥必须是对应服务提供的原始值；Metaso 密钥仅支持 ASCII 字符。
 
 ## 5. 配置 Nginx 与 HTTPS
 
@@ -164,6 +166,8 @@ curl --fail https://content.example.com/api/ready
 
 使用该账号登录后立即修改初始密码。初始密码应保存在受控的密钥管理系统中，不应写入文档、Shell 历史或版本库。
 
+然后访问 `/admin/models` 配置唯一全局 active OpenAI-compatible Base URL、API Key 和模型名。可先 probe；保存时服务端会再次完成完整 probe。首次配置必须输入 API Key，后续更新留空才表示继续使用当前 active Key。模型切换仅影响新 execution；queued、running、resume 与 retry 使用固化的历史版本。首个版本不提供旧环境变量自动导入、数据库回退、配置删除、回滚或在线 Fernet 主密钥轮换。
+
 ## 7. 日志与深度搜索排错
 
 ~~~bash
@@ -201,7 +205,7 @@ bash infra/ubuntu/upgrade.sh
 | --- | --- |
 | `migration` 失败 | `.env` 中数据库密码与 URL 是否一致；`docker compose logs migration` |
 | API 不健康 | `bash infra/ubuntu/health.sh` 与 `docker compose logs api` |
-| 深度搜索失败 | `docker compose logs agent-worker`；搜索密钥和模型中继配置 |
+| 深度搜索失败 | `docker compose logs agent-worker`；搜索密钥与模型配置 |
 | Web 可打开但 API 失败 | `https://域名/api/ready`、Nginx 配置和 `docker compose logs api` |
 | 默认管理员无法登录 | 确认使用首次部署设置的邮箱；已有同邮箱用户不会被启动逻辑重置 |
 | 事件流中断 | Nginx 的 `proxy_buffering off`、Redis 健康状态与 API 日志 |

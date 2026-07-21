@@ -19,6 +19,8 @@ flowchart LR
 
 `compose.yaml` 负责启动 PostgreSQL、Redis、迁移服务、API、Dispatcher、两个 Worker、Beat 与 Web，共九个服务。迁移成功是 API 和后台服务的启动前提；Web 仅在 API 就绪后启动。`compose.dev.yaml` 只为本地开发在 loopback 暴露数据库、Redis 和 API。
 
+全局 OpenAI-compatible 模型配置保存在 PostgreSQL：唯一 active 配置及保留的历史版本都由 `model_config_id` 关联到 execution/outbox。`CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 通过 Compose 的共享应用环境传入 migration、API、dispatcher、worker 和 beat；这些服务必须使用同一 Fernet key 才能读取加密的模型 API Key。
+
 ## 目录职责
 
 | 路径 | 职责 |

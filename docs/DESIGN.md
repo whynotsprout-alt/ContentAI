@@ -95,3 +95,10 @@ flowchart LR
 - Celery Beat 调度文件位于运行目录 `/tmp`，不写入源码目录。
 - Python 容器只安装构建出的 wheel，并以非 root 用户运行；提示词和迁移均随 wheel 打包。
 - 应用日志只写 stdout/stderr，Compose 对九个容器统一配置 `json-file` 滚动策略。
+
+### 模型配置与密钥边界
+
+- `ModelConfiguration` 保留唯一 active 配置及不可变历史版本；API Key 只以 Fernet 密文、指纹和受限提示保存，读取接口不返回明文或密文。
+- `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 是部署级 Fernet 主密钥。migration、API、dispatcher、各 worker 与 beat 都从 Compose 共享应用环境取得同一值；缺失或不是有效 Fernet key 时，开发和生产均拒绝启动。
+- 更新采用 `expected_version` 乐观并发控制，并在持久化前重新 probe；并发写冲突返回 `MODEL_CONFIG_CHANGED`。每个 execution/outbox 关联其创建时的 `model_config_id`，从而把切换隔离到新 execution。
+- 失败路径使用稳定错误码，不透传远端错误正文；模型配置路径的响应禁止缓存，输入验证也会脱敏。
