@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+from services.model_config_network import PinnedAsyncModelTransport, PinnedModelTransport
 
 
 class LangChainChatClient:
@@ -19,6 +21,16 @@ class LangChainChatClient:
         self._base_url = base_url
         self._api_key = api_key
         self._model_name = model_name
+        self._http_client = httpx.Client(
+            transport=PinnedModelTransport(base_url=base_url),
+            follow_redirects=False,
+            trust_env=False,
+        )
+        self._http_async_client = httpx.AsyncClient(
+            transport=PinnedAsyncModelTransport(base_url=base_url),
+            follow_redirects=False,
+            trust_env=False,
+        )
 
     def build_chat_model(
         self,
@@ -43,6 +55,8 @@ class LangChainChatClient:
             timeout=max(0.1, float(timeout_seconds)),
             max_retries=max(0, int(max_retries)),
             disable_streaming=disable_streaming,
+            http_client=self._http_client,
+            http_async_client=self._http_async_client,
         )
         if not tools:
             return chat_model

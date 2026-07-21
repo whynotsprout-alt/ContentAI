@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 from collections.abc import Sequence
@@ -250,6 +251,86 @@ def test_probe_rejects_redirects_and_never_follows_them() -> None:
     with pytest.raises(network.ModelEndpointForbidden):
         prober.probe("https://api.example.test/v1", "test-secret-key")
 
+    assert len(requests) == 1
+
+
+def test_runtime_sync_transport_revalidates_and_pins_every_outbound_request() -> None:
+    network = _network_module()
+    resolver = Resolver(["93.184.216.34"], ["169.254.169.254"])
+    requests: list[httpx.Request] = []
+
+    transport = network.PinnedModelTransport(
+        base_url="https://api.example.test/v1",
+        resolver=resolver,
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request) or httpx.Response(200, json={"ok": True})
+        ),
+    )
+    with httpx.Client(transport=transport, follow_redirects=False, trust_env=False) as client:
+        response = client.post("https://api.example.test/v1/chat/completions", json={})
+        with pytest.raises(network.ModelEndpointForbidden):
+            client.post("https://api.example.test/v1/chat/completions", json={})
+
+    assert response.status_code == 200
+    assert len(requests) == 1
+    assert requests[0].url.host == "93.184.216.34"
+    assert requests[0].headers["Host"] == "api.example.test"
+    assert requests[0].extensions["sni_hostname"] == "api.example.test"
+
+
+def test_runtime_async_transport_revalidates_and_pins_every_outbound_request() -> None:
+    network = _network_module()
+    resolver = Resolver(["93.184.216.34"], ["169.254.169.254"])
+    requests: list[httpx.Request] = []
+
+    async def exercise() -> None:
+        transport = network.PinnedAsyncModelTransport(
+            base_url="https://api.example.test/v1",
+            resolver=resolver,
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request)
+                or httpx.Response(200, json={"ok": True})
+            ),
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                "https://api.example.test/v1/chat/completions", json={}
+            )
+            assert response.status_code == 200
+            with pytest.raises(network.ModelEndpointForbidden):
+                await client.post("https://api.example.test/v1/chat/completions", json={})
+
+    asyncio.run(exercise())
+
+    assert len(requests) == 1
+    assert requests[0].url.host == "93.184.216.34"
+    assert requests[0].headers["Host"] == "api.example.test"
+    assert requests[0].extensions["sni_hostname"] == "api.example.test"
+
+
+def test_runtime_client_never_follows_provider_redirects() -> None:
+    network = _network_module()
+    requests: list[httpx.Request] = []
+    transport = network.PinnedModelTransport(
+        base_url="https://api.example.test/v1",
+        resolver=Resolver(["93.184.216.34"]),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or httpx.Response(
+                307,
+                headers={"Location": "https://api.example.test/internal"},
+            )
+        ),
+    )
+
+    with httpx.Client(transport=transport, follow_redirects=False, trust_env=False) as client:
+        response = client.post("https://api.example.test/v1/chat/completions", json={})
+
+    assert response.status_code == 307
     assert len(requests) == 1
 
 

@@ -65,6 +65,12 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert observed["api_key"].get_secret_value() == "runtime-secret-key"
     assert observed["temperature"] == 0.37
     assert observed["max_tokens"] == 321
+    assert isinstance(observed["http_client"], httpx.Client)
+    assert isinstance(observed["http_async_client"], httpx.AsyncClient)
+    assert observed["http_client"].follow_redirects is False
+    assert observed["http_async_client"].follow_redirects is False
+    assert observed["http_client"]._trust_env is False
+    assert observed["http_async_client"]._trust_env is False
     assert "default_headers" not in observed
     assert "Authorization" not in repr(observed)
     assert "runtime-secret-key" not in repr(observed)

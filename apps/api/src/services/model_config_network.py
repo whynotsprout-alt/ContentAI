@@ -70,6 +70,60 @@ class ModelProbeResult:
     latency_ms: int
 
 
+def _model_origin(parsed: SplitResult) -> tuple[str, str, int]:
+    scheme = parsed.scheme.lower()
+    host = _normalize_hostname(parsed.hostname or "")
+    if scheme not in {"http", "https"} or not host:
+        raise ModelEndpointForbidden("The model endpoint is not permitted.")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ModelEndpointForbidden("The model endpoint is not permitted.") from None
+    return scheme, host, port or (443 if scheme == "https" else 80)
+
+
+def _pinned_request_target(
+    url: str,
+    base_url: str,
+    resolver: Resolver,
+) -> tuple[str, str, str | None]:
+    configured = urlsplit(base_url)
+    request_url = urlsplit(url)
+    configured_origin = _model_origin(configured)
+    if (
+        request_url.username is not None
+        or request_url.password is not None
+        or _model_origin(request_url) != configured_origin
+    ):
+        raise ModelEndpointForbidden("The model endpoint is not permitted.")
+
+    scheme, host, port = configured_origin
+    addresses = _resolve_and_validate(host, port, resolver)
+    if scheme == "http" and not all(_is_enterprise_local(address) for address in addresses):
+        raise ModelEndpointForbidden("Public model endpoints must use HTTPS.")
+
+    selected_address = addresses[0]
+    selected_host = (
+        f"[{selected_address}]" if selected_address.version == 6 else str(selected_address)
+    )
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    pinned_netloc = selected_host if default_port else f"{selected_host}:{port}"
+    pinned_url = urlunsplit(
+        SplitResult(
+            request_url.scheme,
+            pinned_netloc,
+            request_url.path,
+            request_url.query,
+            request_url.fragment,
+        )
+    )
+    return (
+        pinned_url,
+        configured.netloc,
+        host if scheme == "https" else None,
+    )
+
+
 def resolve_host_addresses(host: str, port: int) -> Sequence[str]:
     try:
         answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -213,6 +267,77 @@ def _is_enterprise_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     return address in _IPV6_ENTERPRISE_NETWORK
 
 
+class PinnedModelTransport(httpx.BaseTransport):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        resolver: Resolver = resolve_host_addresses,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._base_url = base_url
+        self._resolver = resolver
+        self._transport = transport or httpx.HTTPTransport(trust_env=False, retries=0)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        pinned_url, host_header, sni_hostname = _pinned_request_target(
+            str(request.url), self._base_url, self._resolver
+        )
+        headers = request.headers.copy()
+        headers["Host"] = host_header
+        extensions = dict(request.extensions)
+        if sni_hostname is not None:
+            extensions["sni_hostname"] = sni_hostname
+        pinned_request = httpx.Request(
+            request.method,
+            pinned_url,
+            headers=headers,
+            stream=request.stream,
+            extensions=extensions,
+        )
+        return self._transport.handle_request(pinned_request)
+
+    def close(self) -> None:
+        self._transport.close()
+
+
+class PinnedAsyncModelTransport(httpx.AsyncBaseTransport):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        resolver: Resolver = resolve_host_addresses,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._base_url = base_url
+        self._resolver = resolver
+        self._transport = transport or httpx.AsyncHTTPTransport(
+            trust_env=False,
+            retries=0,
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        pinned_url, host_header, sni_hostname = _pinned_request_target(
+            str(request.url), self._base_url, self._resolver
+        )
+        headers = request.headers.copy()
+        headers["Host"] = host_header
+        extensions = dict(request.extensions)
+        if sni_hostname is not None:
+            extensions["sni_hostname"] = sni_hostname
+        pinned_request = httpx.Request(
+            request.method,
+            pinned_url,
+            headers=headers,
+            stream=request.stream,
+            extensions=extensions,
+        )
+        return await self._transport.handle_async_request(pinned_request)
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+
 class OpenAICompatibleProbe:
     def __init__(
         self,
@@ -278,7 +403,11 @@ class OpenAICompatibleProbe:
         model_request: bool,
         json_payload: dict[str, object] | None = None,
     ) -> object:
-        pinned_url, host_header, sni_hostname = self._pinned_request_target(url, base_url)
+        pinned_url, host_header, sni_hostname = _pinned_request_target(
+            url,
+            base_url,
+            self._resolver,
+        )
         request_headers = {**headers, "Host": host_header}
         extensions = {"sni_hostname": sni_hostname} if sni_hostname is not None else None
         unreachable = False
@@ -327,39 +456,6 @@ class OpenAICompatibleProbe:
         if payload is None:
             raise ModelProbeFailed("The model provider returned an invalid response.")
         return payload
-
-    def _pinned_request_target(self, url: str, base_url: str) -> tuple[str, str, str | None]:
-        parsed = urlsplit(base_url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        addresses = _resolve_and_validate(parsed.hostname or "", port, self._resolver)
-        if parsed.scheme == "http" and not all(
-            _is_enterprise_local(address) for address in addresses
-        ):
-            raise ModelEndpointForbidden("Public model endpoints must use HTTPS.")
-        selected_address = addresses[0]
-        selected_host = (
-            f"[{selected_address}]" if selected_address.version == 6 else str(selected_address)
-        )
-        default_port = (parsed.scheme == "https" and port == 443) or (
-            parsed.scheme == "http" and port == 80
-        )
-        pinned_netloc = selected_host if default_port else f"{selected_host}:{port}"
-        request_url = urlsplit(url)
-        pinned_url = urlunsplit(
-            SplitResult(
-                request_url.scheme,
-                pinned_netloc,
-                request_url.path,
-                request_url.query,
-                request_url.fragment,
-            )
-        )
-        return (
-            pinned_url,
-            parsed.netloc,
-            parsed.hostname if parsed.scheme == "https" else None,
-        )
-
 
 def _read_bounded_body(response: httpx.Response) -> bytes:
     if response.is_stream_consumed:
