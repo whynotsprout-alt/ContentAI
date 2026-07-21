@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import Any
 
 from agent.runtime.checkpoint import clear_execution_persistence
@@ -26,8 +25,10 @@ from models.chat import (
     AgentInvocation,
     ChatMessage,
     ChatSession,
+    ExecutionOutbox,
 )
 from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, MessageRole, RunStatus
+from models.user import AppUser
 from services.execution_resume import mark_resume_consumed
 from sqlmodel import Session, select
 
@@ -53,6 +54,7 @@ class AgentRunner:
         db_session: Session,
         *,
         execution_id: str,
+        worker_id: str,
         event_writer: Any | None = None,
         tool_permissions: tuple[str, ...] = ("*",),
         turn_context: DurableTurnContext | None = None,
@@ -88,32 +90,100 @@ class AgentRunner:
             owns_event_writer = False
 
         try:
+            user = db_session.exec(
+                select(AppUser)
+                .where(AppUser.id == auth.user_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one_or_none()
             locked_execution = db_session.exec(
-                select(AgentExecution).where(AgentExecution.id == execution.id).with_for_update()
+                select(AgentExecution)
+                .where(AgentExecution.id == execution.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             ).one()
-            lease_seconds = int(getattr(self.container.settings.agent, "worker_lease_seconds", 120))
-            if (
-                locked_execution.status == RunStatus.running
-                and locked_execution.heartbeat_at is not None
-                and locked_execution.heartbeat_at > utcnow() - timedelta(seconds=lease_seconds)
-            ):
-                return
             execution = locked_execution
-            expected_worker_id = execution.worker_id
-            self.state_manager.ensure_execution_not_cancelled(
-                db_session,
-                execution,
-                expected_worker_id=expected_worker_id,
-            )
-            execution.claimed_at = execution.claimed_at or utcnow()
-            execution.heartbeat_at = utcnow()
-            db_session.add(execution)
-            db_session.commit()
-            self.state_manager.set_execution_state(db_session, execution, RunStatus.running, "")
-            self.event_service.emit_execution_started(event_writer, execution)
+            if user is None or user.status != "active":
+                if execution.status not in TERMINAL_RUN_STATUSES:
+                    now = utcnow()
+                    execution.status = RunStatus.cancelled
+                    execution.error = "USER_DISABLED"
+                    execution.interrupt_payload = {}
+                    execution.finished_at = execution.finished_at or now
+                    execution.touch_updated_at(now)
+                    outbox = db_session.exec(
+                        select(ExecutionOutbox)
+                        .where(
+                            ExecutionOutbox.execution_id == execution.id,
+                            ExecutionOutbox.kind == "execute",
+                        )
+                        .with_for_update()
+                    ).one_or_none()
+                    if outbox is not None:
+                        outbox.status = "cancelled"
+                        outbox.locked_by = None
+                        outbox.locked_until = None
+                        outbox.updated_at = now
+                        db_session.add(outbox)
+                    db_session.add(execution)
+                if execution.status == RunStatus.cancelled:
+                    self._finish_attempt(
+                        db_session,
+                        execution,
+                        ExecutionAttemptStatus.cancelled,
+                        commit=False,
+                    )
+                    db_session.commit()
+                else:
+                    db_session.rollback()
+                return
+
+            if execution.status in TERMINAL_RUN_STATUSES:
+                if execution.status == RunStatus.cancelled:
+                    self._finish_attempt(
+                        db_session,
+                        execution,
+                        ExecutionAttemptStatus.cancelled,
+                        commit=False,
+                    )
+                    db_session.commit()
+                else:
+                    db_session.rollback()
+                return
+            if execution.worker_id != worker_id:
+                raise ExecutionLeaseLost()
+            if execution.cancel_requested_at is not None:
+                now = utcnow()
+                execution.status = RunStatus.cancelled
+                execution.interrupt_payload = {}
+                execution.finished_at = execution.finished_at or now
+                execution.touch_updated_at(now)
+                db_session.add(execution)
+                self._finish_attempt(
+                    db_session,
+                    execution,
+                    ExecutionAttemptStatus.cancelled,
+                    commit=False,
+                )
+                db_session.commit()
+                return
+            if execution.status != RunStatus.pending:
+                db_session.rollback()
+                return
+
+            expected_worker_id = worker_id
+            now = utcnow()
+            execution.status = RunStatus.running
+            execution.error = ""
+            execution.interrupt_payload = {}
+            execution.claimed_at = execution.claimed_at or now
+            execution.heartbeat_at = now
+            execution.started_at = execution.started_at or now
             execution.next_attempt_kind = ExecutionAttemptKind.retry
+            execution.touch_updated_at(now)
             db_session.add(execution)
             db_session.commit()
+            self.event_service.emit_execution_started(event_writer, execution)
 
             result = self.execution_engine.run_turn(
                 db_session=db_session,
@@ -146,11 +216,22 @@ class AgentRunner:
                 self._finish_attempt(db_session, execution, ExecutionAttemptStatus.waiting_input)
                 return
 
-            self.state_manager.ensure_execution_not_cancelled(
-                db_session,
-                execution,
-                expected_worker_id=expected_worker_id,
-            )
+            locked_execution = db_session.exec(
+                select(AgentExecution)
+                .where(AgentExecution.id == execution.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one()
+            execution = locked_execution
+            if execution.worker_id != expected_worker_id:
+                raise ExecutionLeaseLost()
+            if (
+                execution.status == RunStatus.cancelled
+                or execution.cancel_requested_at is not None
+            ):
+                raise ExecutionCancelled()
+            if execution.status != RunStatus.running:
+                raise ExecutionLeaseLost()
             now = utcnow()
             execution.status = RunStatus.completed
             execution.error = ""
@@ -164,6 +245,11 @@ class AgentRunner:
                 execution,
                 ExecutionAttemptStatus.completed,
                 commit=False,
+            )
+            self.post_service.enqueue(
+                db_session=db_session,
+                execution=execution,
+                request_id=request_id,
             )
             db_session.commit()
             if result.assistant_message is not None:
@@ -202,13 +288,7 @@ class AgentRunner:
                     execution.id,
                     exc_info=True,
                 )
-            self.state_manager.ensure_execution_not_cancelled(
-                db_session,
-                execution,
-                expected_worker_id=expected_worker_id,
-            )
             self.post_service.schedule(
-                db_session=db_session,
                 event_service=self.event_service,
                 event_writer=event_writer,
                 execution=execution,
@@ -216,11 +296,17 @@ class AgentRunner:
             )
         except ExecutionLeaseLost:
             db_session.rollback()
-            logger.warning("Agent execution lease lost: %s", execution.id)
+            logger.warning("Agent execution lease lost: %s", execution_id)
         except ExecutionCancelled:
-            self.state_manager.set_execution_state(db_session, execution, RunStatus.cancelled, "")
-            self.event_service.emit_execution_cancelled(event_writer, execution)
-            self._finish_attempt(db_session, execution, ExecutionAttemptStatus.cancelled)
+            db_session.rollback()
+            cancelled_execution = self._finalize_cancellation(
+                db_session,
+                execution_id=execution_id,
+                expected_worker_id=worker_id,
+            )
+            if cancelled_execution is not None:
+                execution = cancelled_execution
+                self.event_service.emit_execution_cancelled(event_writer, execution)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Agent execution failed: execution=%s error_type=%s",
@@ -244,6 +330,60 @@ class AgentRunner:
                 close_writer = getattr(event_writer, "close", None)
                 if callable(close_writer):
                     close_writer()
+
+    def _finalize_cancellation(
+        self,
+        db_session: Session,
+        *,
+        execution_id: str,
+        expected_worker_id: str,
+    ) -> AgentExecution | None:
+        execution = db_session.exec(
+            select(AgentExecution)
+            .where(AgentExecution.id == execution_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if (
+            execution is None
+            or execution.worker_id != expected_worker_id
+            or execution.status in {RunStatus.completed, RunStatus.failed}
+            or (
+                execution.status != RunStatus.cancelled
+                and execution.cancel_requested_at is None
+            )
+        ):
+            db_session.rollback()
+            return None
+
+        now = utcnow()
+        execution.status = RunStatus.cancelled
+        execution.interrupt_payload = {}
+        execution.finished_at = execution.finished_at or now
+        execution.touch_updated_at(now)
+        outbox = db_session.exec(
+            select(ExecutionOutbox)
+            .where(
+                ExecutionOutbox.execution_id == execution.id,
+                ExecutionOutbox.kind == "execute",
+            )
+            .with_for_update()
+        ).one_or_none()
+        if outbox is not None:
+            outbox.status = "cancelled"
+            outbox.locked_by = None
+            outbox.locked_until = None
+            outbox.updated_at = now
+            db_session.add(outbox)
+        db_session.add(execution)
+        self._finish_attempt(
+            db_session,
+            execution,
+            ExecutionAttemptStatus.cancelled,
+            commit=False,
+        )
+        db_session.commit()
+        return execution
 
     def _load_execution_context(
         self,

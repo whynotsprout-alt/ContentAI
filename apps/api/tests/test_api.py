@@ -2791,6 +2791,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                 service.runner.run(
                     setup_session,
                     execution_id=execution_id,
+                    worker_id=initial_claim.worker_id,
                     auth=initial_claim.auth,
                     tool_permissions=initial_claim.auth.tool_permissions,
                     turn_context=initial_claim.turn_context,
@@ -2844,6 +2845,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                         service.runner.run(
                             db_session,
                             execution_id=execution_id,
+                            worker_id=claimed.worker_id,
                             auth=claimed.auth,
                             tool_permissions=claimed.auth.tool_permissions,
                             turn_context=claimed.turn_context,
@@ -2954,6 +2956,347 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
     assert event_names.count("assistant_message") == 1
     assert event_names.count("message_finish") == 1
     assert event_names.count("run_finish") == 1
+
+
+@pytest.mark.parametrize(
+    ("transition", "expected_error"),
+    [("cancel", ""), ("disable", "USER_DISABLED")],
+)
+def test_runner_does_not_revive_execution_cancelled_after_claim(
+    transition: str,
+    expected_error: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            return None
+
+    engine_calls = 0
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        service = app.state.agent_service
+        original_loader = service.runner._load_execution_context
+        original_run_turn = service.runner.execution_engine.run_turn
+        try:
+            chat = client.post(
+                "/api/chat/sessions",
+                json={"agent_id": "default-agent"},
+            ).json()
+            started = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": f"runner linearization {transition}"},
+            )
+            assert started.status_code == 202, started.text
+            execution_id = started.json()["execution_id"]
+            claimed = claim_execution(
+                service,
+                execution_id,
+                f"linearization-worker-{transition}",
+                use_lease=False,
+            )
+            assert claimed is not None
+
+            def load_then_transition(*args: Any, **kwargs: Any) -> Any:
+                loaded = original_loader(*args, **kwargs)
+                assert loaded is not None
+                with Session(get_engine()) as competing_session:
+                    execution = competing_session.get(AgentExecution, execution_id)
+                    assert execution is not None
+                    execution.status = RunStatus.cancelled
+                    execution.finished_at = utcnow()
+                    execution.error = expected_error
+                    competing_session.add(execution)
+                    if transition == "disable":
+                        user = competing_session.get(AppUser, claimed.auth.user_id)
+                        assert user is not None
+                        user.status = "disabled"
+                        competing_session.add(user)
+                    outbox = competing_session.exec(
+                        select(ExecutionOutbox).where(
+                            ExecutionOutbox.execution_id == execution_id,
+                            ExecutionOutbox.kind == "execute",
+                        )
+                    ).one()
+                    outbox.status = "cancelled"
+                    competing_session.add(outbox)
+                    competing_session.commit()
+                return loaded
+
+            def record_engine_call(**_kwargs: Any) -> Any:
+                nonlocal engine_calls
+                engine_calls += 1
+                raise SystemExit("engine must not run after cancellation")
+
+            monkeypatch.setattr(service.runner, "_load_execution_context", load_then_transition)
+            monkeypatch.setattr(
+                service.runner.execution_engine,
+                "run_turn",
+                record_engine_call,
+            )
+            with Session(get_engine()) as runner_session:
+                try:
+                    service.runner.run(
+                        runner_session,
+                        execution_id=execution_id,
+                        worker_id=claimed.worker_id,
+                        auth=claimed.auth,
+                        tool_permissions=claimed.auth.tool_permissions,
+                        turn_context=claimed.turn_context,
+                        event_writer=_Writer(),
+                    )
+                except SystemExit:
+                    pass
+        finally:
+            service.runner._load_execution_context = original_loader
+            service.runner.execution_engine.run_turn = original_run_turn
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.cancelled
+        assert execution.error == expected_error
+        outbox = verification_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "execute",
+            )
+        ).one()
+        assert outbox.status == "cancelled"
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.cancelled
+        assert attempt.finished_at is not None
+        assistants = verification_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        postprocess_outboxes = verification_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).all()
+        assert assistants == []
+        assert postprocess_outboxes == []
+    assert engine_calls == 0
+
+
+def test_cancel_after_assistant_flush_rolls_back_final_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def emit(self, event_name: str, _payload: dict[str, Any]) -> None:
+            self.events.append(event_name)
+
+    writer = _Writer()
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        service = app.state.agent_service
+        original_run_turn = service.runner.execution_engine.run_turn
+        try:
+            chat = client.post(
+                "/api/chat/sessions",
+                json={"agent_id": "default-agent"},
+            ).json()
+            started = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "cancel after assistant flush"},
+            )
+            assert started.status_code == 202, started.text
+            execution_id = started.json()["execution_id"]
+            claimed = claim_execution(
+                service,
+                execution_id,
+                "cancel-after-flush-worker",
+                use_lease=False,
+            )
+            assert claimed is not None
+
+            def flush_then_cancel(**kwargs: Any) -> Any:
+                service.runner.execution_engine.message_persister.persist_assistant_text(
+                    kwargs["db_session"],
+                    session_id=kwargs["chat"].id,
+                    invocation_id=kwargs["invocation"].id,
+                    execution_id=kwargs["execution"].id,
+                    content="must roll back",
+                    event_writer=kwargs["event_writer"],
+                )
+                with Session(get_engine()) as cancelling_session:
+                    execution = cancelling_session.get(AgentExecution, execution_id)
+                    assert execution is not None
+                    execution.cancel_requested_at = utcnow()
+                    cancelling_session.add(execution)
+                    cancelling_session.commit()
+                service.runner.state_manager.ensure_execution_not_cancelled(
+                    kwargs["db_session"],
+                    kwargs["execution"],
+                    expected_worker_id=claimed.worker_id,
+                )
+                raise AssertionError("cancellation guard did not stop the execution")
+
+            monkeypatch.setattr(
+                service.runner.execution_engine,
+                "run_turn",
+                flush_then_cancel,
+            )
+            with Session(get_engine()) as runner_session:
+                service.runner.run(
+                    runner_session,
+                    execution_id=execution_id,
+                    worker_id=claimed.worker_id,
+                    auth=claimed.auth,
+                    tool_permissions=claimed.auth.tool_permissions,
+                    turn_context=claimed.turn_context,
+                    event_writer=writer,
+                )
+        finally:
+            service.runner.execution_engine.run_turn = original_run_turn
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.cancelled
+        assistants = verification_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        assert assistants == []
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.cancelled
+        assert attempt.finished_at is not None
+        postprocess_outboxes = verification_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).all()
+        assert postprocess_outboxes == []
+    assert "assistant_message" not in writer.events
+    assert "run_finish" not in writer.events
+
+
+def test_completed_execution_persists_postprocess_outbox_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            return None
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        service = app.state.agent_service
+        original_run_turn = service.runner.execution_engine.run_turn
+        original_schedule = service.runner.post_service.schedule
+        try:
+            chat = client.post(
+                "/api/chat/sessions",
+                json={"agent_id": "default-agent"},
+            ).json()
+            started = client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={"message": "atomic postprocess outbox"},
+            )
+            assert started.status_code == 202, started.text
+            execution_id = started.json()["execution_id"]
+            claimed = claim_execution(
+                service,
+                execution_id,
+                "atomic-postprocess-worker",
+                use_lease=False,
+            )
+            assert claimed is not None
+
+            def persist_final_assistant(**kwargs: Any) -> Any:
+                persister = service.runner.execution_engine.message_persister
+                assistant = persister.persist_assistant_text(
+                    kwargs["db_session"],
+                    session_id=kwargs["chat"].id,
+                    invocation_id=kwargs["invocation"].id,
+                    execution_id=kwargs["execution"].id,
+                    content="atomic final answer",
+                    event_writer=kwargs["event_writer"],
+                )
+                return SimpleNamespace(
+                    interrupt_payload=None,
+                    assistant_message=assistant,
+                    streamed_assistant_text="",
+                )
+
+            def crash_before_dispatch(**_kwargs: Any) -> None:
+                raise SystemExit("crash before postprocess dispatch")
+
+            monkeypatch.setattr(
+                service.runner.execution_engine,
+                "run_turn",
+                persist_final_assistant,
+            )
+            monkeypatch.setattr(service.runner.post_service, "schedule", crash_before_dispatch)
+            with Session(get_engine()) as runner_session:
+                with pytest.raises(SystemExit, match="crash before postprocess dispatch"):
+                    service.runner.run(
+                        runner_session,
+                        execution_id=execution_id,
+                        worker_id=claimed.worker_id,
+                        auth=claimed.auth,
+                        tool_permissions=claimed.auth.tool_permissions,
+                        turn_context=claimed.turn_context,
+                        event_writer=_Writer(),
+                        request_id="atomic-postprocess-request",
+                    )
+        finally:
+            service.runner.execution_engine.run_turn = original_run_turn
+            service.runner.post_service.schedule = original_schedule
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.completed
+        assistants = verification_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        assert len(assistants) == 1
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.completed
+        assert attempt.finished_at is not None
+        postprocess_outboxes = verification_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).all()
+        assert len(postprocess_outboxes) == 1
+        assert postprocess_outboxes[0].status == "pending"
+        assert postprocess_outboxes[0].request_id == "atomic-postprocess-request"
 
 
 def test_running_run_can_be_cancel_requested():

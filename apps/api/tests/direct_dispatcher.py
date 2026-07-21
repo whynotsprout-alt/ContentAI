@@ -51,6 +51,7 @@ class DirectDispatcher:
             self.service.runner.run(
                 session,
                 execution_id=execution_id,
+                worker_id=claimed.worker_id,
                 auth=claimed.auth,
                 tool_permissions=claimed.auth.tool_permissions,
                 turn_context=claimed.turn_context,

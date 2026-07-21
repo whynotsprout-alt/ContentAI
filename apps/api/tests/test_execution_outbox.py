@@ -397,6 +397,7 @@ def test_duplicate_delivery_only_claims_execution_once() -> None:
     )
 
     assert first_claim is not None
+    assert first_claim.worker_id == "worker-first"
     assert duplicate_claim is None
     with Session(get_engine(settings)) as session:
         execution = session.get(AgentExecution, execution_id)

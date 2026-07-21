@@ -795,37 +795,44 @@ class AgentPostExecutionService:
     def close(self) -> None:
         return None
 
-    def schedule(
+    def enqueue(
         self,
         *,
         db_session: Session,
+        execution: AgentExecution,
+        request_id: str | None = None,
+    ) -> None:
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution.id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).first()
+        if outbox is None:
+            outbox = ExecutionOutbox(
+                execution_id=execution.id,
+                model_config_id=execution.model_config_id,
+                kind="postprocess",
+                request_id=request_id or "",
+            )
+        elif outbox.status not in {"published", "completed", "failed"}:
+            now = utcnow()
+            outbox.status = "pending"
+            outbox.available_at = now
+            outbox.locked_by = None
+            outbox.locked_until = None
+            outbox.updated_at = now
+        db_session.add(outbox)
+
+    def schedule(
+        self,
+        *,
         event_service: AgentRuntimeEventService,
         event_writer: Any,
         execution: AgentExecution,
         request_id: str | None = None,
     ) -> None:
         try:
-            outbox = db_session.exec(
-                select(ExecutionOutbox).where(
-                    ExecutionOutbox.execution_id == execution.id,
-                    ExecutionOutbox.kind == "postprocess",
-                )
-            ).first()
-            if outbox is None:
-                outbox = ExecutionOutbox(
-                    execution_id=execution.id,
-                    model_config_id=execution.model_config_id,
-                    kind="postprocess",
-                    request_id=request_id or "",
-                )
-            elif outbox.status not in {"published", "completed", "failed"}:
-                outbox.status = "pending"
-                outbox.available_at = utcnow()
-                outbox.locked_by = None
-                outbox.locked_until = None
-                outbox.updated_at = utcnow()
-            db_session.add(outbox)
-            db_session.commit()
             if self.dispatcher is not None:
                 self.dispatcher.dispatch(execution.id, request_id)
             event_service.emit_marker(

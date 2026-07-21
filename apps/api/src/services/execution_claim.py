@@ -34,6 +34,7 @@ TERMINAL_STATUSES = {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
 class ClaimedExecution:
     auth: AuthContext
     turn_context: DurableTurnContext
+    worker_id: str
     resume_value: Any = None
     resume_request_id: str | None = None
     continue_from_checkpoint: bool = False
@@ -238,6 +239,7 @@ def claim_execution(
                 tool_permissions=turn_context.tool_permissions,
             ),
             turn_context=turn_context,
+            worker_id=worker_id,
             resume_value=resume_value,
             resume_request_id=resume_request.id if resume_request is not None else None,
             continue_from_checkpoint=continue_from_checkpoint,
