@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -14,6 +15,7 @@ MAX_PROBE_MODELS = 200
 MAX_MODEL_ID_LENGTH = 256
 MAX_PROBE_RESPONSE_BYTES = 256 * 1024
 MAX_PROBE_LATENCY_MS = 60_000
+DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS = 3.0
 
 Resolver = Callable[[str, int], Sequence[str]]
 
@@ -307,19 +309,33 @@ class PinnedAsyncModelTransport(httpx.AsyncBaseTransport):
         *,
         base_url: str,
         resolver: Resolver = resolve_host_addresses,
+        resolver_timeout_seconds: float = DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url
         self._resolver = resolver
+        self._resolver_timeout_seconds = max(0.01, float(resolver_timeout_seconds))
         self._transport = transport or httpx.AsyncHTTPTransport(
             trust_env=False,
             retries=0,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        pinned_url, host_header, sni_hostname = _pinned_request_target(
-            str(request.url), self._base_url, self._resolver
-        )
+        resolution_timed_out = False
+        try:
+            pinned_url, host_header, sni_hostname = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _pinned_request_target,
+                    str(request.url),
+                    self._base_url,
+                    self._resolver,
+                ),
+                timeout=self._resolver_timeout_seconds,
+            )
+        except TimeoutError:
+            resolution_timed_out = True
+        if resolution_timed_out:
+            raise ModelProviderUnreachable("The model provider could not be reached.")
         headers = request.headers.copy()
         headers["Host"] = host_header
         extensions = dict(request.extensions)

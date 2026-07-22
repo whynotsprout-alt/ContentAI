@@ -183,7 +183,8 @@ class RuntimeContainer:
             self._gateway_cache[model_config_id] = gateway
             self._gateway_cache.move_to_end(model_config_id)
             while len(self._gateway_cache) > self._cache_capacity:
-                self._gateway_cache.popitem(last=False)
+                _, evicted = self._gateway_cache.popitem(last=False)
+                evicted.close()
             return gateway
 
     def create_runtime(
@@ -277,7 +278,10 @@ class RuntimeContainer:
         with self._cache_lock:
             self._model_cache.clear()
             self._graph_cache.clear()
+            gateways = tuple(self._gateway_cache.values())
             self._gateway_cache.clear()
+        for gateway in gateways:
+            gateway.close()
         if self._owns_checkpointer and self.persistence is not None:
             self.persistence.close()
             self._owns_checkpointer = False

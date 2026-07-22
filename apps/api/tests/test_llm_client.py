@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from agent.infrastructure.llm import client as client_module
 from agent.infrastructure.llm.client import LangChainChatClient
 from agent.infrastructure.llm.gateway import ModelGateway
 from agent.runtime.errors import (
@@ -74,6 +75,53 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert "default_headers" not in observed
     assert "Authorization" not in repr(observed)
     assert "runtime-secret-key" not in repr(observed)
+
+
+def test_langchain_client_closes_owned_http_clients_once(monkeypatch) -> None:
+    class SyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.close_count = 0
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    class AsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    monkeypatch.setattr(client_module.httpx, "Client", SyncClient)
+    monkeypatch.setattr(client_module.httpx, "AsyncClient", AsyncClient)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+
+    client.close()
+    client.close()
+
+    assert client._http_client.close_count == 1
+    assert client._http_async_client.close_count == 1
+
+
+def test_model_gateway_close_delegates_once() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    client = Client()
+    gateway = _gateway(client=client)
+
+    gateway.close()
+    gateway.close()
+
+    assert client.close_count == 1
 
 
 def test_agent_model_keeps_provider_streaming_when_tools_are_bound():

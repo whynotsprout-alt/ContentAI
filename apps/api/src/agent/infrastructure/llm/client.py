@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any
 
 import httpx
@@ -31,6 +33,43 @@ class LangChainChatClient:
             follow_redirects=False,
             trust_env=False,
         )
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+
+        self._http_client.close()
+
+        def close_async_client() -> None:
+            asyncio.run(self._http_async_client.aclose())
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            close_async_client()
+            return
+
+        errors: list[BaseException] = []
+
+        def close_in_thread() -> None:
+            try:
+                close_async_client()
+            except BaseException as exc:  # pragma: no cover - defensive shutdown propagation
+                errors.append(exc)
+
+        thread = threading.Thread(
+            target=close_in_thread,
+            name="model-http-client-close",
+            daemon=True,
+        )
+        thread.start()
+        thread.join()
+        if errors:
+            raise errors[0]
 
     def build_chat_model(
         self,

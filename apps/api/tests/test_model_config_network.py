@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
 from collections.abc import Sequence
 from importlib import import_module
 
@@ -310,6 +311,62 @@ def test_runtime_async_transport_revalidates_and_pins_every_outbound_request() -
     assert requests[0].url.host == "93.184.216.34"
     assert requests[0].headers["Host"] == "api.example.test"
     assert requests[0].extensions["sni_hostname"] == "api.example.test"
+
+
+def test_runtime_async_transport_bounds_dns_without_blocking_event_loop() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    requests: list[httpx.Request] = []
+
+    def blocking_resolver(_host: str, _port: int) -> Sequence[str]:
+        resolver_started.set()
+        release_resolver.wait(timeout=0.2)
+        return ["93.184.216.34"]
+
+    async def exercise() -> None:
+        transport = network.PinnedAsyncModelTransport(
+            base_url="https://api.example.test/v1",
+            resolver=blocking_resolver,
+            resolver_timeout_seconds=0.02,
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request)
+                or httpx.Response(200, json={"ok": True})
+            ),
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            request = asyncio.create_task(
+                client.post("https://api.example.test/v1/chat/completions", json={})
+            )
+            event_loop_ticks = 0
+
+            async def heartbeat() -> None:
+                nonlocal event_loop_ticks
+                while not request.done():
+                    event_loop_ticks += 1
+                    await asyncio.sleep(0.001)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                while not resolver_started.is_set():
+                    await asyncio.sleep(0)
+                with pytest.raises(network.ModelProviderUnreachable) as exc_info:
+                    await request
+            finally:
+                release_resolver.set()
+                await heartbeat_task
+
+            assert event_loop_ticks > 0
+            assert exc_info.value.__cause__ is None
+            assert exc_info.value.__context__ is None
+
+    asyncio.run(exercise())
+
+    assert requests == []
 
 
 def test_runtime_client_never_follows_provider_redirects() -> None:

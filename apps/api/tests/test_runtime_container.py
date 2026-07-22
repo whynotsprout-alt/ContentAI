@@ -25,6 +25,15 @@ class _Gateway:
         return _Model()
 
 
+class _ClosableGateway:
+    def __init__(self, *, model_config_id: str, **_kwargs: Any) -> None:
+        self.model_config_id = model_config_id
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
 def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
     gateway = _Gateway()
     compiled_graph = object()
@@ -209,6 +218,44 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
 
     assert len({id(gateway) for gateway in gateways}) == 1
     assert calls == 1
+
+
+def test_gateway_cache_closes_evicted_and_shutdown_gateways_once(monkeypatch) -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.agent.runtime_cache_capacity = 1
+    created: dict[str, _ClosableGateway] = {}
+
+    def get_runtime_by_id(_service, _session, model_config_id: str):
+        return SimpleNamespace(
+            id=model_config_id,
+            base_url="https://models.example.test/v1",
+            api_key=SecretStr("test-secret"),
+            model_name="test-model",
+        )
+
+    def build_gateway(**kwargs: Any) -> _ClosableGateway:
+        gateway = _ClosableGateway(**kwargs)
+        created[gateway.model_config_id] = gateway
+        return gateway
+
+    monkeypatch.setattr(
+        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        get_runtime_by_id,
+    )
+    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    container = RuntimeContainer(settings=settings, checkpointer=object())
+
+    first = container.gateway_for_model_config("model-config-v1")
+    second = container.gateway_for_model_config("model-config-v2")
+
+    assert first.close_count == 1
+    assert second.close_count == 0
+
+    container.close()
+    container.close()
+
+    assert created["model-config-v1"].close_count == 1
+    assert created["model-config-v2"].close_count == 1
 
 
 def test_tool_registry_exposes_complete_execution_contract() -> None:

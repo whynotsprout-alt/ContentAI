@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from agent.context.window import TokenCounter
@@ -30,6 +31,15 @@ class ModelGateway:
             api_key=api_key,
             model_name=model_name,
         )
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.client.close()
 
     def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
         return self.client.build_chat_model(
