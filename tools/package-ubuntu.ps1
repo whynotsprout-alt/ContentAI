@@ -2,7 +2,12 @@ param([string]$Version)
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$projectText = Get-Content -LiteralPath (Join-Path $root "pyproject.toml") -Raw
+$commit = (& git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+  throw "Unable to resolve the release commit."
+}
+$projectText = ((& git -C $root show "${commit}:pyproject.toml") -join [Environment]::NewLine)
+if ($LASTEXITCODE -ne 0) { throw "Unable to read pyproject.toml from the release commit." }
 $projectBlock = [regex]::Match($projectText, '(?ms)^\[project\]\s*(?<body>.*?)(?=^\[|\z)')
 $versionMatch = [regex]::Match($projectBlock.Groups['body'].Value, '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$')
 if (-not $versionMatch.Success) { throw "Canonical project version is missing from pyproject.toml" }
@@ -34,8 +39,9 @@ $requiredPaths = @(
 )
 
 foreach ($relative in $requiredPaths) {
-  if (-not (Test-Path -LiteralPath (Join-Path $root $relative))) {
-    throw "Required archive input is missing: $relative"
+  & git -C $root cat-file -e "${commit}:$relative"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Required archive input is missing from the release commit: $relative"
   }
 }
 
@@ -44,17 +50,22 @@ if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force 
 if (Test-Path -LiteralPath $checksum) { Remove-Item -LiteralPath $checksum -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-foreach ($relative in $requiredPaths) {
-  $source = Join-Path $root $relative
-  $target = Join-Path $stage $relative
-  New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
-  Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
+$treeArchive = Join-Path (Split-Path $stage -Parent) (".contentai-tree-{0}.tar" -f [guid]::NewGuid().ToString("N"))
+& git -C $root archive --format=tar --output=$treeArchive $commit -- $requiredPaths
+if ($LASTEXITCODE -ne 0) { throw "Unable to materialize the release commit tree." }
+try {
+  & tar -xf $treeArchive -C $stage
+  if ($LASTEXITCODE -ne 0) { throw "Unable to extract the release commit tree." }
+} finally {
+  if (Test-Path -LiteralPath $treeArchive) { Remove-Item -LiteralPath $treeArchive -Force }
 }
 
-$commit = (& git -C $root rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
-  throw "Unable to resolve the release commit."
+foreach ($relative in $requiredPaths) {
+  if (-not (Test-Path -LiteralPath (Join-Path $stage $relative))) {
+    throw "Required archive input is missing after tree materialization: $relative"
+  }
 }
+
 [ordered]@{ version = $Version; commit = $commit } |
   ConvertTo-Json |
   Set-Content -LiteralPath (Join-Path $stage "release-manifest.json") -Encoding UTF8
