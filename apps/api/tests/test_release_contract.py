@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 import tarfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -73,14 +75,17 @@ def test_model_config_persistence_failure_is_a_documented_stable_code() -> None:
     assert "503" in api_documentation
 
 
-def test_release_package_uses_the_fixed_head_tree(tmp_path: Path) -> None:
+def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path: Path) -> None:
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:
         pytest.skip("Ubuntu package script requires PowerShell.")
 
-    repository = tmp_path / "release-repository"
-    (repository / "tools").mkdir(parents=True)
-    shutil.copy2(ROOT / "tools/package-ubuntu.ps1", repository / "tools/package-ubuntu.ps1")
+    source_repository = tmp_path / "release-source"
+    (source_repository / "tools").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "tools/package-ubuntu.ps1",
+        source_repository / "tools/package-ubuntu.ps1",
+    )
     required_files = {
         "apps/api/src/tracked.py": "from-tree\n",
         "apps/api/src/contentai_migrations/env.py": "\n",
@@ -108,12 +113,12 @@ def test_release_package_uses_the_fixed_head_tree(tmp_path: Path) -> None:
         "README.md": "# ContentAI\n",
     }
     for relative_path, content in required_files.items():
-        destination = repository / relative_path
+        destination = source_repository / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
 
-    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "init"], cwd=source_repository, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=source_repository, check=True, capture_output=True)
     subprocess.run(
         [
             "git",
@@ -125,41 +130,73 @@ def test_release_package_uses_the_fixed_head_tree(tmp_path: Path) -> None:
             "-m",
             "release tree",
         ],
-        cwd=repository,
+        cwd=source_repository,
         check=True,
         capture_output=True,
     )
-    tracked_from_tree = (repository / "apps/api/src/tracked.py").read_bytes()
+    tracked_from_tree = (source_repository / "apps/api/src/tracked.py").read_bytes()
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=repository,
+        cwd=source_repository,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    (repository / "apps/api/src/tracked.py").write_text("from-worktree\n", encoding="utf-8")
-    (repository / "docs/untracked-review.md").write_text("untracked\n", encoding="utf-8")
 
-    result = subprocess.run(
-        [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(repository / "tools/package-ubuntu.ps1"),
-        ],
-        cwd=repository,
-        capture_output=True,
-        text=True,
-        timeout=30,
+    archive_bytes: list[bytes] = []
+    checksum_texts: list[str] = []
+    archives: list[Path] = []
+    for index in range(2):
+        repository = tmp_path / f"release-build-{index}"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(source_repository), str(repository)],
+            check=True,
+            capture_output=True,
+        )
+        (repository / "apps/api/src/tracked.py").write_text(
+            f"from-worktree-{index}\n",
+            encoding="utf-8",
+        )
+        (repository / f"docs/untracked-review-{index}.md").write_text(
+            "untracked\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(repository / "tools/package-ubuntu.ps1"),
+            ],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
+        archive = repository / "dist/contentai-0.5.0-rc.1-ubuntu.tar.gz"
+        checksum = archive.with_suffix(archive.suffix + ".sha256")
+        archives.append(archive)
+        archive_bytes.append(archive.read_bytes())
+        checksum_texts.append(checksum.read_text(encoding="ascii"))
+        if index == 0:
+            time.sleep(1.1)
+
+    assert archive_bytes[0] == archive_bytes[1]
+    assert checksum_texts[0] == checksum_texts[1]
+    expected_hash = hashlib.sha256(archive_bytes[0]).hexdigest()
+    assert checksum_texts[0] == (
+        f"{expected_hash}  contentai-0.5.0-rc.1-ubuntu.tar.gz"
     )
 
-    assert result.returncode == 0, result.stderr
-    archive = repository / "dist/contentai-0.5.0-rc.1-ubuntu.tar.gz"
-    with tarfile.open(archive, "r:gz") as packaged:
+    with tarfile.open(archives[0], "r:gz") as packaged:
         names = packaged.getnames()
-        assert "contentai-0.5.0-rc.1-ubuntu/docs/untracked-review.md" not in names
+        archive_root = "contentai-0.5.0-rc.1-ubuntu"
+        assert all(name == archive_root or name.startswith(f"{archive_root}/") for name in names)
+        assert not any("untracked-review" in name for name in names)
         tracked = packaged.extractfile(
             "contentai-0.5.0-rc.1-ubuntu/apps/api/src/tracked.py"
         )
@@ -168,4 +205,7 @@ def test_release_package_uses_the_fixed_head_tree(tmp_path: Path) -> None:
         assert manifest is not None
         tracked_content = tracked.read()
         assert tracked_content == tracked_from_tree, tracked_content
-        assert json.loads(manifest.read())["commit"] == commit
+        assert json.loads(manifest.read()) == {
+            "version": "0.5.0-rc.1",
+            "commit": commit,
+        }
