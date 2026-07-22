@@ -195,12 +195,14 @@ class AgentRunner:
                 ).one()
                 execution = locked_execution
                 if user is None or user.status != "active":
-                    settle_execution_cancellation(
+                    if not settle_execution_cancellation(
                         db_session,
                         execution,
                         now=utcnow(),
                         error="USER_DISABLED",
-                    )
+                    ):
+                        db_session.rollback()
+                        return
                     db_session.commit()
                     self._run_postcommit(
                         lambda: self.event_service.emit_execution_cancelled(
@@ -217,11 +219,13 @@ class AgentRunner:
                     execution.status == RunStatus.cancelled
                     or execution.cancel_requested_at is not None
                 ):
-                    settle_execution_cancellation(
+                    if not settle_execution_cancellation(
                         db_session,
                         execution,
                         now=utcnow(),
-                    )
+                    ):
+                        db_session.rollback()
+                        return
                     db_session.commit()
                     self._run_postcommit(
                         lambda: self.event_service.emit_execution_cancelled(

@@ -3305,6 +3305,104 @@ def test_waiting_input_transition_rechecks_worker_user_and_cancel_fences(
             assert attempt.finished_at is not None
 
 
+@pytest.mark.parametrize(
+    ("terminal_status", "terminal_error", "attempt_status"),
+    [
+        (RunStatus.completed, "", ExecutionAttemptStatus.completed),
+        (RunStatus.failed, "competing terminal failure", ExecutionAttemptStatus.failed),
+    ],
+)
+def test_waiting_input_stale_worker_does_not_project_cancellation_over_terminal_state(
+    terminal_status: RunStatus,
+    terminal_error: str,
+    attempt_status: ExecutionAttemptStatus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        def emit(self, event_name: str, payload: dict[str, Any]) -> None:
+            self.events.append((event_name, payload))
+
+    interrupt_payload = {
+        "interrupts": [
+            {
+                "id": f"interrupt-terminal-fence-{terminal_status.value}",
+                "value": {"tool_calls": [{"name": "remember", "args": {}}]},
+            }
+        ]
+    }
+    writer = _Writer()
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message=f"terminal waiting fence {terminal_status.value}",
+            worker_id=f"terminal-waiting-fence-worker-{terminal_status.value}",
+        )
+
+        def finish_before_interrupt(**_kwargs: Any) -> Any:
+            with Session(get_engine()) as competing_session:
+                execution = competing_session.get(AgentExecution, execution_id)
+                assert execution is not None
+                now = utcnow()
+                execution.status = terminal_status
+                execution.error = terminal_error
+                execution.finished_at = now
+                competing_session.add(execution)
+                attempt = competing_session.get(
+                    AgentExecutionAttempt,
+                    execution.current_attempt_id,
+                )
+                assert attempt is not None
+                attempt.status = attempt_status
+                attempt.finished_at = now
+                competing_session.add(attempt)
+                user = competing_session.get(AppUser, claimed.auth.user_id)
+                assert user is not None
+                user.status = "disabled"
+                competing_session.add(user)
+                competing_session.commit()
+            return SimpleNamespace(
+                interrupt_payload=interrupt_payload,
+                assistant_message=None,
+                streamed_assistant_text="",
+            )
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            finish_before_interrupt,
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=writer,
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == terminal_status
+        assert execution.error == terminal_error
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == attempt_status
+        assert attempt.finished_at is not None
+
+    assert all(event_name != "run_cancel" for event_name, _payload in writer.events)
+    assert all(
+        event_name != "attempt_end" or payload.get("status") != "cancelled"
+        for event_name, payload in writer.events
+    )
+
+
 def test_waiting_input_state_and_attempt_commit_before_event_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

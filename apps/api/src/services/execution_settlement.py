@@ -40,9 +40,9 @@ def settle_execution_cancellation(
     *,
     now: datetime,
     error: str | None = None,
-) -> None:
+) -> bool:
     if execution.status in {RunStatus.completed, RunStatus.failed}:
-        return
+        return False
     execution.status = RunStatus.cancelled
     if error is not None:
         execution.error = error
@@ -85,6 +85,7 @@ def settle_execution_cancellation(
         now=now,
     )
     session.add(execution)
+    return True
 
 
 def settle_execution_failure(
