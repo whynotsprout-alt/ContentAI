@@ -212,7 +212,7 @@ async function saveConfiguration() {
       errorKind.value = 'save';
     }
   } finally {
-    if (saveGuard.isLatest(request)) saving.value = false;
+    saving.value = false;
   }
 }
 

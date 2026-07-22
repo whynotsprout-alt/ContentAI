@@ -1,7 +1,101 @@
-import { describe, expect, it } from 'vitest';
+import { createRenderer, nextTick, ssrContextKey } from 'vue';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
+
+vi.mock('../src/components/AdminShell.vue', async () => {
+  const { defineComponent, h } = await import('vue');
+  return {
+    default: defineComponent({
+      name: 'AdminShellStub',
+      setup(_props, { slots }) {
+        return () => h('div', [slots['heading-status']?.(), slots.default?.()]);
+      }
+    })
+  };
+});
+
+const hostNode = (type, text = '') => ({ type, text, props: {}, children: [], parent: null });
+const renderer = createRenderer({
+  patchProp(node, key, _previous, value) {
+    node.props[key] = value;
+  },
+  insert(child, parent, anchor = null) {
+    child.parent = parent;
+    const anchorIndex = anchor ? parent.children.indexOf(anchor) : -1;
+    if (anchorIndex >= 0) parent.children.splice(anchorIndex, 0, child);
+    else parent.children.push(child);
+  },
+  remove(child) {
+    if (!child.parent) return;
+    const index = child.parent.children.indexOf(child);
+    if (index >= 0) child.parent.children.splice(index, 1);
+    child.parent = null;
+  },
+  createElement(type) {
+    return hostNode(type);
+  },
+  createText(text) {
+    return hostNode('text', text);
+  },
+  createComment(text) {
+    return hostNode('comment', text);
+  },
+  setText(node, text) {
+    node.text = text;
+  },
+  setElementText(node, text) {
+    node.text = text;
+    node.children = [];
+  },
+  parentNode(node) {
+    return node.parent;
+  },
+  nextSibling(node) {
+    if (!node.parent) return null;
+    const index = node.parent.children.indexOf(node);
+    return node.parent.children[index + 1] ?? null;
+  },
+  setScopeId(node, id) {
+    node.props[id] = '';
+  },
+  insertStaticContent(content, parent, anchor) {
+    const node = hostNode('static', content);
+    this.insert(node, parent, anchor);
+    return [node, node];
+  }
+});
+
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
+
+const flushComponent = async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+};
+
+async function mountAdminModels() {
+  const { default: AdminModelsView } = await import('../src/views/AdminModelsView.vue');
+  const container = hostNode('root');
+  const app = renderer.createApp({ ...AdminModelsView, render: () => null });
+  app.provide(ssrContextKey, { modules: new Set() });
+  app.mount(container);
+  await flushComponent();
+  return { app, state: app._instance.setupState };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('admin model configuration', () => {
   it('accepts only the newest response for the current normalized draft', async () => {
@@ -88,8 +182,72 @@ describe('admin model configuration', () => {
     expect(models).toContain("errorKind.value = 'probe';");
     expect(models).toMatch(/if \(error instanceof ApiError && error\.code === 'MODEL_CONFIG_CHANGED'\) \{\s*try \{\s*await loadConfiguration\(\{ preserveForm: true, background: true, propagate: true \}\);/);
     expect(models).toContain('if (saveGuard.isCurrent(request)) {');
-    expect(models).toContain('if (saveGuard.isLatest(request)) saving.value = false;');
+    expect(models).toContain('saving.value = false;');
+    expect(models).not.toContain('if (saveGuard.isLatest(request)) saving.value = false;');
   });
+
+  it.each(['success', 'conflict', 'failure'])(
+    'releases save ownership after an edited draft settles with %s',
+    async (outcome) => {
+      const { adminApi, ApiError } = await import('../src/services/api.ts');
+      const initial = {
+        configured: true,
+        id: 'model-config-v1',
+        version: 1,
+        base_url: 'https://models.example.test/v1',
+        model_name: 'model-v1',
+        api_key_hint: 'key-hint-v1',
+        validated_at: '2026-07-22T00:00:00Z'
+      };
+      const refreshed = {
+        ...initial,
+        id: 'model-config-v2',
+        version: 2,
+        model_name: 'model-v2'
+      };
+      const saveRequest = deferred();
+      const load = vi.spyOn(adminApi, 'modelConfig').mockResolvedValueOnce(initial);
+      if (outcome === 'conflict') load.mockResolvedValueOnce(refreshed);
+      vi.spyOn(adminApi, 'updateModelConfig').mockReturnValue(saveRequest.promise);
+      const { app, state } = await mountAdminModels();
+
+      try {
+        expect(state.loading).toBe(false);
+        expect(state.canSave).toBe(true);
+        const pendingSave = state.saveConfiguration();
+        expect(state.saving).toBe(true);
+
+        const editedBaseUrl = 'https://edited.example.test/v1';
+        state.baseUrl = editedBaseUrl;
+        await nextTick();
+
+        if (outcome === 'success') {
+          saveRequest.resolve(refreshed);
+        } else if (outcome === 'conflict') {
+          saveRequest.reject(new ApiError(409, {
+            code: 'MODEL_CONFIG_CHANGED',
+            message: 'configuration changed',
+            retryable: false
+          }));
+        } else {
+          saveRequest.reject(new Error('save failed'));
+        }
+        await pendingSave;
+        await nextTick();
+
+        expect(state.saving).toBe(false);
+        expect(state.baseUrl).toBe(editedBaseUrl);
+        expect(state.modelName).toBe('model-v1');
+        expect(state.canSave).toBe(true);
+        if (outcome === 'conflict') {
+          expect(load).toHaveBeenCalledTimes(2);
+          expect(state.active.version).toBe(2);
+        }
+      } finally {
+        app.unmount();
+      }
+    }
+  );
 
   it('provides a keyboard skip target and route focus management in the shared shell', async () => {
     const [shell, styles] = await Promise.all([
