@@ -25,11 +25,15 @@ from models.chat import (
     AgentInvocation,
     ChatMessage,
     ChatSession,
-    ExecutionOutbox,
 )
 from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, MessageRole, RunStatus
 from models.user import AppUser
 from services.execution_resume import mark_resume_consumed
+from services.execution_settlement import (
+    finish_current_attempt,
+    settle_execution_cancellation,
+    settle_execution_failure,
+)
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -72,8 +76,6 @@ class AgentRunner:
         if loaded is None:
             return
         execution, invocation, chat, user_message = loaded
-        if execution.status in TERMINAL_RUN_STATUSES:
-            return
 
         if event_writer is None:
             event_writer = self.event_service.new_writer(
@@ -104,66 +106,39 @@ class AgentRunner:
             ).one()
             execution = locked_execution
             if user is None or user.status != "active":
-                if execution.status not in TERMINAL_RUN_STATUSES:
-                    now = utcnow()
-                    execution.status = RunStatus.cancelled
-                    execution.error = "USER_DISABLED"
-                    execution.interrupt_payload = {}
-                    execution.finished_at = execution.finished_at or now
-                    execution.touch_updated_at(now)
-                    outbox = db_session.exec(
-                        select(ExecutionOutbox)
-                        .where(
-                            ExecutionOutbox.execution_id == execution.id,
-                            ExecutionOutbox.kind == "execute",
-                        )
-                        .with_for_update()
-                    ).one_or_none()
-                    if outbox is not None:
-                        outbox.status = "cancelled"
-                        outbox.locked_by = None
-                        outbox.locked_until = None
-                        outbox.updated_at = now
-                        db_session.add(outbox)
-                    db_session.add(execution)
-                if execution.status == RunStatus.cancelled:
-                    self._finish_attempt(
+                if execution.status in {RunStatus.completed, RunStatus.failed}:
+                    db_session.rollback()
+                else:
+                    settle_execution_cancellation(
                         db_session,
                         execution,
-                        ExecutionAttemptStatus.cancelled,
-                        commit=False,
+                        now=utcnow(),
+                        error="USER_DISABLED",
                     )
                     db_session.commit()
-                else:
-                    db_session.rollback()
                 return
 
             if execution.status in TERMINAL_RUN_STATUSES:
-                if execution.status == RunStatus.cancelled:
-                    self._finish_attempt(
-                        db_session,
-                        execution,
-                        ExecutionAttemptStatus.cancelled,
-                        commit=False,
-                    )
-                    db_session.commit()
-                else:
-                    db_session.rollback()
+                attempt_status = {
+                    RunStatus.completed: ExecutionAttemptStatus.completed,
+                    RunStatus.failed: ExecutionAttemptStatus.failed,
+                    RunStatus.cancelled: ExecutionAttemptStatus.cancelled,
+                }[execution.status]
+                finish_current_attempt(
+                    db_session,
+                    execution,
+                    attempt_status,
+                    now=utcnow(),
+                )
+                db_session.commit()
                 return
             if execution.worker_id != worker_id:
                 raise ExecutionLeaseLost()
             if execution.cancel_requested_at is not None:
-                now = utcnow()
-                execution.status = RunStatus.cancelled
-                execution.interrupt_payload = {}
-                execution.finished_at = execution.finished_at or now
-                execution.touch_updated_at(now)
-                db_session.add(execution)
-                self._finish_attempt(
+                settle_execution_cancellation(
                     db_session,
                     execution,
-                    ExecutionAttemptStatus.cancelled,
-                    commit=False,
+                    now=utcnow(),
                 )
                 db_session.commit()
                 return
@@ -183,7 +158,11 @@ class AgentRunner:
             execution.touch_updated_at(now)
             db_session.add(execution)
             db_session.commit()
-            self.event_service.emit_execution_started(event_writer, execution)
+            self._run_postcommit(
+                lambda: self.event_service.emit_execution_started(event_writer, execution),
+                execution_id=execution.id,
+                operation="started event",
+            )
 
             result = self.execution_engine.run_turn(
                 db_session=db_session,
@@ -202,18 +181,83 @@ class AgentRunner:
             )
 
             if result.interrupt_payload is not None:
+                user = db_session.exec(
+                    select(AppUser)
+                    .where(AppUser.id == auth.user_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                ).one_or_none()
+                locked_execution = db_session.exec(
+                    select(AgentExecution)
+                    .where(AgentExecution.id == execution.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                ).one()
+                execution = locked_execution
+                if user is None or user.status != "active":
+                    settle_execution_cancellation(
+                        db_session,
+                        execution,
+                        now=utcnow(),
+                        error="USER_DISABLED",
+                    )
+                    db_session.commit()
+                    self._run_postcommit(
+                        lambda: self.event_service.emit_execution_cancelled(
+                            event_writer,
+                            execution,
+                        ),
+                        execution_id=execution.id,
+                        operation="cancelled event",
+                    )
+                    return
+                if execution.worker_id != expected_worker_id:
+                    raise ExecutionLeaseLost()
+                if (
+                    execution.status == RunStatus.cancelled
+                    or execution.cancel_requested_at is not None
+                ):
+                    settle_execution_cancellation(
+                        db_session,
+                        execution,
+                        now=utcnow(),
+                    )
+                    db_session.commit()
+                    self._run_postcommit(
+                        lambda: self.event_service.emit_execution_cancelled(
+                            event_writer,
+                            execution,
+                        ),
+                        execution_id=execution.id,
+                        operation="cancelled event",
+                    )
+                    return
+                if execution.status != RunStatus.running:
+                    raise ExecutionLeaseLost()
+
+                now = utcnow()
+                execution.status = RunStatus.waiting_input
+                execution.error = ""
+                execution.interrupt_payload = result.interrupt_payload
+                execution.touch_updated_at(now)
+                db_session.add(execution)
                 mark_resume_consumed(db_session, resume_request_id)
-                self.state_manager.mark_waiting_input(
+                finish_current_attempt(
                     db_session,
                     execution,
-                    result.interrupt_payload,
+                    ExecutionAttemptStatus.waiting_input,
+                    now=now,
                 )
-                self.event_service.emit_waiting_input(
-                    event_writer,
-                    execution,
-                    result.interrupt_payload,
+                db_session.commit()
+                self._run_postcommit(
+                    lambda: self.event_service.emit_waiting_input(
+                        event_writer,
+                        execution,
+                        result.interrupt_payload,
+                    ),
+                    execution_id=execution.id,
+                    operation="waiting-input event",
                 )
-                self._finish_attempt(db_session, execution, ExecutionAttemptStatus.waiting_input)
                 return
 
             locked_execution = db_session.exec(
@@ -253,9 +297,7 @@ class AgentRunner:
             )
             db_session.commit()
             if result.assistant_message is not None:
-                event_writer.emit(
-                    "assistant_message_delta",
-                    {
+                assistant_delta = {
                         "execution_id": execution.id,
                         "message_type": result.assistant_message.message_type,
                         "chunk": (
@@ -264,18 +306,34 @@ class AgentRunner:
                             else result.assistant_message.content
                         ),
                         "done": True,
-                    },
+                    }
+                self._run_postcommit(
+                    lambda: event_writer.emit(
+                        "assistant_message_delta",
+                        assistant_delta,
+                    ),
+                    execution_id=execution.id,
+                    operation="assistant delta event",
                 )
-                event_writer.emit(
-                    "assistant_message",
-                    {
+                assistant_message = {
                         "execution_id": execution.id,
                         "message_id": result.assistant_message.id,
                         "message_type": result.assistant_message.message_type,
                         "content": result.assistant_message.content,
-                    },
+                    }
+                self._run_postcommit(
+                    lambda: event_writer.emit(
+                        "assistant_message",
+                        assistant_message,
+                    ),
+                    execution_id=execution.id,
+                    operation="assistant message event",
                 )
-            self.event_service.emit_execution_completed(event_writer, execution)
+            self._run_postcommit(
+                lambda: self.event_service.emit_execution_completed(event_writer, execution),
+                execution_id=execution.id,
+                operation="completed event",
+            )
             try:
                 clear_execution_persistence(
                     thread_id=chat.langgraph_thread_id,
@@ -288,11 +346,15 @@ class AgentRunner:
                     execution.id,
                     exc_info=True,
                 )
-            self.post_service.schedule(
-                event_service=self.event_service,
-                event_writer=event_writer,
-                execution=execution,
-                request_id=request_id,
+            self._run_postcommit(
+                lambda: self.post_service.schedule(
+                    event_service=self.event_service,
+                    event_writer=event_writer,
+                    execution=execution,
+                    request_id=request_id,
+                ),
+                execution_id=execution.id,
+                operation="postprocess dispatch",
             )
         except ExecutionLeaseLost:
             db_session.rollback()
@@ -306,25 +368,52 @@ class AgentRunner:
             )
             if cancelled_execution is not None:
                 execution = cancelled_execution
-                self.event_service.emit_execution_cancelled(event_writer, execution)
+                self._run_postcommit(
+                    lambda: self.event_service.emit_execution_cancelled(
+                        event_writer,
+                        execution,
+                    ),
+                    execution_id=execution.id,
+                    operation="cancelled event",
+                )
         except Exception as exc:  # noqa: BLE001
+            db_session.rollback()
             logger.error(
                 "Agent execution failed: execution=%s error_type=%s",
                 execution.id,
                 type(exc).__name__,
             )
             error_detail = classify_runtime_error(exc)
-            self.state_manager.set_execution_state(
-                db_session, execution, RunStatus.failed, error_detail.message
+            settled_execution = self._finalize_failure(
+                db_session,
+                execution_id=execution_id,
+                expected_worker_id=worker_id,
+                user_id=auth.user_id,
+                error=error_detail.message,
             )
-            self.event_service.emit_execution_failed(
-                event_writer,
-                execution,
-                error_detail.message,
-                error_code=error_detail.code,
-                retryable=error_detail.retryable,
-            )
-            self._finish_attempt(db_session, execution, ExecutionAttemptStatus.failed)
+            if settled_execution is not None:
+                execution = settled_execution
+                if execution.status == RunStatus.cancelled:
+                    self._run_postcommit(
+                        lambda: self.event_service.emit_execution_cancelled(
+                            event_writer,
+                            execution,
+                        ),
+                        execution_id=execution.id,
+                        operation="cancelled event",
+                    )
+                else:
+                    self._run_postcommit(
+                        lambda: self.event_service.emit_execution_failed(
+                            event_writer,
+                            execution,
+                            error_detail.message,
+                            error_code=error_detail.code,
+                            retryable=error_detail.retryable,
+                        ),
+                        execution_id=execution.id,
+                        operation="failed event",
+                    )
         finally:
             if owns_event_writer:
                 close_writer = getattr(event_writer, "close", None)
@@ -356,34 +445,83 @@ class AgentRunner:
             db_session.rollback()
             return None
 
-        now = utcnow()
-        execution.status = RunStatus.cancelled
-        execution.interrupt_payload = {}
-        execution.finished_at = execution.finished_at or now
-        execution.touch_updated_at(now)
-        outbox = db_session.exec(
-            select(ExecutionOutbox)
-            .where(
-                ExecutionOutbox.execution_id == execution.id,
-                ExecutionOutbox.kind == "execute",
-            )
-            .with_for_update()
-        ).one_or_none()
-        if outbox is not None:
-            outbox.status = "cancelled"
-            outbox.locked_by = None
-            outbox.locked_until = None
-            outbox.updated_at = now
-            db_session.add(outbox)
-        db_session.add(execution)
-        self._finish_attempt(
+        settle_execution_cancellation(
             db_session,
             execution,
-            ExecutionAttemptStatus.cancelled,
-            commit=False,
+            now=utcnow(),
         )
         db_session.commit()
         return execution
+
+    def _finalize_failure(
+        self,
+        db_session: Session,
+        *,
+        execution_id: str,
+        expected_worker_id: str,
+        user_id: str,
+        error: str,
+    ) -> AgentExecution | None:
+        user = db_session.exec(
+            select(AppUser)
+            .where(AppUser.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        execution = db_session.exec(
+            select(AgentExecution)
+            .where(AgentExecution.id == execution_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if (
+            execution is None
+            or execution.worker_id != expected_worker_id
+            or execution.status not in {RunStatus.pending, RunStatus.running}
+        ):
+            db_session.rollback()
+            return None
+
+        now = utcnow()
+        if user is None or user.status != "active":
+            settle_execution_cancellation(
+                db_session,
+                execution,
+                now=now,
+                error="USER_DISABLED",
+            )
+        elif execution.cancel_requested_at is not None:
+            settle_execution_cancellation(
+                db_session,
+                execution,
+                now=now,
+            )
+        else:
+            settle_execution_failure(
+                db_session,
+                execution,
+                now=now,
+                error=error,
+            )
+        db_session.commit()
+        return execution
+
+    @staticmethod
+    def _run_postcommit(
+        action: Any,
+        *,
+        execution_id: str,
+        operation: str,
+    ) -> None:
+        try:
+            action()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Execution postcommit %s failed: execution=%s",
+                operation,
+                execution_id,
+                exc_info=True,
+            )
 
     def _load_execution_context(
         self,

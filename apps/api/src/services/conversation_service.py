@@ -45,7 +45,7 @@ from models.schemas import (
     ErrorDetail,
     MessageListRequest,
 )
-from models.user import AdminAuditLog
+from models.user import AdminAuditLog, AppUser
 from services.agent_service import AgentService
 from services.errors import (
     ActiveExecutionExistsError,
@@ -71,6 +71,7 @@ from services.event_stream import (
 from services.execution_lineage import ExecutionLineage
 from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
+from services.execution_settlement import settle_execution_cancellation
 from services.model_configuration_service import ModelConfigurationService
 from services.pagination import (
     MAX_RESPONSE_BYTES,
@@ -860,7 +861,10 @@ class ConversationService:
 
     def _cancel_execution(self, session: Session, execution: AgentExecution) -> AgentExecution:
         locked = session.exec(
-            select(AgentExecution).where(AgentExecution.id == execution.id).with_for_update()
+            select(AgentExecution)
+            .where(AgentExecution.id == execution.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).one_or_none()
         if locked is None or locked.status in TERMINAL_EXECUTION_STATUSES:
             return locked or execution
@@ -868,37 +872,11 @@ class ConversationService:
 
         now = utcnow()
         if locked.status in {RunStatus.pending, RunStatus.waiting_input}:
-            locked.status = RunStatus.cancelled
-            locked.finished_at = now
-            locked.interrupt_payload = {}
-            live_resume_requests = session.exec(
-                select(ExecutionResumeRequest)
-                .where(ExecutionResumeRequest.execution_id == locked.id)
-                .where(ExecutionResumeRequest.status.in_(["pending", "claimed"]))
-                .with_for_update()
-            ).all()
-            for resume_request in live_resume_requests:
-                resume_request.status = "stale"
-                resume_request.updated_at = now
-                session.add(resume_request)
-            outbox = session.exec(
-                select(ExecutionOutbox)
-                .where(
-                    ExecutionOutbox.execution_id == locked.id,
-                    ExecutionOutbox.kind == "execute",
-                )
-                .with_for_update()
-            ).one_or_none()
-            if outbox is not None:
-                outbox.status = "cancelled"
-                outbox.locked_by = None
-                outbox.locked_until = None
-                outbox.updated_at = now
-                session.add(outbox)
+            settle_execution_cancellation(session, locked, now=now)
         else:
             locked.cancel_requested_at = locked.cancel_requested_at or now
-        locked.touch_updated_at(now)
-        session.add(locked)
+            locked.touch_updated_at(now)
+            session.add(locked)
         session.commit()
         session.refresh(locked)
         return locked
@@ -913,8 +891,19 @@ class ConversationService:
         interrupt_id: str,
         decision: str,
     ) -> AgentExecution:
+        user = session.exec(
+            select(AppUser)
+            .where(AppUser.id == invocation.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if user is None or user.status != "active":
+            raise RunInterruptStaleError("The run interrupt is stale.")
         locked = session.exec(
-            select(AgentExecution).where(AgentExecution.id == execution.id).with_for_update()
+            select(AgentExecution)
+            .where(AgentExecution.id == execution.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).one_or_none()
         if locked is None or locked.status != RunStatus.waiting_input:
             raise RunInterruptStaleError("The run interrupt is stale.")

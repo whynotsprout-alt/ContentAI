@@ -11,7 +11,6 @@ from models.chat import (
     AgentInvocation,
     ChatMessage,
     ChatSession,
-    ExecutionOutbox,
 )
 from models.enums import MessageRole, RunStatus
 from models.schemas.admin import (
@@ -28,6 +27,7 @@ from models.schemas.chat import ChatMessageResponse
 from models.user import AdminAuditLog, AppUser, ModelUsage
 from services.auth_service import AuthService, AuthServiceError
 from services.errors import ResponseItemTooLargeError
+from services.execution_settlement import settle_execution_cancellation
 from services.pagination import (
     MAX_RESPONSE_BYTES,
     apply_ascending_cursor,
@@ -519,23 +519,15 @@ class AdminService:
         for execution in executions:
             if execution.status == RunStatus.running:
                 execution.cancel_requested_at = execution.cancel_requested_at or now
+                execution.touch_updated_at(now)
+                session.add(execution)
             else:
-                execution.status = RunStatus.cancelled
-                execution.finished_at = now
-                execution.interrupt_payload = {}
-                execution.error = "USER_DISABLED"
-                outbox = session.exec(
-                    select(ExecutionOutbox).where(
-                        ExecutionOutbox.execution_id == execution.id,
-                        ExecutionOutbox.kind == "execute",
-                    )
-                ).first()
-                if outbox is not None:
-                    outbox.status = "cancelled"
-                    outbox.updated_at = now
-                    session.add(outbox)
-            execution.touch_updated_at(now)
-            session.add(execution)
+                settle_execution_cancellation(
+                    session,
+                    execution,
+                    now=now,
+                    error="USER_DISABLED",
+                )
 
     @staticmethod
     def user_summary(session: Session, user: AppUser) -> AdminUserSummary:

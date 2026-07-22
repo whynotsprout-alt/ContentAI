@@ -16,12 +16,14 @@ from models.agent import AgentProfile, AgentVersion
 from models.base import utcnow
 from models.chat import (
     AgentExecution,
+    AgentExecutionAttempt,
     AgentInvocation,
     ChatMessage,
     ChatSession,
     ExecutionOutbox,
+    ExecutionResumeRequest,
 )
-from models.enums import MessageRole, RunStatus
+from models.enums import ExecutionAttemptStatus, MessageRole, RunStatus
 from models.user import AppUser
 from services import dispatcher as dispatcher_module
 from services import tasks as tasks_module
@@ -581,6 +583,59 @@ def test_worker_claim_at_retry_limit_fails_without_running() -> None:
         assert execution.error == "Execution retry limit exceeded."
 
 
+def test_worker_claim_settles_cancel_fence_without_creating_attempt() -> None:
+    settings = _settings()
+    execution_id = "execution-claim-cancel-fence"
+    _seed_execution(settings, execution_id=execution_id)
+    with Session(get_engine(settings)) as session:
+        execution = session.get(AgentExecution, execution_id)
+        assert execution is not None
+        execution.cancel_requested_at = utcnow()
+        session.add(execution)
+        session.add(
+            ExecutionOutbox(
+                id="outbox-claim-cancel-fence",
+                execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
+                status="published",
+                published_at=utcnow(),
+                payload=_durable_turn_context_payload(
+                    execution_id=execution_id,
+                    invocation_id=f"invocation-{execution_id}",
+                    session_id=f"session-{execution_id}",
+                    user_id=f"user-{execution_id}",
+                    agent_id=f"agent-{execution_id}",
+                    agent_version_id=f"version-{execution_id}",
+                    message_id=f"message-{execution_id}",
+                ),
+            )
+        )
+        session.commit()
+
+    claimed = claim_execution(
+        SimpleNamespace(settings=settings),
+        execution_id,
+        "worker-cancel-fence",
+    )
+
+    assert claimed is None
+    with Session(get_engine(settings)) as session:
+        execution = session.get(AgentExecution, execution_id)
+        outbox = session.get(ExecutionOutbox, "outbox-claim-cancel-fence")
+        attempts = session.exec(
+            select(AgentExecutionAttempt).where(
+                AgentExecutionAttempt.execution_id == execution_id
+            )
+        ).all()
+        assert execution is not None
+        assert execution.status == RunStatus.cancelled
+        assert execution.attempt_count == 0
+        assert execution.finished_at is not None
+        assert outbox is not None
+        assert outbox.status == "cancelled"
+        assert attempts == []
+
+
 def test_recover_expired_lease_requeues_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -624,6 +679,76 @@ def test_recover_expired_lease_requeues_execution(
         assert outbox.available_at <= utcnow()
         assert outbox.locked_by is None
         assert outbox.locked_until is None
+
+
+def test_recover_expired_cancelled_lease_settles_all_delivery_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(max_execution_attempts=3)
+    execution_id = "execution-expired-cancel-fence"
+    _seed_execution(
+        settings,
+        execution_id=execution_id,
+        status=RunStatus.running,
+        attempt_count=1,
+        lease_expires_at=utcnow() - timedelta(seconds=10),
+        worker_id="worker-cancelled",
+    )
+    with Session(get_engine(settings)) as session:
+        attempt = AgentExecutionAttempt(
+            id="attempt-expired-cancel-fence",
+            execution_id=execution_id,
+            ordinal=1,
+            worker_id="worker-cancelled",
+        )
+        session.add(attempt)
+        session.flush()
+        execution = session.get(AgentExecution, execution_id)
+        assert execution is not None
+        execution.current_attempt_id = attempt.id
+        execution.cancel_requested_at = utcnow() - timedelta(seconds=5)
+        session.add(execution)
+        session.add(
+            ExecutionOutbox(
+                id="outbox-expired-cancel-fence",
+                execution_id=execution_id,
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
+                status="published",
+                published_at=utcnow() - timedelta(minutes=1),
+            )
+        )
+        session.add(
+            ExecutionResumeRequest(
+                id="resume-expired-cancel-fence",
+                execution_id=execution_id,
+                interrupt_id="interrupt-expired-cancel-fence",
+                status="claimed",
+                claimed_by="worker-cancelled",
+                claimed_at=utcnow() - timedelta(minutes=1),
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(tasks_module, "get_settings", lambda: settings)
+
+    assert tasks_module.recover_expired_executions.run() == 0
+    with Session(get_engine(settings)) as session:
+        execution = session.get(AgentExecution, execution_id)
+        attempt = session.get(AgentExecutionAttempt, "attempt-expired-cancel-fence")
+        outbox = session.get(ExecutionOutbox, "outbox-expired-cancel-fence")
+        resume = session.get(ExecutionResumeRequest, "resume-expired-cancel-fence")
+        assert execution is not None
+        assert execution.status == RunStatus.cancelled
+        assert execution.finished_at is not None
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.cancelled
+        assert attempt.finished_at is not None
+        assert outbox is not None
+        assert outbox.status == "cancelled"
+        assert outbox.locked_by is None
+        assert outbox.locked_until is None
+        assert resume is not None
+        assert resume.status == "stale"
 
 
 def test_expired_lease_at_retry_limit_fails_execution(

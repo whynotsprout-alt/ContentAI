@@ -15,6 +15,7 @@ from models.enums import ExecutionAttemptKind, ExecutionAttemptStatus, RunStatus
 from services.agent_service import AgentService
 from services.celery_app import celery_app
 from services.execution_claim import claim_execution
+from services.execution_settlement import settle_execution_cancellation
 from services.service_heartbeat import upsert_service_heartbeat
 from services.side_effects import execute_side_effect_job, reconcile_stale_side_effects
 from sqlmodel import Session, select
@@ -179,6 +180,9 @@ def recover_expired_executions() -> int:
             ).all()
         )
         for execution in unclaimed_rows:
+            if execution.cancel_requested_at is not None:
+                settle_execution_cancellation(session, execution, now=now)
+                continue
             error = (
                 "Agent worker did not claim the execution within "
                 f"{settings.agent.worker_claim_timeout_seconds} seconds."
@@ -200,6 +204,9 @@ def recover_expired_executions() -> int:
             ).all()
         )
         for execution in rows:
+            if execution.cancel_requested_at is not None:
+                settle_execution_cancellation(session, execution, now=now)
+                continue
             if execution.current_attempt_id:
                 attempt = session.get(AgentExecutionAttempt, execution.current_attempt_id)
                 if attempt is not None and attempt.finished_at is None:

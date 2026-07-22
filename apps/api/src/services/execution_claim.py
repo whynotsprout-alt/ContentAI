@@ -24,6 +24,7 @@ from models.chat import (
 from models.enums import ExecutionAttemptStatus, MessageRole, RunStatus
 from models.user import AppUser
 from services.execution_resume import load_resume_value, pending_interrupt_descriptors
+from services.execution_settlement import settle_execution_cancellation
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ def claim_execution(
             return None
         now = utcnow()
         if execution.lease_expires_at is not None and execution.lease_expires_at > now:
+            return None
+        if execution.cancel_requested_at is not None:
+            settle_execution_cancellation(session, execution, now=now)
+            session.commit()
             return None
         if execution.attempt_count >= int(service.settings.agent.max_execution_attempts):
             _fail_execution(session, execution, "Execution retry limit exceeded.", now)
@@ -273,21 +278,12 @@ def _cancel_disabled_user_execution(
     execution: AgentExecution,
     now: Any,
 ) -> None:
-    execution.status = RunStatus.cancelled
-    execution.error = "USER_DISABLED"
-    execution.finished_at = now
-    execution.touch_updated_at(now)
-    outbox = session.exec(
-        select(ExecutionOutbox).where(
-            ExecutionOutbox.execution_id == execution.id,
-            ExecutionOutbox.kind == "execute",
-        )
-    ).first()
-    if outbox is not None:
-        outbox.status = "cancelled"
-        outbox.updated_at = now
-        session.add(outbox)
-    session.add(execution)
+    settle_execution_cancellation(
+        session,
+        execution,
+        now=now,
+        error="USER_DISABLED",
+    )
     session.commit()
 
 

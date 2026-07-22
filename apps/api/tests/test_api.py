@@ -1,7 +1,8 @@
 import json
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -242,6 +243,70 @@ def wait_for_terminal_session(client: TestClient, session_id: str) -> dict[str, 
         time.sleep(0.1)
 
     raise AssertionError(f"run did not finish in time: {payload}")
+
+
+@contextmanager
+def paused_execution_dispatcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
+        dispatcher = app.state.conversation_service.execution_dispatcher
+        app.state.conversation_service.execution_dispatcher = None
+        try:
+            yield client
+        finally:
+            app.state.conversation_service.execution_dispatcher = dispatcher
+
+
+def start_pending_execution(client: TestClient, message: str) -> str:
+    chat = client.post(
+        "/api/chat/sessions",
+        json={"agent_id": "default-agent"},
+    ).json()
+    started = client.post(
+        f"/api/chat/sessions/{chat['session_id']}/messages",
+        json={"message": message},
+    )
+    assert started.status_code == 202, started.text
+    return str(started.json()["execution_id"])
+
+
+def claim_pending_execution(
+    client: TestClient,
+    *,
+    service: AgentService,
+    message: str,
+    worker_id: str,
+) -> tuple[str, Any]:
+    execution_id = start_pending_execution(client, message)
+    claimed = claim_execution(
+        service,
+        execution_id,
+        worker_id,
+        use_lease=False,
+    )
+    assert claimed is not None
+    return execution_id, claimed
+
+
+def run_claimed_execution(
+    *,
+    service: AgentService,
+    execution_id: str,
+    claimed: Any,
+    event_writer: Any | None = None,
+) -> None:
+    with Session(get_engine()) as runner_session:
+        service.runner.run(
+            runner_session,
+            execution_id=execution_id,
+            worker_id=claimed.worker_id,
+            auth=claimed.auth,
+            tool_permissions=claimed.auth.tool_permissions,
+            turn_context=claimed.turn_context,
+            event_writer=event_writer,
+        )
 
 
 def wait_for_session_title(client: TestClient, *, expected_title: str) -> list[dict[str, Any]]:
@@ -3087,6 +3152,535 @@ def test_runner_does_not_revive_execution_cancelled_after_claim(
         assert assistants == []
         assert postprocess_outboxes == []
     assert engine_calls == 0
+
+
+@pytest.mark.parametrize("transition", ["cancel", "disable"])
+def test_claimed_execution_cancelled_before_runner_entry_settles_attempt(
+    transition: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message=f"claim entry fence {transition}",
+            worker_id=f"entry-fence-worker-{transition}",
+        )
+
+        if transition == "cancel":
+            response = client.post(f"/api/chat/runs/{execution_id}/cancel")
+            assert response.status_code == 200, response.text
+        else:
+            with Session(get_engine()) as disabling_session:
+                user = disabling_session.get(AppUser, claimed.auth.user_id)
+                assert user is not None
+                user.status = "disabled"
+                disabling_session.add(user)
+                app.state.admin_service._disable_user_runtime(
+                    disabling_session,
+                    claimed.auth.user_id,
+                )
+                disabling_session.commit()
+
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.cancelled
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.cancelled
+        assert attempt.finished_at is not None
+        outbox = verification_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "execute",
+            )
+        ).one()
+        assert outbox.status == "cancelled"
+
+
+@pytest.mark.parametrize("transition", ["cancel", "disable", "takeover"])
+def test_waiting_input_transition_rechecks_worker_user_and_cancel_fences(
+    transition: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            return None
+
+    interrupt_payload = {
+        "interrupts": [
+            {
+                "id": f"interrupt-waiting-fence-{transition}",
+                "value": {"tool_calls": [{"name": "remember", "args": {}}]},
+            }
+        ]
+    }
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message=f"waiting fence {transition}",
+            worker_id=f"waiting-fence-worker-{transition}",
+        )
+
+        def transition_before_interrupt(**_kwargs: Any) -> Any:
+            with Session(get_engine()) as competing_session:
+                execution = competing_session.get(AgentExecution, execution_id)
+                assert execution is not None
+                if transition == "cancel":
+                    execution.cancel_requested_at = utcnow()
+                    competing_session.add(execution)
+                elif transition == "disable":
+                    user = competing_session.get(AppUser, claimed.auth.user_id)
+                    assert user is not None
+                    user.status = "disabled"
+                    competing_session.add(user)
+                    execution.cancel_requested_at = utcnow()
+                    competing_session.add(execution)
+                else:
+                    replacement_attempt = AgentExecutionAttempt(
+                        execution_id=execution_id,
+                        ordinal=execution.attempt_count + 1,
+                        worker_id="waiting-fence-worker-new",
+                    )
+                    competing_session.add(replacement_attempt)
+                    competing_session.flush()
+                    execution.attempt_count += 1
+                    execution.current_attempt_id = replacement_attempt.id
+                    execution.worker_id = "waiting-fence-worker-new"
+                    competing_session.add(execution)
+                competing_session.commit()
+            return SimpleNamespace(
+                interrupt_payload=interrupt_payload,
+                assistant_message=None,
+                streamed_assistant_text="",
+            )
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            transition_before_interrupt,
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=_Writer(),
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        if transition == "takeover":
+            assert execution.status == RunStatus.running
+            assert execution.worker_id == "waiting-fence-worker-new"
+            replacement_attempt = verification_session.get(
+                AgentExecutionAttempt,
+                execution.current_attempt_id,
+            )
+            assert replacement_attempt is not None
+            assert replacement_attempt.status == ExecutionAttemptStatus.running
+            assert replacement_attempt.finished_at is None
+        else:
+            assert execution.status == RunStatus.cancelled
+            assert execution.error == ("USER_DISABLED" if transition == "disable" else "")
+            attempt = verification_session.get(
+                AgentExecutionAttempt,
+                execution.current_attempt_id,
+            )
+            assert attempt is not None
+            assert attempt.status == ExecutionAttemptStatus.cancelled
+            assert attempt.finished_at is not None
+
+
+def test_waiting_input_state_and_attempt_commit_before_event_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CrashingWriter:
+        def emit(self, event_name: str, _payload: dict[str, Any]) -> None:
+            if event_name == "attempt_end":
+                raise SystemExit("crash after waiting-input commit")
+
+    interrupt_payload = {
+        "interrupts": [
+            {
+                "id": "interrupt-waiting-atomic",
+                "value": {"tool_calls": [{"name": "remember", "args": {}}]},
+            }
+        ]
+    }
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message="waiting transition must be atomic",
+            worker_id="waiting-atomic-worker",
+        )
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            lambda **_kwargs: SimpleNamespace(
+                interrupt_payload=interrupt_payload,
+                assistant_message=None,
+                streamed_assistant_text="",
+            ),
+        )
+        with pytest.raises(SystemExit, match="crash after waiting-input commit"):
+            run_claimed_execution(
+                service=service,
+                execution_id=execution_id,
+                claimed=claimed,
+                event_writer=_CrashingWriter(),
+            )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.waiting_input
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.waiting_input
+        assert attempt.finished_at is not None
+
+
+def test_generic_failure_after_assistant_flush_rolls_back_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            return None
+
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message="generic failure after assistant flush",
+            worker_id="generic-after-flush-worker",
+        )
+
+        def flush_then_fail(**kwargs: Any) -> Any:
+            service.runner.execution_engine.message_persister.persist_assistant_text(
+                kwargs["db_session"],
+                session_id=kwargs["chat"].id,
+                invocation_id=kwargs["invocation"].id,
+                execution_id=kwargs["execution"].id,
+                content="must not survive generic failure",
+                event_writer=kwargs["event_writer"],
+            )
+            raise RuntimeError("generic failure after flush")
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            flush_then_fail,
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=_Writer(),
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.failed
+        assistants = verification_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        assert assistants == []
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.failed
+        assert attempt.finished_at is not None
+
+
+def test_postcommit_projection_failure_does_not_rewrite_completed_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailOnceWriter:
+        def __init__(self) -> None:
+            self.failed = False
+
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("postcommit projection failed")
+
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message="postcommit projection failure",
+            worker_id="postcommit-projection-worker",
+        )
+
+        def persist_final_assistant(**kwargs: Any) -> Any:
+            persister = service.runner.execution_engine.message_persister
+            assistant = persister.persist_assistant_text(
+                kwargs["db_session"],
+                session_id=kwargs["chat"].id,
+                invocation_id=kwargs["invocation"].id,
+                execution_id=kwargs["execution"].id,
+                content="completed before projection",
+                event_writer=kwargs["event_writer"],
+            )
+            return SimpleNamespace(
+                interrupt_payload=None,
+                assistant_message=assistant,
+                streamed_assistant_text="",
+            )
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            persist_final_assistant,
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=_FailOnceWriter(),
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.completed
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.completed
+
+
+def test_failed_event_projection_cannot_interrupt_attempt_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingWriter:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            raise RuntimeError("failed event projection failed")
+
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message="failed projection settlement",
+            worker_id="failed-projection-worker",
+        )
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("turn failed")),
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=_FailingWriter(),
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.failed
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.failed
+        assert attempt.finished_at is not None
+
+
+def test_generic_failure_from_old_worker_does_not_override_new_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Writer:
+        def emit(self, _event_name: str, _payload: dict[str, Any]) -> None:
+            return None
+
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.agent_service
+        execution_id, claimed = claim_pending_execution(
+            client,
+            service=service,
+            message="old worker generic failure",
+            worker_id="generic-old-worker",
+        )
+
+        def takeover_then_fail(**_kwargs: Any) -> Any:
+            with Session(get_engine()) as takeover_session:
+                execution = takeover_session.get(AgentExecution, execution_id)
+                assert execution is not None
+                replacement_attempt = AgentExecutionAttempt(
+                    execution_id=execution_id,
+                    ordinal=execution.attempt_count + 1,
+                    worker_id="generic-new-worker",
+                )
+                takeover_session.add(replacement_attempt)
+                takeover_session.flush()
+                execution.attempt_count += 1
+                execution.current_attempt_id = replacement_attempt.id
+                execution.worker_id = "generic-new-worker"
+                takeover_session.add(execution)
+                takeover_session.commit()
+            raise RuntimeError("old worker failed after takeover")
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            takeover_then_fail,
+        )
+        run_claimed_execution(
+            service=service,
+            execution_id=execution_id,
+            claimed=claimed,
+            event_writer=_Writer(),
+        )
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.running
+        assert execution.worker_id == "generic-new-worker"
+        attempt = verification_session.get(
+            AgentExecutionAttempt,
+            execution.current_attempt_id,
+        )
+        assert attempt is not None
+        assert attempt.status == ExecutionAttemptStatus.running
+        assert attempt.finished_at is None
+
+
+def test_cancel_reloads_locked_execution_before_terminal_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.conversation_service
+        original_scope_load = service._get_execution_in_scope
+        execution_id = start_pending_execution(
+            client,
+            "cancel must refresh after locking",
+        )
+
+        def load_then_complete(*args: Any, **kwargs: Any) -> Any:
+            loaded = original_scope_load(*args, **kwargs)
+            with Session(get_engine()) as completing_session:
+                execution = completing_session.get(AgentExecution, execution_id)
+                assert execution is not None
+                execution.status = RunStatus.completed
+                execution.finished_at = utcnow()
+                completing_session.add(execution)
+                completing_session.commit()
+            return loaded
+
+        monkeypatch.setattr(service, "_get_execution_in_scope", load_then_complete)
+        response = client.post(f"/api/chat/runs/{execution_id}/cancel")
+        assert response.status_code == 200, response.text
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        assert execution.status == RunStatus.completed
+
+
+@pytest.mark.parametrize("transition", ["cancel", "disable"])
+def test_resume_reloads_locked_execution_and_rechecks_active_user(
+    transition: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interrupt_id = f"interrupt-resume-fence-{transition}"
+    with paused_execution_dispatcher(monkeypatch) as client:
+        service = app.state.conversation_service
+        original_scope_load = service._get_execution_in_scope
+        execution_id = start_pending_execution(client, f"resume fence {transition}")
+        with Session(get_engine()) as setup_session:
+            execution = setup_session.get(AgentExecution, execution_id)
+            assert execution is not None
+            execution.status = RunStatus.waiting_input
+            execution.interrupt_payload = {
+                "interrupts": [
+                    {
+                        "id": interrupt_id,
+                        "value": {
+                            "tool_calls": [
+                                {
+                                    "name": "remember",
+                                    "args": {
+                                        "content": "resume fence preference",
+                                        "kind": "preference",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+            setup_session.add(execution)
+            setup_session.commit()
+
+        def load_then_transition(*args: Any, **kwargs: Any) -> Any:
+            loaded = original_scope_load(*args, **kwargs)
+            with Session(get_engine()) as competing_session:
+                if transition == "cancel":
+                    execution = competing_session.get(AgentExecution, execution_id)
+                    assert execution is not None
+                    execution.status = RunStatus.cancelled
+                    execution.finished_at = utcnow()
+                    competing_session.add(execution)
+                else:
+                    user = competing_session.get(AppUser, "local-user")
+                    assert user is not None
+                    user.status = "disabled"
+                    competing_session.add(user)
+                competing_session.commit()
+            return loaded
+
+        monkeypatch.setattr(service, "_get_execution_in_scope", load_then_transition)
+        response = client.post(
+            f"/api/chat/runs/{execution_id}/resume",
+            json={"interrupt_id": interrupt_id, "decision": "approve"},
+        )
+        assert response.status_code == 409, response.text
+
+    with Session(get_engine()) as verification_session:
+        execution = verification_session.get(AgentExecution, execution_id)
+        assert execution is not None
+        expected = RunStatus.cancelled if transition == "cancel" else RunStatus.waiting_input
+        assert execution.status == expected
+        resume_requests = verification_session.exec(
+            select(ExecutionResumeRequest).where(
+                ExecutionResumeRequest.execution_id == execution_id
+            )
+        ).all()
+        assert resume_requests == []
 
 
 def test_cancel_after_assistant_flush_rolls_back_final_message(
