@@ -34,12 +34,26 @@ class ModelGateway:
         self._close_lock = threading.Lock()
         self._closed = False
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        with self._close_lock:
+            if self._closed:
+                return True
+            completed = self.client.close()
+            if completed is not False:
+                self._closed = True
+            return completed is not False
+
+    async def aclose(self) -> None:
         with self._close_lock:
             if self._closed:
                 return
+        close_async = getattr(self.client, "aclose", None)
+        if callable(close_async):
+            await close_async()
+        else:
+            self.client.close()
+        with self._close_lock:
             self._closed = True
-        self.client.close()
 
     def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
         return self.client.build_chat_model(

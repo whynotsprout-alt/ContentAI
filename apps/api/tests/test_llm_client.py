@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import time
+from concurrent.futures import Future
 from typing import Any
 
 import httpx
@@ -89,11 +92,15 @@ def test_langchain_client_closes_owned_http_clients_once(monkeypatch) -> None:
         def __init__(self, **_kwargs: Any) -> None:
             self.close_count = 0
 
+        def close_from_sync(self) -> bool:
+            self.close_count += 1
+            return True
+
         async def aclose(self) -> None:
             self.close_count += 1
 
     monkeypatch.setattr(client_module.httpx, "Client", SyncClient)
-    monkeypatch.setattr(client_module.httpx, "AsyncClient", AsyncClient)
+    monkeypatch.setattr(client_module, "_OwnerLoopAsyncClient", AsyncClient)
     client = LangChainChatClient(
         base_url="https://models.example.test/v1",
         api_key=SecretStr("test-key"),
@@ -105,6 +112,166 @@ def test_langchain_client_closes_owned_http_clients_once(monkeypatch) -> None:
 
     assert client._http_client.close_count == 1
     assert client._http_async_client.close_count == 1
+
+
+def test_async_http_client_closes_on_its_request_owner_loop(monkeypatch) -> None:
+    class LoopBoundTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.request_loop = None
+            self.close_loop = None
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.request_loop = asyncio.get_running_loop()
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        async def aclose(self) -> None:
+            self.close_loop = asyncio.get_running_loop()
+            if self.close_loop is not self.request_loop:
+                raise RuntimeError("async transport closed outside its owner loop")
+
+    transport = LoopBoundTransport()
+    monkeypatch.setattr(client_module, "PinnedAsyncModelTransport", lambda **_kwargs: transport)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+
+    asyncio.run(client._http_async_client.get("https://models.example.test/v1/models"))
+    client.close()
+
+    assert transport.close_loop is transport.request_loop
+
+
+def test_async_http_stream_stays_on_its_request_owner_loop(monkeypatch) -> None:
+    class LoopBoundStream(httpx.AsyncByteStream):
+        def __init__(self, owner_loop: asyncio.AbstractEventLoop) -> None:
+            self.owner_loop = owner_loop
+            self.iteration_loop = None
+            self.close_loop = None
+
+        async def __aiter__(self):
+            self.iteration_loop = asyncio.get_running_loop()
+            if self.iteration_loop is not self.owner_loop:
+                raise RuntimeError("async stream consumed outside its owner loop")
+            yield b"streamed"
+
+        async def aclose(self) -> None:
+            self.close_loop = asyncio.get_running_loop()
+            if self.close_loop is not self.owner_loop:
+                raise RuntimeError("async stream closed outside its owner loop")
+
+    class StreamingTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.request_loop = None
+            self.stream = None
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.request_loop = asyncio.get_running_loop()
+            self.stream = LoopBoundStream(self.request_loop)
+            return httpx.Response(200, stream=self.stream, request=request)
+
+    transport = StreamingTransport()
+    monkeypatch.setattr(client_module, "PinnedAsyncModelTransport", lambda **_kwargs: transport)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+
+    async def consume_stream() -> bytes:
+        async with client._http_async_client.stream(
+            "GET", "https://models.example.test/v1/chat/completions"
+        ) as response:
+            return b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    assert asyncio.run(consume_stream()) == b"streamed"
+    client.close()
+    assert transport.stream.iteration_loop is transport.request_loop
+    assert transport.stream.close_loop is transport.request_loop
+
+
+def test_immediate_async_close_completion_does_not_reenter_close_lock(monkeypatch) -> None:
+    client = client_module._OwnerLoopAsyncClient(
+        transport=httpx.MockTransport(lambda _request: None)
+    )
+
+    class ImmediateFuture(Future[None]):
+        def add_done_callback(self, fn) -> None:
+            assert not client._close_state_lock.locked()
+            super().add_done_callback(fn)
+
+    def complete_immediately(coroutine, _loop) -> Future[None]:
+        coroutine.close()
+        future: Future[None] = ImmediateFuture()
+        future.set_result(None)
+        return future
+
+    monkeypatch.setattr(client_module.asyncio, "run_coroutine_threadsafe", complete_immediately)
+    try:
+        client._submit_close()
+    finally:
+        owner_loop = client._owner_loop
+        if owner_loop is not None and not client._owner_stopped.is_set():
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+        client._owner_thread.join(timeout=1.0)
+
+
+def test_async_http_client_close_failure_can_be_retried(monkeypatch) -> None:
+    class FlakyCloseTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.close_attempts = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        async def aclose(self) -> None:
+            self.close_attempts += 1
+            if self.close_attempts == 1:
+                raise RuntimeError("first close failed")
+
+    transport = FlakyCloseTransport()
+    monkeypatch.setattr(client_module, "PinnedAsyncModelTransport", lambda **_kwargs: transport)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+
+    with pytest.raises(RuntimeError, match="first close failed"):
+        client.close()
+    client.close()
+
+    assert transport.close_attempts == 2
+
+
+def test_close_called_from_running_loop_never_synchronously_joins(monkeypatch) -> None:
+    class SlowCloseTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0.2)
+
+    monkeypatch.setattr(
+        client_module,
+        "PinnedAsyncModelTransport",
+        lambda **_kwargs: SlowCloseTransport(),
+    )
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+
+    async def exercise() -> float:
+        started_at = time.perf_counter()
+        client.close()
+        elapsed = time.perf_counter() - started_at
+        await asyncio.sleep(0.25)
+        return elapsed
+
+    assert asyncio.run(exercise()) < 0.05
 
 
 def test_model_gateway_close_delegates_once() -> None:

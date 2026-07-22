@@ -350,12 +350,8 @@ class AgentExecutionEngine:
             user_id=invocation.user_id,
             allowed_hotspot_sources=allowed_hotspot_sources,
             topic_scoring_prompt=agent_version.topic_scoring_prompt,
-            hotspot_filter_model=self.container.gateway_for_model_config(
-                execution.model_config_id
-            ).build_hotspot_filter_model(),
-            research_model_gateway=self.container.gateway_for_model_config(
-                execution.model_config_id
-            ),
+            hotspot_filter_model=runtime.gateway.build_hotspot_filter_model(),
+            research_model_gateway=runtime.gateway,
             event_writer=event_writer,
             tool_policies={
                 registration.name: {

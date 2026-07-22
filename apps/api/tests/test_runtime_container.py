@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,21 @@ class _ClosableGateway:
         self.close_count += 1
 
 
+class _UsageTrackingModel:
+    def __init__(self, gateway: _ClosableGateway) -> None:
+        self.gateway = gateway
+
+    def invoke(self, input: Any) -> Any:
+        if self.gateway.close_count:
+            raise RuntimeError("model gateway was closed while the runtime still referenced it")
+        return input
+
+
+class _UsageTrackingGateway(_ClosableGateway):
+    def build_agent_model(self, *, tools: list[Any] | None = None) -> _UsageTrackingModel:
+        return _UsageTrackingModel(self)
+
+
 def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
     gateway = _Gateway()
     compiled_graph = object()
@@ -65,7 +81,8 @@ def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
         session_id="thread-b",
     )
 
-    assert first.graph is second.graph is compiled_graph
+    assert first.graph is second.graph
+    assert first.graph._value is compiled_graph
     assert gateway.build_count == 1
     assert len(compile_calls) == 1
     assert "store" not in compile_calls[0]
@@ -104,10 +121,11 @@ def test_runtime_model_and_graph_caches_are_lru_bounded(monkeypatch) -> None:
         tools=container.get_tools(first_permissions),
         tool_permissions=first_permissions,
     )
-    assert len(container._model_cache) == 2
-    assert len(container._graph_cache) == 2
-    assert first_key not in container._model_cache
-    assert second_key not in container._graph_cache
+    entry = container._runtime_entries["model-config-v1"]
+    assert len(entry.models) == 2
+    assert len(entry.graphs) == 2
+    assert first_key not in entry.models
+    assert second_key not in entry.graphs
 
 
 def test_runtime_cache_isolates_model_configuration_versions(monkeypatch) -> None:
@@ -220,7 +238,7 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
     assert calls == 1
 
 
-def test_gateway_cache_closes_evicted_and_shutdown_gateways_once(monkeypatch) -> None:
+def test_gateway_cache_closes_retired_gateways_after_last_handle_once(monkeypatch) -> None:
     settings = get_settings().model_copy(deep=True)
     settings.agent.runtime_cache_capacity = 1
     created: dict[str, _ClosableGateway] = {}
@@ -248,14 +266,141 @@ def test_gateway_cache_closes_evicted_and_shutdown_gateways_once(monkeypatch) ->
     first = container.gateway_for_model_config("model-config-v1")
     second = container.gateway_for_model_config("model-config-v2")
 
-    assert first.close_count == 1
-    assert second.close_count == 0
+    assert created["model-config-v1"].close_count == 0
+    assert created["model-config-v2"].close_count == 0
+
+    del first
+    gc.collect()
+
+    assert created["model-config-v1"].close_count == 1
 
     container.close()
     container.close()
 
     assert created["model-config-v1"].close_count == 1
+    assert created["model-config-v2"].close_count == 0
+
+    del second
+    gc.collect()
+
     assert created["model-config-v2"].close_count == 1
+
+
+def test_runtime_reference_keeps_gateway_alive_after_capacity_eviction(monkeypatch) -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.agent.runtime_cache_capacity = 1
+    created: dict[str, _UsageTrackingGateway] = {}
+
+    def get_runtime_by_id(_service, _session, model_config_id: str):
+        return SimpleNamespace(
+            id=model_config_id,
+            base_url="https://models.example.test/v1",
+            api_key=SecretStr("test-secret"),
+            model_name="test-model",
+        )
+
+    def build_gateway(**kwargs: Any) -> _UsageTrackingGateway:
+        gateway = _UsageTrackingGateway(**kwargs)
+        created[gateway.model_config_id] = gateway
+        return gateway
+
+    monkeypatch.setattr(
+        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        get_runtime_by_id,
+    )
+    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr(
+        "agent.runtime.container.build_agent_graph",
+        lambda **kwargs: kwargs["model"],
+    )
+    container = RuntimeContainer(settings=settings, checkpointer=object())
+
+    first = container.create_runtime(
+        model_config_id="model-config-v1",
+        user_id="user-1",
+        agent_id="agent-1",
+        session_id="session-1",
+    )
+    container.create_runtime(
+        model_config_id="model-config-v2",
+        user_id="user-2",
+        agent_id="agent-2",
+        session_id="session-2",
+    )
+
+    assert created["model-config-v1"].close_count == 0
+    assert first.graph.invoke("still usable") == "still usable"
+
+    del first
+    gc.collect()
+
+    assert created["model-config-v1"].close_count == 1
+
+
+def test_in_flight_graph_keeps_gateway_alive_during_capacity_eviction(monkeypatch) -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.agent.runtime_cache_capacity = 1
+    invocation_started = threading.Event()
+    release_invocation = threading.Event()
+    created: dict[str, _UsageTrackingGateway] = {}
+
+    class BlockingModel(_UsageTrackingModel):
+        def invoke(self, input: Any) -> Any:
+            invocation_started.set()
+            assert release_invocation.wait(timeout=2.0)
+            return super().invoke(input)
+
+    class BlockingGateway(_UsageTrackingGateway):
+        def build_agent_model(self, *, tools: list[Any] | None = None) -> BlockingModel:
+            return BlockingModel(self)
+
+    def get_runtime_by_id(_service, _session, model_config_id: str):
+        return SimpleNamespace(
+            id=model_config_id,
+            base_url="https://models.example.test/v1",
+            api_key=SecretStr("test-secret"),
+            model_name="test-model",
+        )
+
+    def build_gateway(**kwargs: Any) -> BlockingGateway:
+        gateway = BlockingGateway(**kwargs)
+        created[gateway.model_config_id] = gateway
+        return gateway
+
+    monkeypatch.setattr(
+        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        get_runtime_by_id,
+    )
+    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr(
+        "agent.runtime.container.build_agent_graph",
+        lambda **kwargs: kwargs["model"],
+    )
+    container = RuntimeContainer(settings=settings, checkpointer=object())
+    first_graph = container.create_runtime(
+        model_config_id="model-config-v1",
+        user_id="user-1",
+        agent_id="agent-1",
+        session_id="session-1",
+    ).graph
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        invocation = executor.submit(first_graph.invoke, "completed")
+        assert invocation_started.wait(timeout=2.0)
+        container.create_runtime(
+            model_config_id="model-config-v2",
+            user_id="user-2",
+            agent_id="agent-2",
+            session_id="session-2",
+        )
+        assert created["model-config-v1"].close_count == 0
+        release_invocation.set()
+        assert invocation.result(timeout=2.0) == "completed"
+
+    del first_graph
+    gc.collect()
+
+    assert created["model-config-v1"].close_count == 1
 
 
 def test_tool_registry_exposes_complete_execution_contract() -> None:
