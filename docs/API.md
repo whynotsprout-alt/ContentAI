@@ -68,7 +68,7 @@ Agent 仅属于当前 `user_id`。创建请求包含 `name`、`description`、`t
 | POST | `/api/admin/model-config/probe` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、可选 model_name / 标准化地址、候选模型、验证结果、延迟 | 测试候选；空 Key 只会沿用当前 active Key，首次配置会返回 `MODEL_CREDENTIALS_REQUIRED` |
 | PUT | `/api/admin/model-config` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、model_name、expected_version / 新 active 配置元数据 | 保存前服务端重做完整 probe；首次配置必须提供 Key，空 Key 仅沿用当前 active Key |
 
-模型配置的稳定错误码为：`MODEL_NOT_CONFIGURED`（503）、`MODEL_CREDENTIALS_REQUIRED`（422）、`MODEL_ENDPOINT_FORBIDDEN`（422）、`MODEL_CONFIG_CHANGED`（409）、`MODEL_AUTH_FAILED`（422）、`MODEL_NOT_FOUND`（422）、`MODEL_PROVIDER_UNREACHABLE`（502）和 `MODEL_PROBE_FAILED`（502）。这些响应、模型配置请求校验错误和成功响应均不会回显 API Key、密文、Authorization 或远端响应正文。
+模型配置的稳定错误码为：`MODEL_NOT_CONFIGURED`（503）、`MODEL_CREDENTIALS_REQUIRED`（422）、`MODEL_ENDPOINT_FORBIDDEN`（422）、`MODEL_CONFIG_CHANGED`（409）、`MODEL_CONFIG_PERSISTENCE_FAILED`（503）、`MODEL_AUTH_FAILED`（422）、`MODEL_NOT_FOUND`（422）、`MODEL_PROVIDER_UNREACHABLE`（502）和 `MODEL_PROBE_FAILED`（502）。这些响应、模型配置请求校验错误和成功响应均不会回显 API Key、密文、Authorization 或远端响应正文。
 
 ## 契约约束
 

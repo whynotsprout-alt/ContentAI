@@ -33,6 +33,7 @@ const saving = ref(false);
 const initialLoadFailed = ref(false);
 const versionSyncFailed = ref(false);
 const errorMessage = ref('');
+const errorKind = ref<'load' | 'probe' | 'save' | ''>('');
 const successMessage = ref('');
 let applyingServerState = false;
 
@@ -56,6 +57,7 @@ const errorCopy: Record<string, string> = {
   MODEL_NOT_FOUND: '模型服务无法使用这个模型 ID，请刷新候选或检查自定义值。',
   MODEL_PROVIDER_UNREACHABLE: '暂时无法连接模型服务，请检查地址和网络。',
   MODEL_PROBE_FAILED: '模型服务返回了无法验证的结果，请稍后重试。',
+  MODEL_CONFIG_PERSISTENCE_FAILED: '模型配置保存失败，请稍后重试。',
   MODEL_CONFIG_CHANGED: '配置已被其他管理员更新，已刷新为最新版本，请核对后重试。'
 };
 
@@ -81,6 +83,7 @@ async function loadConfiguration(options: { preserveForm?: boolean; background?:
   if (!options.background) {
     loading.value = true;
     errorMessage.value = '';
+    errorKind.value = '';
   }
   try {
     const result = await adminApi.modelConfig();
@@ -97,6 +100,7 @@ async function loadConfiguration(options: { preserveForm?: boolean; background?:
     if (!options.background) {
       initialLoadFailed.value = true;
       errorMessage.value = formatError(value);
+      errorKind.value = 'load';
     }
     if (options.propagate) throw value;
   } finally {
@@ -111,12 +115,15 @@ async function retryInitialLoad() {
 async function retryVersionSync() {
   saving.value = true;
   errorMessage.value = '';
+  errorKind.value = '';
   try {
     await loadConfiguration({ preserveForm: true, background: true, propagate: true });
     errorMessage.value = errorCopy.MODEL_CONFIG_CHANGED;
+    errorKind.value = 'save';
   } catch {
     versionSyncFailed.value = true;
     errorMessage.value = '配置已变化，但暂时无法刷新最新版本；请重新同步后再保存。';
+    errorKind.value = 'save';
   } finally {
     saving.value = false;
   }
@@ -128,6 +135,7 @@ async function runProbe(includeModel: boolean) {
   const request = probeGuard.begin();
   probing.value = true;
   errorMessage.value = '';
+  errorKind.value = '';
   successMessage.value = '';
   try {
     const result = await adminApi.probeModelConfig(requestPayload);
@@ -149,7 +157,10 @@ async function runProbe(includeModel: boolean) {
       applyingServerState = false;
     }
   } catch (value) {
-    if (probeGuard.isCurrent(request)) errorMessage.value = formatError(value);
+    if (probeGuard.isCurrent(request)) {
+      errorMessage.value = formatError(value);
+      errorKind.value = 'probe';
+    }
   } finally {
     if (probeGuard.isLatest(request)) probing.value = false;
   }
@@ -165,6 +176,7 @@ async function saveConfiguration() {
   const request = saveGuard.begin();
   saving.value = true;
   errorMessage.value = '';
+  errorKind.value = '';
   successMessage.value = '';
   try {
     const result = await adminApi.updateModelConfig(requestPayload);
@@ -181,20 +193,26 @@ async function saveConfiguration() {
       applyingServerState = false;
     }
   } catch (error) {
-    if (!saveGuard.isCurrent(request)) return;
     if (error instanceof ApiError && error.code === 'MODEL_CONFIG_CHANGED') {
       try {
         await loadConfiguration({ preserveForm: true, background: true, propagate: true });
-        errorMessage.value = errorCopy.MODEL_CONFIG_CHANGED;
+        if (saveGuard.isCurrent(request)) {
+          errorMessage.value = errorCopy.MODEL_CONFIG_CHANGED;
+          errorKind.value = 'save';
+        }
       } catch {
-        versionSyncFailed.value = true;
-        errorMessage.value = '配置已变化，但暂时无法刷新最新版本；请重新同步后再保存。';
+        if (saveGuard.isCurrent(request)) {
+          versionSyncFailed.value = true;
+          errorMessage.value = '配置已变化，但暂时无法刷新最新版本；请重新同步后再保存。';
+          errorKind.value = 'save';
+        }
       }
-    } else {
+    } else if (saveGuard.isCurrent(request)) {
       errorMessage.value = formatError(error);
+      errorKind.value = 'save';
     }
   } finally {
-    saving.value = false;
+    if (saveGuard.isLatest(request)) saving.value = false;
   }
 }
 
@@ -207,6 +225,10 @@ watch([baseUrl, apiKey], () => {
   modelsTruncated.value = false;
   latencyMs.value = null;
   successMessage.value = '';
+  if (errorKind.value === 'probe') {
+    errorMessage.value = '';
+    errorKind.value = '';
+  }
 }, { flush: 'sync' });
 
 watch(modelName, () => {
@@ -216,6 +238,10 @@ watch(modelName, () => {
   probing.value = false;
   latencyMs.value = null;
   successMessage.value = '';
+  if (errorKind.value === 'probe') {
+    errorMessage.value = '';
+    errorKind.value = '';
+  }
 }, { flush: 'sync' });
 
 onMounted(() => void loadConfiguration());

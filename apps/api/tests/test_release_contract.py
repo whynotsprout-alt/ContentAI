@@ -66,6 +66,13 @@ def test_release_diff_files_have_one_canonical_eof_newline() -> None:
         assert not content.endswith((b"\n\n", b"\r\n\r\n")), relative_path
 
 
+def test_model_config_persistence_failure_is_a_documented_stable_code() -> None:
+    api_documentation = (ROOT / "docs/API.md").read_text(encoding="utf-8")
+
+    assert "MODEL_CONFIG_PERSISTENCE_FAILED" in api_documentation
+    assert "503" in api_documentation
+
+
 def test_release_package_uses_the_fixed_head_tree(tmp_path: Path) -> None:
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:

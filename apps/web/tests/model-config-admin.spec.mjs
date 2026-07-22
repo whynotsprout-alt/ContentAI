@@ -79,6 +79,18 @@ describe('admin model configuration', () => {
     expect(models).toContain('saveGuard.isCurrent');
   });
 
+  it('clears only stale probe feedback and preserves draft while every conflict refreshes the active version', async () => {
+    const models = await read('../src/views/AdminModelsView.vue');
+
+    expect(models).toContain("MODEL_CONFIG_PERSISTENCE_FAILED: '模型配置保存失败，请稍后重试。'");
+    expect(models).toContain("const errorKind = ref<'load' | 'probe' | 'save' | ''>('');");
+    expect(models).toContain("if (errorKind.value === 'probe') {");
+    expect(models).toContain("errorKind.value = 'probe';");
+    expect(models).toMatch(/if \(error instanceof ApiError && error\.code === 'MODEL_CONFIG_CHANGED'\) \{\s*try \{\s*await loadConfiguration\(\{ preserveForm: true, background: true, propagate: true \}\);/);
+    expect(models).toContain('if (saveGuard.isCurrent(request)) {');
+    expect(models).toContain('if (saveGuard.isLatest(request)) saving.value = false;');
+  });
+
   it('provides a keyboard skip target and route focus management in the shared shell', async () => {
     const [shell, styles] = await Promise.all([
       read('../src/components/AdminShell.vue'),
