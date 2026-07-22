@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import threading
+import time
 from collections.abc import Sequence
 from importlib import import_module
 
@@ -367,6 +368,117 @@ def test_runtime_async_transport_bounds_dns_without_blocking_event_loop() -> Non
     asyncio.run(exercise())
 
     assert requests == []
+
+
+def test_runtime_async_transport_timeout_does_not_delay_asyncio_run_shutdown() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    resolver_finished = threading.Event()
+    release_resolver = threading.Event()
+
+    def blocking_resolver(_host: str, _port: int) -> Sequence[str]:
+        resolver_started.set()
+        try:
+            release_resolver.wait(timeout=0.4)
+            return ["93.184.216.34"]
+        finally:
+            resolver_finished.set()
+
+    async def exercise() -> None:
+        transport = network.PinnedAsyncModelTransport(
+            base_url="https://api.example.test/v1",
+            resolver=blocking_resolver,
+            resolver_timeout_seconds=0.02,
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        )
+        async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
+            with pytest.raises(network.ModelProviderUnreachable):
+                await client.get("https://api.example.test/v1/models")
+
+    started_at = time.perf_counter()
+    try:
+        asyncio.run(exercise())
+        elapsed = time.perf_counter() - started_at
+    finally:
+        release_resolver.set()
+        assert resolver_finished.wait(timeout=1.0)
+
+    assert resolver_started.is_set()
+    assert elapsed < 0.15
+
+
+def test_bounded_resolver_executor_limits_queue_and_shuts_down_without_waiting() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_executor = network._BoundedResolverExecutor(max_workers=1, max_queue_size=1)
+
+    def blocking_resolver() -> str:
+        resolver_started.set()
+        release_resolver.wait(timeout=1.0)
+        return "resolved"
+
+    first = resolver_executor.submit(blocking_resolver)
+    assert resolver_started.wait(timeout=1.0)
+    queued = resolver_executor.submit(lambda: "queued")
+    with pytest.raises(network._ResolverExecutorSaturated):
+        resolver_executor.submit(lambda: "overflow")
+
+    started_at = time.perf_counter()
+    resolver_executor.shutdown(wait=False, cancel_futures=True)
+    shutdown_elapsed = time.perf_counter() - started_at
+    try:
+        assert shutdown_elapsed < 0.1
+    finally:
+        release_resolver.set()
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert first.result(timeout=1.0) == "resolved"
+    assert queued.cancelled()
+
+
+def test_runtime_async_transport_bounds_repeated_timed_out_resolvers() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_calls = 0
+    resolver_executor = network._BoundedResolverExecutor(max_workers=1, max_queue_size=0)
+
+    def blocking_resolver(_host: str, _port: int) -> Sequence[str]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        resolver_started.set()
+        release_resolver.wait(timeout=1.0)
+        return ["93.184.216.34"]
+
+    async def exercise() -> list[float]:
+        transport = network.PinnedAsyncModelTransport(
+            base_url="https://api.example.test/v1",
+            resolver=blocking_resolver,
+            resolver_timeout_seconds=0.02,
+            resolver_executor=resolver_executor,
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        )
+        elapsed_requests: list[float] = []
+        async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
+            for _ in range(4):
+                started_at = time.perf_counter()
+                with pytest.raises(network.ModelProviderUnreachable) as exc_info:
+                    await client.get("https://api.example.test/v1/models")
+                elapsed_requests.append(time.perf_counter() - started_at)
+                assert exc_info.value.__cause__ is None
+                assert exc_info.value.__context__ is None
+        return elapsed_requests
+
+    try:
+        elapsed_requests = asyncio.run(exercise())
+    finally:
+        release_resolver.set()
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert resolver_started.is_set()
+    assert resolver_calls == 1
+    assert max(elapsed_requests) < 0.15
 
 
 def test_runtime_client_never_follows_provider_redirects() -> None:

@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import os
+import queue
 import socket
+import threading
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from time import monotonic
+from typing import Any, TypeVar
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 import httpx
@@ -16,8 +21,11 @@ MAX_MODEL_ID_LENGTH = 256
 MAX_PROBE_RESPONSE_BYTES = 256 * 1024
 MAX_PROBE_LATENCY_MS = 60_000
 DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS = 3.0
+_ASYNC_RESOLVER_MAX_WORKERS = 4
+_ASYNC_RESOLVER_MAX_QUEUE_SIZE = 8
 
 Resolver = Callable[[str, int], Sequence[str]]
+_Result = TypeVar("_Result")
 
 _IPV4_ENTERPRISE_NETWORKS = tuple(
     ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -32,6 +40,116 @@ _METADATA_ADDRESSES = {
     ipaddress.ip_address("168.63.129.16"),
     ipaddress.ip_address("fd00:ec2::254"),
 }
+
+
+class _ResolverExecutorSaturated(RuntimeError):
+    pass
+
+
+class _BoundedResolverExecutor:
+    def __init__(self, *, max_workers: int, max_queue_size: int) -> None:
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
+        if max_queue_size < 0:
+            raise ValueError("max_queue_size must not be negative")
+        self._slots = threading.BoundedSemaphore(max_workers + max_queue_size)
+        self._tasks: queue.SimpleQueue[
+            tuple[Future[Any], Callable[..., Any], tuple[Any, ...], dict[str, Any]] | None
+        ] = queue.SimpleQueue()
+        self._state_lock = threading.Lock()
+        self._shutdown = False
+        self._cancel_pending = False
+        self._threads = tuple(
+            threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"model-dns-resolver-{index}",
+            )
+            for index in range(max_workers)
+        )
+        for thread in self._threads:
+            thread.start()
+
+    def submit(
+        self,
+        call: Callable[..., _Result],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Future[_Result]:
+        if not self._slots.acquire(blocking=False):
+            raise _ResolverExecutorSaturated
+        future: Future[_Result] = Future()
+        with self._state_lock:
+            if self._shutdown:
+                self._slots.release()
+                raise _ResolverExecutorSaturated
+            self._tasks.put((future, call, args, kwargs))
+        return future
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        with self._state_lock:
+            self._cancel_pending = self._cancel_pending or cancel_futures
+            if not self._shutdown:
+                self._shutdown = True
+                for _ in self._threads:
+                    self._tasks.put(None)
+            threads = self._threads
+        if wait:
+            for thread in threads:
+                thread.join()
+
+    def _run(self) -> None:
+        while True:
+            task = self._tasks.get()
+            if task is None:
+                return
+            future, call, args, kwargs = task
+            try:
+                with self._state_lock:
+                    should_run = not self._cancel_pending and future.set_running_or_notify_cancel()
+                if not should_run:
+                    future.cancel()
+                    continue
+                try:
+                    future.set_result(call(*args, **kwargs))
+                except BaseException as exc:  # noqa: BLE001
+                    future.set_exception(exc)
+            finally:
+                self._slots.release()
+
+
+_async_resolver_executor: _BoundedResolverExecutor | None = None
+_async_resolver_executor_pid: int | None = None
+_async_resolver_executor_lock = threading.Lock()
+
+
+def _get_async_resolver_executor() -> _BoundedResolverExecutor:
+    global _async_resolver_executor, _async_resolver_executor_pid
+    current_pid = os.getpid()
+    with _async_resolver_executor_lock:
+        if (
+            _async_resolver_executor is None
+            or _async_resolver_executor_pid != current_pid
+        ):
+            _async_resolver_executor = _BoundedResolverExecutor(
+                max_workers=_ASYNC_RESOLVER_MAX_WORKERS,
+                max_queue_size=_ASYNC_RESOLVER_MAX_QUEUE_SIZE,
+            )
+            _async_resolver_executor_pid = current_pid
+        return _async_resolver_executor
+
+
+def _reset_async_resolver_executor_after_fork() -> None:
+    global _async_resolver_executor, _async_resolver_executor_pid
+    global _async_resolver_executor_lock
+    _async_resolver_executor = None
+    _async_resolver_executor_pid = None
+    _async_resolver_executor_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_async_resolver_executor_after_fork)
 
 
 class ModelProbeError(RuntimeError):
@@ -310,31 +428,41 @@ class PinnedAsyncModelTransport(httpx.AsyncBaseTransport):
         base_url: str,
         resolver: Resolver = resolve_host_addresses,
         resolver_timeout_seconds: float = DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS,
+        resolver_executor: _BoundedResolverExecutor | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url
         self._resolver = resolver
         self._resolver_timeout_seconds = max(0.01, float(resolver_timeout_seconds))
+        self._resolver_executor = resolver_executor
         self._transport = transport or httpx.AsyncHTTPTransport(
             trust_env=False,
             retries=0,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        resolution_timed_out = False
+        resolution_failed = False
         try:
-            pinned_url, host_header, sni_hostname = await asyncio.wait_for(
-                asyncio.to_thread(
-                    _pinned_request_target,
-                    str(request.url),
-                    self._base_url,
-                    self._resolver,
-                ),
-                timeout=self._resolver_timeout_seconds,
+            resolver_future = (
+                self._resolver_executor or _get_async_resolver_executor()
+            ).submit(
+                _pinned_request_target,
+                str(request.url),
+                self._base_url,
+                self._resolver,
             )
-        except TimeoutError:
-            resolution_timed_out = True
-        if resolution_timed_out:
+        except _ResolverExecutorSaturated:
+            resolution_failed = True
+        if not resolution_failed:
+            try:
+                pinned_url, host_header, sni_hostname = await asyncio.wait_for(
+                    asyncio.wrap_future(resolver_future),
+                    timeout=self._resolver_timeout_seconds,
+                )
+            except TimeoutError:
+                resolver_future.cancel()
+                resolution_failed = True
+        if resolution_failed:
             raise ModelProviderUnreachable("The model provider could not be reached.")
         headers = request.headers.copy()
         headers["Host"] = host_header
