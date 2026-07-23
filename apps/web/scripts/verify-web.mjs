@@ -122,6 +122,21 @@ const targetUser = {
   usage_coverage: 0.92
 };
 
+const reviewerUser = {
+  ...targetUser,
+  id: 'user-reviewer',
+  email: 'reviewer@contentai.test',
+  role: 'admin',
+  agent_count: 1,
+  conversation_count: 3,
+  input_tokens: 18200,
+  output_tokens: 2100,
+  total_tokens: 20300,
+  usage_call_count: 6,
+  missing_usage_call_count: 0,
+  usage_coverage: 1
+};
+
 const adminSessionSummary = {
   session_id: 'admin-session-1',
   user_id: targetUser.id,
@@ -406,12 +421,12 @@ async function installApiMocks(page, state) {
       });
     }
     if (path === '/api/admin/users' && method === 'GET') {
-      return fulfillJson(route, { items: [targetUser], next_cursor: null });
+      return fulfillJson(route, { items: [targetUser, reviewerUser], next_cursor: null });
     }
-    if (path === `/api/admin/users/${targetUser.id}` && method === 'GET') {
-      return fulfillJson(route, targetUser);
-    }
-    if (path === `/api/admin/users/${targetUser.id}/sessions` && method === 'GET') {
+    const adminUserSessionsMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/sessions$/);
+    if (adminUserSessionsMatch && method === 'GET') {
+      const user = [targetUser, reviewerUser].find((item) => item.id === adminUserSessionsMatch[1]);
+      if (!user) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'user not found' } }, 404);
       return url.searchParams.has('cursor')
         ? fulfillJson(route, { items: [olderAdminSession], next_cursor: null })
         : fulfillJson(route, { items: adminSessionSummaries, next_cursor: 'session-cursor-1' });
@@ -419,17 +434,43 @@ async function installApiMocks(page, state) {
     if (path === '/api/admin/usage' && method === 'GET') {
       return fulfillJson(route, { items: usageBuckets });
     }
-    if (path === `/api/admin/users/${targetUser.id}/temporary-password` && method === 'POST') {
+    const temporaryPasswordMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/temporary-password$/);
+    if (temporaryPasswordMatch && method === 'POST') {
+      const userId = temporaryPasswordMatch[1];
+      const user = [targetUser, reviewerUser].find((item) => item.id === userId);
+      if (!user) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'user not found' } }, 404);
+      const delay = state.temporaryPasswordDelays?.[userId] ?? 0;
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (state.temporaryPasswordFailureUserId === userId) {
+        return fulfillJson(route, { detail: { code: 'PASSWORD_SERVICE_UNAVAILABLE', message: '临时密码服务暂不可用' } }, 503);
+      }
       state.temporaryPasswordCount = (state.temporaryPasswordCount ?? 0) + 1;
       return fulfillJson(route, {
-        temporary_password: `one-time-secret-${state.temporaryPasswordCount}`,
+        temporary_password: state.temporaryPasswordSecrets?.[userId] ?? `one-time-secret-${state.temporaryPasswordCount}`,
         expires_at: '2026-07-15T10:07:00.000Z'
       });
+    }
+    const adminUserMatch = path.match(/^\/api\/admin\/users\/([^/]+)$/);
+    if (adminUserMatch && method === 'GET') {
+      const userId = adminUserMatch[1];
+      const user = [targetUser, reviewerUser].find((item) => item.id === userId);
+      if (!user) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'user not found' } }, 404);
+      const delay = state.adminUserDetailDelays?.[userId] ?? 0;
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (state.adminUserDetailFailureUserId === userId) {
+        return fulfillJson(route, { detail: { code: 'USER_DETAIL_UNAVAILABLE', message: '用户详情暂不可用' } }, 502);
+      }
+      return fulfillJson(route, user);
     }
     const adminMessageMatch = path.match(/^\/api\/admin\/sessions\/([^/]+)\/messages$/);
     if (adminMessageMatch && method === 'GET') {
       const session = adminSessionSummaries.find((item) => item.session_id === adminMessageMatch[1]);
       if (!session) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'session not found' } }, 404);
+      const delay = state.adminSessionDelays?.[session.session_id] ?? 0;
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (state.adminSessionFailureId === session.session_id) {
+        return fulfillJson(route, { detail: { code: 'SESSION_MESSAGES_UNAVAILABLE', message: '会话消息暂不可用' } }, 502);
+      }
       return url.searchParams.has('cursor')
         ? fulfillJson(route, { items: [{ id: 'audit-6', role: 'assistant', message_type: 'text', content: '补充加载的审计消息。', created_at: fixedNow }], next_cursor: null })
         : fulfillJson(route, { items: adminSessionDetail.messages, next_cursor: 'message-cursor-1' });
@@ -438,6 +479,11 @@ async function installApiMocks(page, state) {
     if (adminDetailMatch && method === 'GET') {
       const session = adminSessionSummaries.find((item) => item.session_id === adminDetailMatch[1]);
       if (!session) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'session not found' } }, 404);
+      const delay = state.adminSessionDelays?.[session.session_id] ?? 0;
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (state.adminSessionFailureId === session.session_id) {
+        return fulfillJson(route, { detail: { code: 'SESSION_DETAIL_UNAVAILABLE', message: '会话详情暂不可用' } }, 502);
+      }
       return fulfillJson(route, { ...adminSessionDetail, ...session });
     }
     if (path === '/api/admin/model-config' && method === 'GET') {
@@ -1114,6 +1160,7 @@ async function runResponsiveAdminAcceptance(browser) {
     unexpectedApiCalls: [],
     pageErrors: [],
     consoleErrors: [],
+    expectedConsoleResourceErrors: 0,
     failedResponses: [],
     failedRequests: [],
     mediaRequests: [],
@@ -1121,15 +1168,38 @@ async function runResponsiveAdminAcceptance(browser) {
     modelLoadFailure: false,
     modelPutPayloads: [],
     agentDeleted: false,
-    temporaryPasswordCount: 0
+    temporaryPasswordCount: 0,
+    expectedFailedResponses: [],
+    temporaryPasswordDelays: {},
+    temporaryPasswordSecrets: {},
+    temporaryPasswordFailureUserId: null,
+    adminUserDetailDelays: {},
+    adminUserDetailFailureUserId: null,
+    adminSessionDelays: {},
+    adminSessionFailureId: null
   };
   const screenshots = [];
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
   page.on('console', (message) => {
-    if (message.type() === 'error') state.consoleErrors.push(message.text());
+    if (message.type() !== 'error') return;
+    if (
+      state.expectedConsoleResourceErrors > 0
+      && message.text().startsWith('Failed to load resource: the server responded with a status of')
+    ) {
+      state.expectedConsoleResourceErrors -= 1;
+      return;
+    }
+    state.consoleErrors.push(message.text());
   });
   page.on('response', (response) => {
-    if (response.status() >= 400) state.failedResponses.push(`${response.status()} ${response.url()}`);
+    if (response.status() < 400) return;
+    const signature = `${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`;
+    const expectedIndex = state.expectedFailedResponses.indexOf(signature);
+    if (expectedIndex >= 0) {
+      state.expectedFailedResponses.splice(expectedIndex, 1);
+      return;
+    }
+    state.failedResponses.push(`${response.status()} ${response.url()}`);
   });
   page.on('requestfailed', (request) => {
     state.failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'unknown'}`);
@@ -1169,8 +1239,20 @@ async function runResponsiveAdminAcceptance(browser) {
     await capture(page, '04a-admin-users-360x800-detail.png', screenshots);
 
     const generatePassword = page.getByRole('button', { name: '生成临时密码', exact: true });
+    state.temporaryPasswordFailureUserId = targetUser.id;
+    state.expectedConsoleResourceErrors += 1;
+    state.expectedFailedResponses.push(`503 POST /api/admin/users/${targetUser.id}/temporary-password`);
+    await generatePassword.click();
+    const detailFailureAlert = page.locator('.admin-detail-panel').getByRole('alert');
+    await expectVisible(detailFailureAlert, '360px 详情操作 5xx 错误');
+    assert.match(await detailFailureAlert.innerText(), /临时密码服务暂不可用/, '详情操作错误应显示在当前可见详情面板');
+    await detailFailureAlert.scrollIntoViewIfNeeded();
+    await capture(page, '04g-admin-users-360x800-error.png', screenshots);
+    state.temporaryPasswordFailureUserId = null;
+
     await generatePassword.click();
     await expectVisible(page.getByRole('heading', { name: '临时密码（仅显示一次）', exact: true }), '临时密码弹窗');
+    await expectVisible(page.locator('.admin-temporary-password-dialog').getByText(targetUser.email, { exact: true }), '临时密码目标邮箱');
     await expectVisible(page.getByText('one-time-secret-1', { exact: true }), '一次性临时密码');
     await expectVisible(page.getByText(/有效期至/), '临时密码到期时间');
     await page.getByRole('button', { name: '复制临时密码', exact: true }).click();
@@ -1219,6 +1301,12 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectVisible(page.locator('.admin-audit-sessions'), '768px 会话索引');
     await expectHidden(page.locator('.admin-transcript'), '768px 初始 transcript');
     const sessionTarget = page.locator('[data-session-id="admin-session-17"]');
+    state.adminSessionFailureId = 'admin-session-17';
+    state.expectedConsoleResourceErrors += 2;
+    state.expectedFailedResponses.push(
+      '502 GET /api/admin/sessions/admin-session-17',
+      '502 GET /api/admin/sessions/admin-session-17/messages'
+    );
     const savedScrollTop = await sessionTarget.evaluate((element) => {
       const list = element.closest('.admin-audit-sessions');
       list.scrollTop = list.scrollHeight;
@@ -1232,7 +1320,23 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectHidden(page.locator('.admin-audit-sessions'), '768px transcript 态会话索引');
     await expectVisible(page.locator('.admin-transcript'), '768px transcript');
     await expectFocused(auditBack, '768px transcript 焦点应进入返回按钮');
+    const auditFailureAlert = page.locator('.admin-audit-window').getByRole('alert');
+    await expectVisible(auditFailureAlert, '768px 当前审计状态 5xx 错误');
+    assert.match(await auditFailureAlert.innerText(), /会话.+暂不可用/, '审计错误应显示在当前可见 transcript');
+    await capture(page, '05c-admin-audit-768x1024-error.png', screenshots);
+    state.adminSessionFailureId = null;
+    await page.getByRole('button', { name: '重试加载会话', exact: true }).click();
     await expectVisible(page.getByText(auditLongContent, { exact: true }), '长中文、URL 与无空格内容');
+    state.adminSessionFailureId = 'admin-session-17';
+    state.expectedConsoleResourceErrors += 1;
+    state.expectedFailedResponses.push('502 GET /api/admin/sessions/admin-session-17/messages');
+    await page.getByRole('button', { name: '加载更多消息', exact: true }).click();
+    const messagePaginationAlert = page.locator('.admin-audit-window').getByRole('alert');
+    await expectVisible(messagePaginationAlert, '768px 消息翻页 5xx 错误');
+    assert.match(await messagePaginationAlert.innerText(), /会话消息暂不可用/, '消息翻页错误应显示在当前 transcript');
+    state.adminSessionFailureId = null;
+    await page.getByRole('button', { name: '重试加载消息', exact: true }).click();
+    await expectVisible(page.getByText('补充加载的审计消息。', { exact: true }), '消息翻页失败后的恢复路径');
     await expectNoHorizontalOverflow(page.locator('.admin-audit-window'), '768px 会话审计窗口');
     await expectNoHorizontalOverflow(page.locator('.admin-session-transcript'), '768px transcript');
     await expectPlainAdminSurfaces(page, '768px 会话 transcript');
@@ -1287,11 +1391,55 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectVisible(page.locator('.admin-list-panel'), '1280px 用户列表');
     await expectVisible(page.locator('.admin-detail-panel'), '1280px 用户详情栏');
     await expectHidden(page.getByRole('button', { name: '返回用户列表', exact: true }), '1280px 紧凑返回按钮');
-    await page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email }).click();
+    const targetUserRow = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
+    const reviewerUserRow = page.locator('.admin-table tbody tr').filter({ hasText: reviewerUser.email });
+    state.adminUserDetailDelays[targetUser.id] = 280;
+    state.adminUserDetailDelays[reviewerUser.id] = 20;
+    await targetUserRow.click();
+    await reviewerUserRow.click();
+    await expectVisible(page.getByRole('heading', { name: reviewerUser.email, exact: true }), '1280px 快速选择的用户详情');
+    await page.waitForTimeout(340);
+    await expectVisible(page.getByRole('heading', { name: reviewerUser.email, exact: true }), '慢响应不得覆盖快速用户选择');
+    await expectHidden(page.getByRole('heading', { name: targetUser.email, exact: true }), '过期用户详情不得重新显示');
+    state.adminUserDetailDelays[targetUser.id] = 0;
+    state.adminUserDetailDelays[reviewerUser.id] = 0;
+
+    await targetUserRow.click();
     await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), '1280px 用户详情');
     const userColumns = await page.locator('.admin-workspace').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(userColumns, /\d+px \d+px/, `1280px 用户页应为双栏：${userColumns}`);
     await capture(page, '04f-admin-users-1280x800.png', screenshots);
+
+    await page.getByRole('button', { name: /查看会话记录/ }).click();
+    await expectVisible(page.locator('.admin-audit-sessions'), '1280px 会话索引');
+    state.adminSessionDelays['admin-session-2'] = 280;
+    state.adminSessionDelays['admin-session-3'] = 20;
+    await page.locator('[data-session-id="admin-session-2"]').click();
+    await page.locator('[data-session-id="admin-session-3"]').click();
+    await expectVisible(page.getByRole('heading', { name: '审计会话 03', exact: true }), '快速会话 B');
+    await page.waitForTimeout(340);
+    await expectVisible(page.getByRole('heading', { name: '审计会话 03', exact: true }), '慢会话 A 不得覆盖 B');
+    assert.equal(await page.locator('.admin-transcript').getAttribute('aria-busy'), 'false', '过期会话 finally 不得污染当前 loading');
+    state.adminSessionDelays['admin-session-2'] = 0;
+    state.adminSessionDelays['admin-session-3'] = 280;
+    await page.getByRole('button', { name: '加载更多消息', exact: true }).click();
+    await page.locator('[data-session-id="admin-session-4"]').click();
+    await expectVisible(page.getByRole('heading', { name: '审计会话 04', exact: true }), '消息翻页中切换到会话 B');
+    await page.waitForTimeout(340);
+    assert.equal(await page.locator('.admin-transcript').getAttribute('aria-busy'), 'false', '切换会话必须使旧消息翻页 finally 与 loading 失效');
+    state.adminSessionDelays['admin-session-3'] = 0;
+    await page.getByRole('button', { name: '关闭会话审计', exact: true }).click();
+
+    state.temporaryPasswordDelays[targetUser.id] = 280;
+    state.temporaryPasswordSecrets[targetUser.id] = 'stale-secret-for-creator';
+    await generatePassword.click();
+    await reviewerUserRow.click();
+    await expectVisible(page.getByRole('heading', { name: reviewerUser.email, exact: true }), '切换后的用户 B 详情');
+    await page.waitForTimeout(340);
+    await expectHidden(page.getByRole('heading', { name: '临时密码（仅显示一次）', exact: true }), '用户切换后旧临时密码弹窗');
+    assert.equal((await page.locator('body').innerText()).includes('stale-secret-for-creator'), false, '用户 A 的过期密码响应不得显示或保留');
+    await expectVisible(page.getByText('上一位用户的临时密码请求已取消，未显示任何密码。', { exact: true }), '过期密码响应的非敏感提示');
+    await capture(page, '04h-admin-users-1280x800-stale-password.png', screenshots);
 
     await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
     await expectResponsiveShell(1280, '1280px 模型页');
@@ -1307,7 +1455,9 @@ async function runResponsiveAdminAcceptance(browser) {
     assert.deepEqual(state.unexpectedApiCalls, [], `响应式后台存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `响应式后台脚本错误：${state.pageErrors.join(' | ')}`);
     assert.deepEqual(state.consoleErrors, [], `响应式后台控制台错误：${state.consoleErrors.join(' | ')}`);
+    assert.equal(state.expectedConsoleResourceErrors, 0, '响应式后台预期控制台资源错误数量不匹配');
     assert.deepEqual(state.failedResponses, [], `响应式后台存在失败响应：${state.failedResponses.join(' | ')}`);
+    assert.deepEqual(state.expectedFailedResponses, [], `响应式后台预期失败响应未发生：${state.expectedFailedResponses.join(' | ')}`);
     assert.deepEqual(state.failedRequests, [], `响应式后台存在失败请求：${state.failedRequests.join(' | ')}`);
     return { screenshots, apiCalls: state.apiCalls };
   } finally {

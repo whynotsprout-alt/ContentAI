@@ -19,6 +19,7 @@ import { ApiError, adminApi, type AdminSessionDetail, type AdminSessionSummary, 
 import { useAuthStore } from '../stores/auth';
 import AccessibleDialog from '../components/AccessibleDialog.vue';
 import AdminShell from '../components/AdminShell.vue';
+import { createAdminRequestGenerationGuard } from './adminRequestGeneration';
 
 const auth = useAuthStore();
 const users = ref<AdminUser[]>([]);
@@ -28,10 +29,16 @@ const status = ref('');
 const cursorHistory = ref<string[]>([]);
 const nextCursor = ref<string | null>(null);
 const loading = ref(false);
+const detailLoading = ref(false);
 const actionLoading = ref(false);
-const error = ref('');
+const listError = ref('');
+const detailError = ref('');
+const detailErrorKind = ref<'load' | 'action' | ''>('');
+const auditError = ref('');
+const auditRetryKind = ref<'session' | 'sessions' | 'messages' | ''>('');
 const notice = ref('');
-const temporaryPassword = ref<{ value: string; expiresAt: string } | null>(null);
+const temporaryPassword = ref<{ value: string; expiresAt: string; userId: string; userEmail: string } | null>(null);
+const passwordRequestPending = ref(false);
 const copyFeedback = ref<{ message: string; error: boolean } | null>(null);
 const userDetailOpen = ref(false);
 const userListPanel = ref<HTMLElement | null>(null);
@@ -53,6 +60,10 @@ const auditPaginationLoading = ref(false);
 const usage = ref<AdminUsageBucket[]>([]);
 const confirmStatusChange = ref(false);
 const confirmRoleChange = ref(false);
+const userRequestGuard = createAdminRequestGenerationGuard();
+const sessionRequestGuard = createAdminRequestGenerationGuard();
+const auditPaginationRequestGuard = createAdminRequestGenerationGuard();
+const passwordRequestGuard = createAdminRequestGenerationGuard();
 let searchTimer = 0;
 
 const pageNumber = computed(() => cursorHistory.value.length + 1);
@@ -73,41 +84,75 @@ function parseError(value: unknown) {
 
 async function load() {
   loading.value = true;
-  error.value = '';
+  listError.value = '';
   try {
     const result = await adminApi.users({ search: search.value.trim(), status: status.value, cursor: currentCursor.value, limit: 50 });
     users.value = result.items;
     nextCursor.value = result.next_cursor;
     if (selected.value) selected.value = users.value.find((user) => user.id === selected.value?.id) ?? selected.value;
   } catch (value) {
-    error.value = parseError(value);
+    listError.value = parseError(value);
   } finally {
     loading.value = false;
   }
 }
 
 async function selectUser(user: AdminUser) {
+  const previousUserId = selected.value?.id ?? null;
+  const discardedPassword = passwordRequestPending.value || Boolean(temporaryPassword.value);
+  passwordRequestGuard.invalidate();
+  if (passwordRequestPending.value) actionLoading.value = false;
+  passwordRequestPending.value = false;
+  closeTemporaryPassword();
+  closeAudit();
+
+  const request = userRequestGuard.begin();
+  const userId = user.id;
   selected.value = user;
   userDetailOpen.value = true;
-  notice.value = '';
-  closeTemporaryPassword();
-  error.value = '';
+  notice.value = discardedPassword
+    ? previousUserId && previousUserId !== userId
+      ? '上一位用户的临时密码请求已取消，未显示任何密码。'
+      : '临时密码请求已取消，未显示任何密码。'
+    : '';
+  detailError.value = '';
+  detailErrorKind.value = '';
+  detailLoading.value = true;
+  sessions.value = [];
+  sessionsNextCursor.value = null;
+  usage.value = [];
+  selectedSession.value = null;
+  selectedSessionId.value = null;
+  messagesNextCursor.value = null;
   if (isCompactAdmin()) {
     await nextTick();
     detailBackButton.value?.focus({ preventScroll: true });
   }
   try {
-    selected.value = await adminApi.user(user.id);
-    const [sessionResult, usageResult] = await Promise.all([adminApi.sessions(user.id), adminApi.usage({ user_id: user.id })]);
+    const [detail, sessionResult, usageResult] = await Promise.all([
+      adminApi.user(userId),
+      adminApi.sessions(userId),
+      adminApi.usage({ user_id: userId })
+    ]);
+    if (!userRequestGuard.isCurrent(request) || selected.value?.id !== userId) return;
+    selected.value = detail;
     sessions.value = sessionResult.items;
     sessionsNextCursor.value = sessionResult.next_cursor;
     usage.value = usageResult.items;
-    selectedSession.value = null;
-    selectedSessionId.value = null;
-    messagesNextCursor.value = null;
   } catch (value) {
-    error.value = parseError(value);
+    if (!userRequestGuard.isCurrent(request) || selected.value?.id !== userId) return;
+    detailError.value = parseError(value);
+    detailErrorKind.value = 'load';
+  } finally {
+    if (userRequestGuard.isCurrent(request) && selected.value?.id === userId) {
+      detailLoading.value = false;
+    }
   }
+}
+
+function retrySelectedUser() {
+  if (!selected.value || detailLoading.value) return;
+  void selectUser(selected.value);
 }
 
 async function focusUserListTarget() {
@@ -117,8 +162,14 @@ async function focusUserListTarget() {
 }
 
 function returnToUserList() {
+  userRequestGuard.invalidate();
+  detailLoading.value = false;
+  passwordRequestGuard.invalidate();
+  if (passwordRequestPending.value) actionLoading.value = false;
+  passwordRequestPending.value = false;
   userDetailOpen.value = false;
   closeTemporaryPassword();
+  closeAudit();
   void focusUserListTarget();
 }
 
@@ -129,9 +180,16 @@ function onUserRowKeydown(event: KeyboardEvent, user: AdminUser) {
 }
 
 async function selectSession(session: AdminSessionSummary) {
-  error.value = '';
-  selectedSessionId.value = session.session_id;
-  if (isCompactAdmin()) {
+  if (!selected.value || !auditOpen.value) return;
+  auditPaginationRequestGuard.invalidate();
+  auditPaginationLoading.value = false;
+  const request = sessionRequestGuard.begin();
+  const userId = selected.value.id;
+  const sessionId = session.session_id;
+  auditError.value = '';
+  auditRetryKind.value = '';
+  selectedSessionId.value = sessionId;
+  if (isCompactAdmin() && !auditDetailOpen.value) {
     sessionListScrollTop.value = sessionListPanel.value?.scrollTop ?? sessionListScrollTop.value;
     auditDetailOpen.value = true;
     await nextTick();
@@ -141,15 +199,35 @@ async function selectSession(session: AdminSessionSummary) {
   sessionLoading.value = true;
   try {
     const [detail, messages] = await Promise.all([
-      adminApi.sessionDetail(session.session_id),
-      adminApi.sessionMessages(session.session_id)
+      adminApi.sessionDetail(sessionId),
+      adminApi.sessionMessages(sessionId)
     ]);
+    if (
+      !sessionRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selected.value?.id !== userId
+      || selectedSessionId.value !== sessionId
+    ) return;
     selectedSession.value = { ...detail, messages: messages.items };
     messagesNextCursor.value = messages.next_cursor;
   } catch (value) {
-    error.value = parseError(value);
+    if (
+      !sessionRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selected.value?.id !== userId
+      || selectedSessionId.value !== sessionId
+    ) return;
+    auditError.value = parseError(value);
+    auditRetryKind.value = 'session';
   } finally {
-    sessionLoading.value = false;
+    if (
+      sessionRequestGuard.isCurrent(request)
+      && auditOpen.value
+      && selected.value?.id === userId
+      && selectedSessionId.value === sessionId
+    ) {
+      sessionLoading.value = false;
+    }
   }
 }
 
@@ -157,6 +235,8 @@ function openSessionAudit() {
   if (!sessions.value.length) return;
   auditOpen.value = true;
   auditDetailOpen.value = false;
+  auditError.value = '';
+  auditRetryKind.value = '';
   if (!isCompactAdmin()) {
     const current = sessions.value.find((session) => session.session_id === selectedSessionId.value) ?? sessions.value[0];
     void selectSession(current);
@@ -175,14 +255,21 @@ async function returnToAuditList() {
 }
 
 function closeAudit() {
+  sessionRequestGuard.invalidate();
+  auditPaginationRequestGuard.invalidate();
   auditOpen.value = false;
   auditDetailOpen.value = false;
+  sessionLoading.value = false;
+  auditPaginationLoading.value = false;
+  auditError.value = '';
+  auditRetryKind.value = '';
 }
 
 async function toggleUser() {
   if (!selected.value) return;
   actionLoading.value = true;
-  error.value = '';
+  detailError.value = '';
+  detailErrorKind.value = '';
   notice.value = '';
   try {
     selected.value = selected.value.status === 'disabled'
@@ -192,7 +279,8 @@ async function toggleUser() {
     confirmStatusChange.value = false;
     await load();
   } catch (value) {
-    error.value = parseError(value);
+    detailError.value = parseError(value);
+    detailErrorKind.value = 'action';
   } finally {
     actionLoading.value = false;
   }
@@ -200,37 +288,80 @@ async function toggleUser() {
 
 async function sendReset() {
   if (!selected.value || !canResetPassword.value) return;
+  const userId = selected.value.id;
+  const userEmail = selected.value.email;
+  const request = passwordRequestGuard.begin();
+  passwordRequestPending.value = true;
   actionLoading.value = true;
-  error.value = '';
+  detailError.value = '';
+  detailErrorKind.value = '';
   notice.value = '';
   closeTemporaryPassword();
   try {
-    const result = await adminApi.temporaryPassword(selected.value.id);
+    const result = await adminApi.temporaryPassword(userId);
+    if (
+      !passwordRequestGuard.isCurrent(request)
+      || selected.value?.id !== userId
+      || !userDetailOpen.value
+    ) return;
     actionLoading.value = false;
     await nextTick();
+    if (
+      !passwordRequestGuard.isCurrent(request)
+      || selected.value?.id !== userId
+      || !userDetailOpen.value
+    ) return;
     resetPasswordButton.value?.focus({ preventScroll: true });
-    temporaryPassword.value = { value: result.temporary_password, expiresAt: result.expires_at };
+    temporaryPassword.value = {
+      value: result.temporary_password,
+      expiresAt: result.expires_at,
+      userId,
+      userEmail
+    };
   } catch (value) {
-    error.value = parseError(value);
+    if (!passwordRequestGuard.isCurrent(request) || selected.value?.id !== userId) return;
+    detailError.value = parseError(value);
+    detailErrorKind.value = 'action';
   } finally {
-    actionLoading.value = false;
+    if (passwordRequestGuard.isCurrent(request) && selected.value?.id === userId) {
+      passwordRequestPending.value = false;
+      actionLoading.value = false;
+    }
   }
 }
 
 async function loadMoreSessions() {
   if (!selected.value || !sessionsNextCursor.value || auditPaginationLoading.value) return;
   const userId = selected.value.id;
+  const request = auditPaginationRequestGuard.begin();
   auditPaginationLoading.value = true;
-  error.value = '';
+  auditError.value = '';
+  auditRetryKind.value = '';
   try {
     const result = await adminApi.sessions(userId, sessionsNextCursor.value);
-    if (selected.value?.id !== userId) return;
+    if (
+      !auditPaginationRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selected.value?.id !== userId
+    ) return;
     sessions.value.push(...result.items);
     sessionsNextCursor.value = result.next_cursor;
   } catch (value) {
-    error.value = parseError(value);
+    if (
+      !auditPaginationRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selected.value?.id !== userId
+    ) return;
+    auditError.value = parseError(value);
+    auditRetryKind.value = 'sessions';
   } finally {
-    auditPaginationLoading.value = false;
+    if (
+      auditPaginationRequestGuard.isCurrent(request)
+      && auditOpen.value
+      && selected.value?.id === userId
+    ) {
+      auditPaginationLoading.value = false;
+    }
   }
 }
 
@@ -253,17 +384,50 @@ async function copyTemporaryPassword() {
 async function loadMoreMessages() {
   if (!selectedSession.value || !messagesNextCursor.value || auditPaginationLoading.value) return;
   const sessionId = selectedSession.value.session_id;
+  const request = auditPaginationRequestGuard.begin();
   auditPaginationLoading.value = true;
-  error.value = '';
+  auditError.value = '';
+  auditRetryKind.value = '';
   try {
     const result = await adminApi.sessionMessages(sessionId, messagesNextCursor.value);
-    if (selectedSession.value?.session_id !== sessionId) return;
+    if (
+      !auditPaginationRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selectedSession.value?.session_id !== sessionId
+    ) return;
     selectedSession.value.messages.push(...result.items);
     messagesNextCursor.value = result.next_cursor;
   } catch (value) {
-    error.value = parseError(value);
+    if (
+      !auditPaginationRequestGuard.isCurrent(request)
+      || !auditOpen.value
+      || selectedSession.value?.session_id !== sessionId
+    ) return;
+    auditError.value = parseError(value);
+    auditRetryKind.value = 'messages';
   } finally {
-    auditPaginationLoading.value = false;
+    if (
+      auditPaginationRequestGuard.isCurrent(request)
+      && auditOpen.value
+      && selectedSession.value?.session_id === sessionId
+    ) {
+      auditPaginationLoading.value = false;
+    }
+  }
+}
+
+function retryAuditRequest() {
+  if (auditRetryKind.value === 'sessions') {
+    void loadMoreSessions();
+    return;
+  }
+  if (auditRetryKind.value === 'messages') {
+    void loadMoreMessages();
+    return;
+  }
+  if (auditRetryKind.value === 'session' && selectedSessionId.value) {
+    const session = sessions.value.find((item) => item.session_id === selectedSessionId.value);
+    if (session) void selectSession(session);
   }
 }
 
@@ -287,7 +451,8 @@ function resetPagination() {
 async function changeRole() {
   if (!selected.value || !canChangeRole.value) return;
   actionLoading.value = true;
-  error.value = '';
+  detailError.value = '';
+  detailErrorKind.value = '';
   notice.value = '';
   try {
     const nextRole = selected.value.role === 'admin' ? 'user' : 'admin';
@@ -296,7 +461,8 @@ async function changeRole() {
     confirmRoleChange.value = false;
     await load();
   } catch (value) {
-    error.value = parseError(value);
+    detailError.value = parseError(value);
+    detailErrorKind.value = 'action';
   } finally {
     actionLoading.value = false;
   }
@@ -330,7 +496,7 @@ onMounted(() => void load());
       <div class="admin-workspace" :class="{ 'admin-show-detail': userDetailOpen }">
         <section ref="userListPanel" class="admin-list-panel" aria-label="用户列表" :aria-busy="loading" tabindex="-1">
           <div class="admin-filters"><label class="compact-search"><Search :size="16" /><input ref="userSearchInput" v-model="search" type="search" placeholder="搜索邮箱" aria-label="搜索用户邮箱" /></label><select v-model="status" aria-label="筛选用户状态"><option value="">全部状态</option><option value="active">正常</option><option value="pending_verification">待验证</option><option value="disabled">已禁用</option></select><button class="icon-action" type="button" aria-label="刷新用户列表" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spin: loading }" /></button></div>
-          <p v-if="error" class="workspace-alert" role="alert">{{ error }}</p>
+          <p v-if="listError" class="workspace-alert" role="alert">{{ listError }}</p>
           <div v-if="loading" class="admin-skeleton" aria-label="用户列表加载中"><span v-for="i in 6" :key="i"></span></div>
           <div v-else-if="!users.length" class="admin-empty"><Users :size="28" /><strong>暂无匹配用户</strong><span>调整搜索词或状态筛选后重试。</span></div>
           <div v-else class="admin-table-wrap">
@@ -344,10 +510,11 @@ onMounted(() => void load());
           <footer class="admin-pagination"><span>第 {{ pageNumber }} 页</span><div><button :disabled="!cursorHistory.length || loading" @click="previousPage">上一页</button><button :disabled="!nextCursor || loading" @click="nextPage">下一页</button></div></footer>
         </section>
 
-        <aside class="admin-detail-panel" aria-label="用户详情" aria-live="polite">
+        <aside class="admin-detail-panel" aria-label="用户详情" aria-live="polite" :aria-busy="detailLoading">
           <div v-if="!selected" class="admin-empty"><Users :size="28" /><strong>选择一位用户</strong><span>详细状态和管理操作会显示在这里。</span></div>
           <template v-else>
             <button ref="detailBackButton" class="admin-compact-back" type="button" @click="returnToUserList"><ArrowLeft :size="17" />返回用户列表</button>
+            <div v-if="detailError" class="workspace-alert admin-detail-alert" role="alert"><span>{{ detailError }}</span><button v-if="detailErrorKind === 'load'" type="button" :disabled="detailLoading" @click="retrySelectedUser"><RefreshCw :size="15" />重新加载用户详情</button></div>
             <header class="admin-detail-header"><span class="detail-avatar">{{ selected.email.slice(0, 1).toUpperCase() }}</span><div><h2>{{ selected.email }}</h2><p>{{ selected.role === 'admin' ? '管理员' : '普通用户' }}</p></div></header>
             <dl class="admin-detail-list"><div><dt>状态</dt><dd>{{ statusText(selected.status) }}</dd></div><div><dt>邮箱验证</dt><dd>{{ selected.email_verified_at ? '已验证' : '未验证' }}</dd></div><div><dt>密码</dt><dd>{{ selected.password_set ? '已设置，无法查看原文' : '未设置' }}</dd></div><div><dt>注册时间</dt><dd>{{ formatDate(selected.created_at) }}</dd></div><div><dt>最近登录</dt><dd>{{ formatDate(selected.last_login_at) }}</dd></div><div><dt>统计完整度</dt><dd>{{ Math.round(selected.usage_coverage * 100) }}% <small v-if="selected.missing_usage_call_count">缺失 {{ selected.missing_usage_call_count }} 次</small></dd></div></dl>
             <section class="detail-token-grid"><div><span>输入</span><strong>{{ formatTokens(selected.input_tokens) }}</strong></div><div><span>输出</span><strong>{{ formatTokens(selected.output_tokens) }}</strong></div><div><span>总量</span><strong>{{ formatTokens(selected.total_tokens) }}</strong></div></section>
@@ -375,7 +542,7 @@ onMounted(() => void load());
         <button class="dialog-close" type="button" aria-label="关闭临时密码" @click="closeTemporaryPassword"><X :size="18" /></button>
         <span class="dialog-symbol"><KeyRound :size="21" /></span>
         <h2 id="temporary-password-title">临时密码（仅显示一次）</h2>
-        <p>请立即通过安全渠道交给用户。关闭窗口后，密码会从本页面清除且无法再次查看。</p>
+        <p>这是为 <strong>{{ temporaryPassword.userEmail }}</strong> 生成的临时密码。请立即通过安全渠道交给该用户；关闭窗口后，密码会从本页面清除且无法再次查看。</p>
         <div class="admin-temporary-password">
           <code>{{ temporaryPassword.value }}</code>
           <small>有效期至 {{ formatDate(temporaryPassword.expiresAt) }}</small>
@@ -389,8 +556,8 @@ onMounted(() => void load());
     <AccessibleDialog v-if="auditOpen" title-id="audit-window-title" variant="fullscreen" @close="closeAudit">
       <section class="admin-audit-window">
         <header class="admin-audit-header"><div><span class="section-kicker"><FileText :size="15" /> 会话审计</span><h2 id="audit-window-title">{{ selected?.email }} 的会话记录</h2></div><button class="icon-action" type="button" aria-label="关闭会话审计" @click="closeAudit"><X :size="19" /></button></header>
-        <div class="admin-audit-body" :class="{ 'audit-show-transcript': auditDetailOpen }"><aside ref="sessionListPanel" class="admin-audit-sessions" aria-label="会话索引" tabindex="-1"><header><strong>会话</strong><span>已加载 {{ sessions.length }} 条</span></header><button v-for="session in sessions" :key="session.session_id" type="button" :data-session-id="session.session_id" :class="{ selected: selectedSessionId === session.session_id }" :aria-current="selectedSessionId === session.session_id ? 'page' : undefined" @click="selectSession(session)"><strong>{{ session.title || '未命名会话' }}</strong><small>{{ session.message_count }} 条消息 · {{ formatDate(session.updated_at) }}</small></button><button v-if="sessionsNextCursor" class="admin-load-more" type="button" :disabled="auditPaginationLoading" @click="loadMoreSessions"><LoaderCircle v-if="auditPaginationLoading" :size="15" class="spin" />加载更多会话</button></aside>
-          <section class="admin-transcript" aria-label="只读会话记录" :aria-busy="sessionLoading || auditPaginationLoading"><header><button ref="auditBackButton" class="admin-audit-back" type="button" @click="returnToAuditList"><ArrowLeft :size="17" />返回会话列表</button><div v-if="selectedSession" class="admin-transcript-heading"><div><span>会话记录</span><h3>{{ selectedSession.title }}</h3></div><small>已加载 {{ selectedSession.messages.length }} 条消息</small></div></header><div v-if="sessionLoading" class="editor-loading" role="status"><LoaderCircle :size="20" class="spin" />正在加载会话</div><div v-else-if="selectedSession" class="admin-session-transcript"><article v-for="message in selectedSession.messages" :key="String(message.id)" :class="String(message.role)"><strong>{{ message.role === 'user' ? '用户' : 'Agent' }}</strong><p>{{ String(message.content || '') }}</p></article><p v-if="!selectedSession.messages.length" class="admin-empty">该会话暂无可显示的对话记录。</p><button v-if="messagesNextCursor" class="admin-load-more" type="button" :disabled="auditPaginationLoading" @click="loadMoreMessages"><LoaderCircle v-if="auditPaginationLoading" :size="15" class="spin" />加载更多消息</button></div><div v-else-if="!sessionLoading" class="admin-empty"><FileText :size="28" /><strong>选择一个会话</strong><span>这里只展示用户与 Agent 的对话记录。</span></div></section>
+        <div class="admin-audit-body" :class="{ 'audit-show-transcript': auditDetailOpen }"><aside ref="sessionListPanel" class="admin-audit-sessions" aria-label="会话索引" tabindex="-1"><header><strong>会话</strong><span>已加载 {{ sessions.length }} 条</span></header><div v-if="auditError && auditRetryKind === 'sessions'" class="workspace-alert admin-audit-alert" role="alert"><span>{{ auditError }}</span><button type="button" @click="retryAuditRequest"><RefreshCw :size="15" />重试加载会话列表</button></div><button v-for="session in sessions" :key="session.session_id" type="button" :data-session-id="session.session_id" :class="{ selected: selectedSessionId === session.session_id }" :aria-current="selectedSessionId === session.session_id ? 'page' : undefined" @click="selectSession(session)"><strong>{{ session.title || '未命名会话' }}</strong><small>{{ session.message_count }} 条消息 · {{ formatDate(session.updated_at) }}</small></button><button v-if="sessionsNextCursor" class="admin-load-more" type="button" :disabled="auditPaginationLoading" @click="loadMoreSessions"><LoaderCircle v-if="auditPaginationLoading" :size="15" class="spin" />加载更多会话</button></aside>
+          <section class="admin-transcript" :class="{ 'admin-transcript-has-error': auditError && auditRetryKind !== 'sessions' }" aria-label="只读会话记录" :aria-busy="sessionLoading || auditPaginationLoading"><header><button ref="auditBackButton" class="admin-audit-back" type="button" @click="returnToAuditList"><ArrowLeft :size="17" />返回会话列表</button><div v-if="selectedSession" class="admin-transcript-heading"><div><span>会话记录</span><h3>{{ selectedSession.title }}</h3></div><small>已加载 {{ selectedSession.messages.length }} 条消息</small></div></header><div v-if="auditError && auditRetryKind !== 'sessions'" class="workspace-alert admin-audit-alert" role="alert"><span>{{ auditError }}</span><button type="button" @click="retryAuditRequest"><RefreshCw :size="15" />{{ auditRetryKind === 'messages' ? '重试加载消息' : '重试加载会话' }}</button></div><div v-if="sessionLoading" class="editor-loading" role="status"><LoaderCircle :size="20" class="spin" />正在加载会话</div><div v-else-if="selectedSession" class="admin-session-transcript"><article v-for="message in selectedSession.messages" :key="String(message.id)" :class="String(message.role)"><strong>{{ message.role === 'user' ? '用户' : 'Agent' }}</strong><p>{{ String(message.content || '') }}</p></article><p v-if="!selectedSession.messages.length" class="admin-empty">该会话暂无可显示的对话记录。</p><button v-if="messagesNextCursor" class="admin-load-more" type="button" :disabled="auditPaginationLoading" @click="loadMoreMessages"><LoaderCircle v-if="auditPaginationLoading" :size="15" class="spin" />加载更多消息</button></div><div v-else-if="!sessionLoading && !auditError" class="admin-empty"><FileText :size="28" /><strong>选择一个会话</strong><span>这里只展示用户与 Agent 的对话记录。</span></div></section>
         </div>
       </section>
     </AccessibleDialog>
