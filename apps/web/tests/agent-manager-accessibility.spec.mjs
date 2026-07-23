@@ -13,19 +13,27 @@ describe('agent manager accessibility and adaptation contracts', () => {
 
     expect(dialog).toContain("'drawer'");
     expect(dialog).toContain(':data-surface="surface"');
+    expect(dialog).toContain("'--dialog-layer': layer");
     expect(dialogsCss).toContain('.accessible-dialog-drawer');
     expect(dialogsCss).toContain('.modal-drawer');
     expect(productCss).toContain(".modal-backdrop[data-surface='product']");
+    expect(productCss).toMatch(
+      /\[data-surface='product'\] \.accessible-dialog-drawer[\s\S]*border-radius:\s*var\(--product-radius-overlay\) 0 0 var\(--product-radius-overlay\)/
+    );
   });
 
   it('tracks nested layers, limits dismissal to the top layer, and filters invisible focus targets', async () => {
-    const dialog = await read('../src/components/AccessibleDialog.vue');
+    const [dialog, stack] = await Promise.all([
+      read('../src/components/AccessibleDialog.vue'),
+      read('../src/components/dialogStack.ts')
+    ]);
 
     expect(dialog).toContain('dialogStack');
     expect(dialog).toContain('data-dialog-layer');
     expect(dialog).toContain('isTopDialog');
     expect(dialog).toContain('getClientRects().length');
-    expect(dialog).toContain('child.inert = true');
+    expect(stack).toContain('surface.inert = true');
+    expect(stack).toContain('firstTrigger');
     expect(dialog).toContain("event.key === 'Escape'");
     expect(dialog).toContain('previousFocus');
   });
@@ -34,6 +42,7 @@ describe('agent manager accessibility and adaptation contracts', () => {
     const manager = await read('../src/components/AgentManager.vue');
 
     expect(manager).toContain("ref<'directory' | 'editor'>('directory')");
+    expect(manager).toContain('focusDirectoryTarget');
     expect(manager).toContain(':data-manager-view="compactView"');
     expect(manager).toContain('class="manager-back-button"');
     expect(manager).toContain('role="tablist"');

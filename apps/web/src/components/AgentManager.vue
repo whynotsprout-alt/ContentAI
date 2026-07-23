@@ -63,6 +63,8 @@ const templates: Record<TemplateId, { name: string; positioning: string; scoring
 };
 
 const search = ref('');
+const directorySearch = ref<HTMLInputElement | null>(null);
+const accountNameInput = ref<HTMLInputElement | null>(null);
 const activeSection = ref<SectionId>('basic');
 const compactView = ref<'directory' | 'editor'>('directory');
 const compactLayout = ref(true);
@@ -166,6 +168,16 @@ async function focusActiveTab() {
   document.getElementById(`manager-tab-${activeSection.value}`)?.focus();
 }
 
+async function focusDirectoryTarget() {
+  await nextTick();
+  directorySearch.value?.focus();
+}
+
+async function focusEditorFallback() {
+  await nextTick();
+  accountNameInput.value?.focus();
+}
+
 function onSectionKeydown(event: KeyboardEvent, sectionId: SectionId) {
   const current = sections.findIndex((section) => section.id === sectionId);
   let target = current;
@@ -262,7 +274,11 @@ async function removeAgent() {
     await store.deleteAgent(editingId.value);
     confirmDelete.value = false;
     if (store.agentId) await edit(store.agentId);
-    else resetForm();
+    else {
+      resetForm();
+      compactView.value = 'editor';
+      await focusEditorFallback();
+    }
     notice.value = '内容账号已删除。';
   } catch (value) {
     error.value = value instanceof ApiError ? value.message : String(value);
@@ -284,6 +300,7 @@ function requestDirectory() {
     return;
   }
   compactView.value = 'directory';
+  void focusDirectoryTarget();
 }
 
 function discardChanges() {
@@ -295,6 +312,7 @@ function discardChanges() {
   compactView.value = 'directory';
   if (store.agentId) void edit(store.agentId, false);
   else resetForm();
+  void focusDirectoryTarget();
 }
 
 watch(() => props.open, (open) => {
@@ -334,7 +352,7 @@ onBeforeUnmount(() => {
 
       <div class="manager-layout" :data-manager-view="compactView">
         <aside class="agent-directory" aria-label="内容账号目录">
-          <label class="compact-search"><Search :size="15" /><input v-model="search" type="search" placeholder="搜索内容账号" aria-label="搜索内容账号" /></label>
+          <label class="compact-search"><Search :size="15" /><input ref="directorySearch" v-model="search" type="search" placeholder="搜索内容账号" aria-label="搜索内容账号" /></label>
           <button class="new-agent-button" type="button" @click="startNewAgent"><Plus :size="16" /> 新建内容账号</button>
           <button
             v-for="agent in filteredAgents" :key="agent.id" type="button" class="agent-directory-row"
@@ -378,7 +396,7 @@ onBeforeUnmount(() => {
               <span class="form-badge">{{ mode === 'create' ? '新建账号' : '基础信息' }}</span>
               <h3>让 Agent 理解你的内容边界</h3>
               <p>用受众和内容价值描述定位，避免只写宽泛行业词。</p>
-              <label class="field-block"><span>账号名称</span><input v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" /><small v-if="touched && fieldErrors.name" class="field-error">{{ fieldErrors.name }}</small></label>
+              <label class="field-block"><span>账号名称</span><input ref="accountNameInput" v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" /><small v-if="touched && fieldErrors.name" class="field-error">{{ fieldErrors.name }}</small></label>
               <label class="field-block"><span>账号定位</span><textarea v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" /><small v-if="touched && fieldErrors.positioning" class="field-error">{{ fieldErrors.positioning }}</small></label>
             </section>
 

@@ -67,11 +67,14 @@ describe('frontend plan contracts', () => {
   });
 
   it('traps focus, supports Escape, inerts the page, and restores focus', async () => {
-    const dialog = await read('../src/components/AccessibleDialog.vue');
+    const [dialog, stack] = await Promise.all([
+      read('../src/components/AccessibleDialog.vue'),
+      read('../src/components/dialogStack.ts')
+    ]);
     expect(dialog).toContain("event.key === 'Escape'");
     expect(dialog).toContain("event.key !== 'Tab'");
-    expect(dialog).toContain('child.inert = true');
-    expect(dialog).toContain('previousFocus?.focus()');
+    expect(stack).toContain('surface.inert = true');
+    expect(dialog).toContain('dialogStack.restoreFocus');
   });
 
   it('keeps the reply expansion action accessible and removes session status badges', async () => {

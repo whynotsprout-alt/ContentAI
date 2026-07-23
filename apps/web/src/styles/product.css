@@ -1320,6 +1320,10 @@ body[data-surface='product'] .accessible-dialog-default,
   box-shadow: 0 6px 8px var(--product-shadow-strong);
 }
 
+[data-surface='product'] .accessible-dialog-drawer {
+  border-radius: var(--product-radius-overlay) 0 0 var(--product-radius-overlay);
+}
+
 body[data-surface='product'] .accessible-dialog-default,
 [data-surface='product'] .accessible-dialog-default {
   backdrop-filter: none;

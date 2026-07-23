@@ -1,9 +1,6 @@
-<script lang="ts">
-const dialogStack: HTMLElement[] = [];
-</script>
-
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { dialogStack } from './dialogStack';
 
 const focusableSelector = [
   'a[href]',
@@ -34,7 +31,6 @@ const overlay = ref<HTMLElement | null>(null);
 const dialog = ref<HTMLElement | null>(null);
 const layer = ref(0);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-const backgroundState: Array<{ element: HTMLElement; inert: boolean; ariaHidden: string | null }> = [];
 
 function isVisible(element: HTMLElement) {
   if (
@@ -52,7 +48,7 @@ function focusableElements() {
 }
 
 function isTopDialog() {
-  return dialogStack[dialogStack.length - 1] === overlay.value;
+  return dialogStack.isTop(overlay.value);
 }
 
 function requestClose() {
@@ -90,37 +86,19 @@ function onKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   if (!overlay.value) return;
-  dialogStack.push(overlay.value);
-  layer.value = dialogStack.length;
+  dialogStack.register(overlay.value, previousFocus, (value) => {
+    layer.value = value;
+  });
   document.body.classList.add('dialog-open');
-  for (const child of Array.from(document.body.children)) {
-    if (!(child instanceof HTMLElement) || child === overlay.value || child.contains(overlay.value)) continue;
-    backgroundState.push({ element: child, inert: child.inert, ariaHidden: child.getAttribute('aria-hidden') });
-    child.inert = true;
-    child.setAttribute('aria-hidden', 'true');
-  }
   document.addEventListener('keydown', onKeydown);
   void nextTick(() => (focusableElements()[0] ?? dialog.value)?.focus());
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown);
-  if (overlay.value) {
-    const index = dialogStack.indexOf(overlay.value);
-    if (index >= 0) dialogStack.splice(index, 1);
-    dialogStack.forEach((element, stackIndex) => {
-      element.dataset.dialogLayer = String(stackIndex + 1);
-    });
-  }
-  for (const state of backgroundState) {
-    state.element.inert = state.inert;
-    if (state.ariaHidden === null) state.element.removeAttribute('aria-hidden');
-    else state.element.setAttribute('aria-hidden', state.ariaHidden);
-  }
-  if (!dialogStack.length) document.body.classList.remove('dialog-open');
-  void nextTick(() => {
-    if (previousFocus?.isConnected && isVisible(previousFocus)) previousFocus?.focus();
-  });
+  const focusPlan = overlay.value ? dialogStack.unregister(overlay.value) : null;
+  if (!dialogStack.size) document.body.classList.remove('dialog-open');
+  void nextTick(() => dialogStack.restoreFocus(focusPlan));
 });
 </script>
 
@@ -132,6 +110,7 @@ onBeforeUnmount(() => {
       :class="`modal-${variant}`"
       :data-dialog-layer="layer"
       :data-surface="surface"
+      :style="{ '--dialog-layer': layer }"
       @mousedown="onBackdrop"
     >
       <section

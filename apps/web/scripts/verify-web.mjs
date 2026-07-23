@@ -339,8 +339,12 @@ async function installApiMocks(page, state) {
       state.authenticated = true;
       return fulfillJson(route, authUser);
     }
-    if (path === '/api/agents' && method === 'GET') return fulfillJson(route, [agent]);
+    if (path === '/api/agents' && method === 'GET') return fulfillJson(route, state.agentDeleted ? [] : [agent]);
     if (path === `/api/agents/${agent.id}` && method === 'GET') return fulfillJson(route, agent);
+    if (path === `/api/agents/${agent.id}` && method === 'DELETE') {
+      state.agentDeleted = true;
+      return fulfillJson(route, null);
+    }
     if (path === '/api/chat/sessions' && method === 'GET') {
       return fulfillJson(route, {
         items: [workbenchSessionSummary, secondSessionSummary],
@@ -547,6 +551,33 @@ async function expectNoHoverLift(locator, page, label) {
   );
 }
 
+async function expectProductDrawerRadii(page) {
+  const radii = await page.evaluate(() => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop modal-drawer';
+    backdrop.dataset.surface = 'product';
+    const drawer = document.createElement('section');
+    drawer.className = 'accessible-dialog accessible-dialog-drawer';
+    backdrop.append(drawer);
+    document.body.append(backdrop);
+    const style = getComputedStyle(drawer);
+    const result = {
+      topLeft: style.borderTopLeftRadius,
+      topRight: style.borderTopRightRadius,
+      bottomRight: style.borderBottomRightRadius,
+      bottomLeft: style.borderBottomLeftRadius
+    };
+    backdrop.remove();
+    return result;
+  });
+  assert.deepEqual(radii, {
+    topLeft: '16px',
+    topRight: '0px',
+    bottomRight: '0px',
+    bottomLeft: '16px'
+  }, '产品 drawer 应贴右且只保留左侧圆角');
+}
+
 async function settleVisuals(page) {
   await page.evaluate(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
@@ -585,7 +616,8 @@ async function runDesktopAcceptance(browser) {
     mediaRequests: [],
     modelVersion: 7,
     modelLoadFailure: false,
-    modelPutPayloads: []
+    modelPutPayloads: [],
+    agentDeleted: false
   };
   const screenshots = [];
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
@@ -802,13 +834,20 @@ async function runDesktopAcceptance(browser) {
     await expectNoHorizontalOverflow(page.locator('.manager-layout'), '360px 账号管理布局');
     await capture(page, '03b-agent-manager-360x800-editor.png', screenshots);
 
+    const directorySearch = page.getByRole('searchbox', { name: '搜索内容账号', exact: true });
     await basicTab.click();
+    await page.getByRole('button', { name: '返回账号目录', exact: true }).click();
+    await expectVisible(page.locator('.agent-directory'), '无草稿返回账号目录');
+    const cleanDirectoryFocusRestored = await directorySearch.evaluate((element) => element === document.activeElement);
+    await page.locator('.agent-directory-row').filter({ hasText: agent.name }).click();
+    await expectVisible(accountName, '再次进入账号编辑器');
     await accountName.fill(`${agent.name}（草稿）`);
     await page.getByRole('button', { name: '关闭内容账号管理', exact: true }).click();
     await expectVisible(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '嵌套未保存确认');
     const dialogLayers = page.locator('.modal-backdrop');
     assert.equal(await dialogLayers.count(), 2, '嵌套确认应产生两层弹窗');
     assert.deepEqual(await dialogLayers.evaluateAll((elements) => elements.map((element) => element.getAttribute('data-dialog-layer'))), ['1', '2']);
+    const dialogZIndexes = await dialogLayers.evaluateAll((elements) => elements.map((element) => Number(getComputedStyle(element).zIndex)));
     assert.equal(await dialogLayers.first().getAttribute('inert'), '', '嵌套确认打开后外层弹窗应 inert');
     assert.equal(await dialogLayers.last().evaluate((element) => element.contains(document.activeElement)), true, '焦点应进入顶层确认弹窗');
     await page.keyboard.press('Escape');
@@ -821,13 +860,29 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '再次打开未保存确认');
     await dialogLayers.last().click({ position: { x: 4, y: 4 } });
     await expectHidden(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '遮罩关闭顶层确认');
+
+    await page.getByRole('button', { name: '返回账号目录', exact: true }).click();
+    await page.getByRole('button', { name: '放弃并返回目录', exact: true }).click();
+    await expectVisible(page.locator('.agent-directory'), '放弃草稿后返回账号目录');
+    const dirtyDirectoryFocusRestored = await directorySearch.evaluate((element) => element === document.activeElement);
+    assert.equal(await dialogLayers.count(), 1, '返回目录后只保留外层弹窗');
+    assert.equal(await rootShell.getAttribute('inert'), '', '返回目录后根页面仍应 inert');
+
+    await page.locator('.agent-directory-row').filter({ hasText: agent.name }).click();
+    await expectVisible(accountName, '第三次进入账号编辑器');
+    await accountName.fill(`${agent.name}（关闭草稿）`);
+    await page.getByRole('button', { name: '关闭内容账号管理', exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
-    await accountName.fill(agent.name);
-    await page.keyboard.press('Escape');
-    await expectHidden(managerHeading, '清除草稿后 Escape 关闭外层账号弹窗');
+    await page.getByRole('button', { name: '放弃并关闭', exact: true }).click();
+    await expectHidden(managerHeading, '放弃草稿并关闭外层账号弹窗');
+    assert.equal(await dialogLayers.count(), 0, '放弃并关闭后不应残留 backdrop');
     assert.equal(await rootShell.getAttribute('inert'), null, '根页面应在最外层弹窗关闭后恢复');
     assert.equal(await rootShell.getAttribute('aria-hidden'), null, '根页面辅助技术状态应恢复');
     assert.equal(await managerTrigger.evaluate((element) => element === document.activeElement), true, '外层弹窗关闭后焦点应归还触发器');
+    assert.equal(cleanDirectoryFocusRestored, true, '无草稿返回目录后焦点应进入搜索框');
+    assert.equal(dirtyDirectoryFocusRestored, true, '放弃草稿返回目录后焦点应进入搜索框');
+    assert.ok(dialogZIndexes[1] > dialogZIndexes[0], `顶层弹窗 z-index 应更高：${JSON.stringify(dialogZIndexes)}`);
+    await expectProductDrawerRadii(page);
 
     await page.setViewportSize({ width: 768, height: 1024 });
     await managerTrigger.click();
@@ -870,6 +925,12 @@ async function runDesktopAcceptance(browser) {
       true,
       'Tab 应在弹窗尾部回绕到首个可见控件'
     );
+    await page.getByRole('button', { name: '删除', exact: true }).click();
+    await page.getByRole('button', { name: '确认删除', exact: true }).click();
+    await expectVisible(accountName, '删除最后账号后的新建编辑器');
+    assert.equal(await accountName.inputValue(), '', '删除最后账号后应进入空白新建状态');
+    assert.equal(await accountName.evaluate((element) => element === document.activeElement), true, '删除最后账号后焦点应进入账号名称');
+    await capture(page, '03e-agent-manager-1280x800-empty-after-delete.png', screenshots);
     await page.keyboard.press('Escape');
     await expectHidden(managerHeading, '关闭 1280px 内容账号弹窗');
 
