@@ -620,6 +620,31 @@
   line-height: 1.6;
 }
 
+.session-load-more {
+  display: block;
+  width: calc(100% - 4px);
+  margin: 10px 2px 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--wb-line);
+  border-radius: 12px;
+  color: var(--wb-muted);
+  background: rgb(246 243 255 / 0.035);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.session-load-more:hover:not(:disabled) {
+  color: var(--wb-text);
+  border-color: rgb(159 149 255 / 0.3);
+  background: rgb(124 112 255 / 0.1);
+}
+
+.session-load-more:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 /* Run lifecycle overlay */
 .run-activity {
   position: absolute;

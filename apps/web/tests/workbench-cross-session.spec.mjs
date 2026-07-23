@@ -226,6 +226,44 @@ describe('workbench cross-session recovery', () => {
     expect(store.sessionNextCursor).toBeNull();
   });
 
+  it('drops a late old-agent load-more response without clearing the new agent loading state', async () => {
+    let resolveOld;
+    let resolveNew;
+    let calls = 0;
+    api.sessions = async (agentId, cursor) => {
+      calls += 1;
+      if (agentId === 'old-agent' && cursor === 'old-cursor') {
+        return new Promise((resolve) => { resolveOld = resolve; });
+      }
+      if (agentId === 'new-agent' && cursor === '') {
+        return new Promise((resolve) => { resolveNew = resolve; });
+      }
+      return { items: [], next_cursor: null };
+    };
+    const store = initStore();
+    store.agentId = 'old-agent';
+    store.sessions = [{ session_id: 'old-first', agent_id: 'old-agent', title: 'old', created_at: '', updated_at: '', latest_execution_status: 'idle', message_count: 0 }];
+    store.sessionNextCursor = 'old-cursor';
+
+    const first = store.loadMoreSessions();
+    const duplicate = store.loadMoreSessions();
+    expect(store.isLoadingSessions).toBe(true);
+
+    store.agentId = 'new-agent';
+    store._beginConversationContext();
+    const newRequest = store.refreshSessions();
+    resolveOld({ items: [{ session_id: 'old-late', agent_id: 'old-agent', title: 'late', created_at: '', updated_at: '', latest_execution_status: 'idle', message_count: 0 }], next_cursor: null });
+    await Promise.all([first, duplicate]);
+    expect(store.isLoadingSessions).toBe(true);
+    resolveNew({ items: [{ session_id: 'new-first', agent_id: 'new-agent', title: 'new', created_at: '', updated_at: '', latest_execution_status: 'idle', message_count: 0 }], next_cursor: 'new-cursor' });
+    await newRequest;
+
+    expect(calls).toBe(2);
+    expect(store.sessions.map((session) => session.session_id)).toEqual(['new-first']);
+    expect(store.sessionNextCursor).toBe('new-cursor');
+    expect(store.isLoadingSessions).toBe(false);
+  });
+
   it('merges refreshed messages by backend id without moving the older-page cursor', async () => {
     setSession('s1', {
       next_cursor: 'older-boundary',

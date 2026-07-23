@@ -179,6 +179,9 @@ export const useWorkbenchStore = defineStore('workbench', {
     agents: [] as AgentProfile[],
     sessions: [] as ChatSessionSummary[],
     sessionNextCursor: null as string | null,
+    isLoadingSessions: false,
+    sessionRequestSequence: 0,
+    sessionRequestOwner: null as { id: number; agentId: string; cursor: string; contextToken: number } | null,
     messageNextCursor: null as string | null,
     agentId: '',
     sessionId: '',
@@ -247,11 +250,36 @@ export const useWorkbenchStore = defineStore('workbench', {
     },
 
     async refreshSessions(cursor = '', append = false) {
-      const result = await api.sessions(this.agentId, cursor);
-      this.sessions = append
-        ? [...this.sessions, ...result.items.filter((session) => !this.sessions.some((item) => item.session_id === session.session_id))]
-        : result.items;
-      this.sessionNextCursor = result.next_cursor;
+      const agentId = this.agentId;
+      const contextToken = this.sessionContextToken;
+      const current = this.sessionRequestOwner;
+      if (current && current.agentId === agentId && current.cursor === cursor && current.contextToken === contextToken) return;
+      const owner = {
+        id: this.sessionRequestSequence + 1,
+        agentId,
+        cursor,
+        contextToken
+      };
+      this.sessionRequestSequence = owner.id;
+      this.sessionRequestOwner = owner;
+      this.isLoadingSessions = true;
+      try {
+        const result = await api.sessions(agentId, cursor);
+        if (
+          this.sessionRequestOwner?.id !== owner.id ||
+          this.agentId !== owner.agentId ||
+          this.sessionContextToken !== owner.contextToken
+        ) return;
+        this.sessions = append
+          ? [...this.sessions, ...result.items.filter((session) => !this.sessions.some((item) => item.session_id === session.session_id))]
+          : result.items;
+        this.sessionNextCursor = result.next_cursor;
+      } finally {
+        if (this.sessionRequestOwner?.id === owner.id) {
+          this.sessionRequestOwner = null;
+          this.isLoadingSessions = false;
+        }
+      }
     },
 
     async loadMoreSessions() {
