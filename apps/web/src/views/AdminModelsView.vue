@@ -257,6 +257,17 @@ onMounted(() => void loadConfiguration());
     </template>
 
     <div class="model-admin-workspace" :aria-busy="loading || probing || saving">
+      <section class="model-status-summary" aria-labelledby="model-status-summary-title">
+        <div>
+          <span><Activity :size="17" />当前生效状态</span>
+          <strong id="model-status-summary-title">{{ initialLoadFailed ? '加载失败' : configured ? `v${active?.version} · ${active?.model_name}` : '尚未配置' }}</strong>
+        </div>
+        <p v-if="loading">正在读取当前配置…</p>
+        <p v-else-if="initialLoadFailed">重新加载成功前不会开放保存。</p>
+        <p v-else-if="configured">{{ active?.base_url }}</p>
+        <p v-else>完成验证并保存后，新对话才能提交。</p>
+      </section>
+
       <section class="model-config-panel" aria-labelledby="model-config-form-title">
         <div v-if="loading" class="model-config-skeleton" role="status" aria-label="正在加载模型配置">
           <span v-for="index in 6" :key="index"></span>
@@ -318,6 +329,39 @@ onMounted(() => void loadConfiguration());
           </div>
         </form>
       </section>
+
+      <details class="model-status-details">
+        <summary>
+          <span>查看完整生效状态</span>
+          <small>版本、端点、模型、Key 提示与验证信息</small>
+        </summary>
+        <div class="model-status-content">
+          <header><span class="model-panel-icon"><Activity :size="20" /></span><div><h2>当前生效状态</h2><p>不可变版本快照</p></div></header>
+          <div v-if="loading" class="model-status-skeleton"><span v-for="index in 5" :key="index"></span></div>
+          <div v-else-if="initialLoadFailed" class="model-empty-state">
+            <CircleAlert :size="24" />
+            <strong>状态暂不可用</strong>
+            <p>重新加载成功前，系统不会把错误状态当作首次配置。</p>
+          </div>
+          <div v-else-if="!configured" class="model-empty-state">
+            <CircleAlert :size="24" />
+            <strong>尚未配置模型服务</strong>
+            <p>完成连接验证并保存后，新对话才能提交。</p>
+          </div>
+          <template v-else>
+            <div class="model-version-mark"><span>ACTIVE VERSION</span><strong>v{{ active?.version }}</strong></div>
+            <dl class="model-status-list">
+              <div><dt>Provider</dt><dd>OpenAI Compatible</dd></div>
+              <div><dt>Base URL</dt><dd>{{ active?.base_url }}</dd></div>
+              <div><dt>模型</dt><dd>{{ active?.model_name }}</dd></div>
+              <div><dt>Key</dt><dd>{{ active?.api_key_hint }}</dd></div>
+              <div><dt>验证时间</dt><dd>{{ formatDate(active?.validated_at) }}</dd></div>
+              <div><dt>操作者</dt><dd>{{ active?.created_by_email || active?.created_by_user_id || '—' }}</dd></div>
+            </dl>
+            <div class="model-effective-note"><Clock3 :size="18" /><p><strong>仅新 execution 生效</strong><span>已排队、运行、恢复或重试的任务继续使用创建时固化的版本。</span></p></div>
+          </template>
+        </div>
+      </details>
 
       <aside class="model-status-panel" aria-labelledby="model-status-title">
         <header><span class="model-panel-icon"><Activity :size="20" /></span><div><h2 id="model-status-title">当前生效状态</h2><p>不可变版本快照</p></div></header>

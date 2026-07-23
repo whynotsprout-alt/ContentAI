@@ -142,6 +142,23 @@ const olderAdminSession = {
   updated_at: '2026-07-13T08:00:00.000Z'
 };
 
+const adminSessionSummaries = [
+  adminSessionSummary,
+  ...Array.from({ length: 16 }, (_, index) => ({
+    ...adminSessionSummary,
+    session_id: `admin-session-${index + 2}`,
+    title: `审计会话 ${String(index + 2).padStart(2, '0')}`,
+    message_count: index + 2,
+    updated_at: new Date(Date.parse(fixedNow) - (index + 1) * 3_600_000).toISOString()
+  }))
+];
+
+const auditLongContent = [
+  '这是一段用于验证窄屏换行的超长中文内容，连续书写时也不能撑开会话审计窗口。',
+  'https://contentai.example.test/research/2026/07/15/a-very-long-path-without-natural-breakpoints?source=verification&campaign=responsive-administration',
+  'const_extremely_long_identifier_without_spaces_or_breakpoints_for_responsive_audit_verification_0123456789'
+].join('\n');
+
 const adminSessionDetail = {
   ...adminSessionSummary,
   messages: [
@@ -149,7 +166,8 @@ const adminSessionDetail = {
     { id: 'audit-2', role: 'assistant', content: '你好，我可以帮你筛选热点、梳理判断或起草内容。' },
     { id: 'audit-3', role: 'user', content: '获取热点' },
     { id: 'audit-4', role: 'assistant', content: '今天值得跟进的是平台补贴、消费品牌财报和 AI 搜索产品更新。' },
-    { id: 'audit-5', role: 'user', content: '先分析平台补贴。' }
+    { id: 'audit-5', role: 'user', content: '先分析平台补贴。' },
+    { id: 'audit-long', role: 'assistant', content: auditLongContent }
   ]
 };
 
@@ -396,18 +414,31 @@ async function installApiMocks(page, state) {
     if (path === `/api/admin/users/${targetUser.id}/sessions` && method === 'GET') {
       return url.searchParams.has('cursor')
         ? fulfillJson(route, { items: [olderAdminSession], next_cursor: null })
-        : fulfillJson(route, { items: [adminSessionSummary], next_cursor: 'session-cursor-1' });
+        : fulfillJson(route, { items: adminSessionSummaries, next_cursor: 'session-cursor-1' });
     }
     if (path === '/api/admin/usage' && method === 'GET') {
       return fulfillJson(route, { items: usageBuckets });
     }
-    if (path === `/api/admin/sessions/${adminSessionSummary.session_id}` && method === 'GET') {
-      return fulfillJson(route, adminSessionDetail);
+    if (path === `/api/admin/users/${targetUser.id}/temporary-password` && method === 'POST') {
+      state.temporaryPasswordCount = (state.temporaryPasswordCount ?? 0) + 1;
+      return fulfillJson(route, {
+        temporary_password: `one-time-secret-${state.temporaryPasswordCount}`,
+        expires_at: '2026-07-15T10:07:00.000Z'
+      });
     }
-    if (path === `/api/admin/sessions/${adminSessionSummary.session_id}/messages` && method === 'GET') {
+    const adminMessageMatch = path.match(/^\/api\/admin\/sessions\/([^/]+)\/messages$/);
+    if (adminMessageMatch && method === 'GET') {
+      const session = adminSessionSummaries.find((item) => item.session_id === adminMessageMatch[1]);
+      if (!session) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'session not found' } }, 404);
       return url.searchParams.has('cursor')
         ? fulfillJson(route, { items: [{ id: 'audit-6', role: 'assistant', message_type: 'text', content: '补充加载的审计消息。', created_at: fixedNow }], next_cursor: null })
         : fulfillJson(route, { items: adminSessionDetail.messages, next_cursor: 'message-cursor-1' });
+    }
+    const adminDetailMatch = path.match(/^\/api\/admin\/sessions\/([^/]+)$/);
+    if (adminDetailMatch && method === 'GET') {
+      const session = adminSessionSummaries.find((item) => item.session_id === adminDetailMatch[1]);
+      if (!session) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'session not found' } }, 404);
+      return fulfillJson(route, { ...adminSessionDetail, ...session });
     }
     if (path === '/api/admin/model-config' && method === 'GET') {
       if (state.modelLoadFailure) {
@@ -447,6 +478,22 @@ async function expectVisible(locator, label) {
 async function expectHidden(locator, label) {
   await locator.waitFor({ state: 'hidden' });
   assert.equal(await locator.isHidden(), true, `${label} 应隐藏`);
+}
+
+async function expectFocused(locator, label) {
+  await locator.waitFor({ state: 'visible' });
+  await locator.evaluate((element) => new Promise((resolvePromise) => {
+    const deadline = performance.now() + 1200;
+    const check = () => {
+      if (document.activeElement === element || performance.now() >= deadline) {
+        resolvePromise();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    check();
+  }));
+  assert.equal(await locator.evaluate((element) => element === document.activeElement), true, label);
 }
 
 async function expectElementWidth(locator, expected, label) {
@@ -492,6 +539,36 @@ async function expectNoHorizontalOverflow(locator, label) {
     dimensions.scrollWidth <= dimensions.clientWidth + 1,
     `${label} 不应水平溢出：${JSON.stringify(dimensions)}`
   );
+}
+
+async function expectPlainAdminSurfaces(page, label) {
+  const decorated = await page.locator([
+    '.admin-topbar',
+    '.admin-workspace',
+    '.admin-list-panel',
+    '.admin-detail-panel',
+    '.model-config-panel',
+    '.model-status-panel',
+    '.model-status-summary',
+    '.model-status-details',
+    '.admin-audit-window',
+    '.admin-audit-header',
+    '.admin-audit-sessions',
+    '.admin-transcript',
+    '.admin-session-transcript',
+    '.admin-session-transcript article p'
+  ].join(',')).evaluateAll((elements) => elements
+    .filter((element) => element.getClientRects().length > 0)
+    .map((element) => {
+      const style = getComputedStyle(element);
+      return {
+        className: element.className,
+        backgroundImage: style.backgroundImage,
+        boxShadow: style.boxShadow
+      };
+    })
+    .filter((style) => style.backgroundImage !== 'none' || style.boxShadow !== 'none'));
+  assert.deepEqual(decorated, [], `${label} 主页面 surface 不应使用投影或装饰背景：${JSON.stringify(decorated)}`);
 }
 
 async function expectSingleVerticalScrollContainer(locator, label) {
@@ -956,7 +1033,7 @@ async function runDesktopAcceptance(browser) {
 
     await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
     await expectVisible(page.getByRole('heading', { name: '模型管理', exact: true }), '模型管理标题');
-    await expectVisible(page.getByText('gpt-4.1-mini', { exact: true }).first(), '当前模型');
+    await expectVisible(page.locator('.model-status-panel').getByText('gpt-4.1-mini', { exact: true }), '当前模型');
     await page.getByRole('button', { name: '刷新模型', exact: true }).click();
     await expectVisible(page.getByText('已刷新 3 个可用模型。', { exact: true }), '模型刷新反馈');
     await capture(page, '06-admin-models-1440x900.png', screenshots);
@@ -1014,6 +1091,225 @@ async function runDesktopAcceptance(browser) {
     console.error(`[verify:web] 页面 HTML：${html.slice(0, 2400)}`);
     console.error(`[verify:web] 失败截图：${diagnosticPath}`);
     throw error;
+  } finally {
+    await context.close();
+  }
+}
+
+async function runResponsiveAdminAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 360, height: 800 },
+    colorScheme: 'light',
+    reducedMotion: 'reduce',
+    deviceScaleFactor: 1,
+    locale: 'zh-CN'
+  });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseUrl });
+  const page = await context.newPage();
+  page.setDefaultTimeout(12000);
+  page.setDefaultNavigationTimeout(20000);
+  const state = {
+    authenticated: true,
+    apiCalls: [],
+    unexpectedApiCalls: [],
+    pageErrors: [],
+    consoleErrors: [],
+    failedResponses: [],
+    failedRequests: [],
+    mediaRequests: [],
+    modelVersion: 7,
+    modelLoadFailure: false,
+    modelPutPayloads: [],
+    agentDeleted: false,
+    temporaryPasswordCount: 0
+  };
+  const screenshots = [];
+  page.on('pageerror', (error) => state.pageErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') state.consoleErrors.push(message.text());
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400) state.failedResponses.push(`${response.status()} ${response.url()}`);
+  });
+  page.on('requestfailed', (request) => {
+    state.failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'unknown'}`);
+  });
+  await installApiMocks(page, state);
+
+  async function expectResponsiveShell(width, label) {
+    await expectVisible(page.getByRole('link', { name: '用户管理', exact: true }), `${label} 用户导航`);
+    await expectVisible(page.getByRole('link', { name: '模型管理', exact: true }), `${label} 模型导航`);
+    await expectVisible(page.getByRole('button', { name: '返回工作台', exact: true }), `${label} 返回工作台`);
+    await expectVisible(page.getByRole('button', { name: '退出管理后台', exact: true }), `${label} 退出`);
+    await expectNoHorizontalOverflow(page.locator('html'), `${label} 管理后台整页`);
+    await expectPlainAdminSurfaces(page, label);
+    assert.equal(await page.evaluate(() => window.innerWidth), width, `${label} 视口宽度`);
+  }
+
+  async function openCompactUserDetail(width, height) {
+    await page.setViewportSize({ width, height });
+    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), `${width}px 管理后台标题`);
+    await expectResponsiveShell(width, `${width}px`);
+    await expectVisible(page.locator('.admin-list-panel'), `${width}px 用户列表`);
+    await expectHidden(page.locator('.admin-detail-panel'), `${width}px 初始用户详情`);
+    const row = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
+    await row.click();
+    const back = page.getByRole('button', { name: '返回用户列表', exact: true });
+    await expectVisible(back, `${width}px 用户详情返回`);
+    await expectHidden(page.locator('.admin-list-panel'), `${width}px 详情态用户列表`);
+    await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), `${width}px 用户详情`);
+    await expectFocused(back, `${width}px 详情焦点应进入返回按钮`);
+    await expectNoHorizontalOverflow(page.locator('.admin-workspace'), `${width}px 用户详情工作区`);
+    return { row, back };
+  }
+
+  try {
+    let compact = await openCompactUserDetail(360, 800);
+    await capture(page, '04a-admin-users-360x800-detail.png', screenshots);
+
+    const generatePassword = page.getByRole('button', { name: '生成临时密码', exact: true });
+    await generatePassword.click();
+    await expectVisible(page.getByRole('heading', { name: '临时密码（仅显示一次）', exact: true }), '临时密码弹窗');
+    await expectVisible(page.getByText('one-time-secret-1', { exact: true }), '一次性临时密码');
+    await expectVisible(page.getByText(/有效期至/), '临时密码到期时间');
+    await page.getByRole('button', { name: '复制临时密码', exact: true }).click();
+    await expectVisible(page.getByText('临时密码已复制。', { exact: true }), '临时密码复制反馈');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'one-time-secret-1', '复制操作应写入系统剪贴板');
+    await capture(page, '04b-admin-password-360x800.png', screenshots);
+    await page.getByRole('button', { name: '关闭临时密码', exact: true }).click();
+    await expectHidden(page.getByRole('heading', { name: '临时密码（仅显示一次）', exact: true }), '按钮关闭临时密码弹窗');
+    assert.equal((await page.locator('body').innerText()).includes('one-time-secret-1'), false, '按钮关闭后页面不得保留临时密码');
+    await expectFocused(generatePassword, '关闭临时密码弹窗应归还生成按钮焦点');
+
+    await generatePassword.click();
+    await expectVisible(page.getByText('one-time-secret-2', { exact: true }), 'Escape 场景临时密码');
+    await page.keyboard.press('Escape');
+    await expectHidden(page.getByText('one-time-secret-2', { exact: true }), 'Escape 关闭临时密码弹窗');
+    assert.equal((await page.locator('body').innerText()).includes('one-time-secret-2'), false, 'Escape 关闭后页面不得保留临时密码');
+
+    await generatePassword.click();
+    await expectVisible(page.getByText('one-time-secret-3', { exact: true }), '遮罩场景临时密码');
+    await page.locator('.modal-backdrop').dispatchEvent('mousedown');
+    await expectHidden(page.getByText('one-time-secret-3', { exact: true }), '遮罩关闭临时密码弹窗');
+    assert.equal((await page.locator('body').innerText()).includes('one-time-secret-3'), false, '遮罩关闭后页面不得保留临时密码');
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator.clipboard, 'writeText', {
+        configurable: true,
+        value: () => Promise.reject(new Error('verify clipboard failure'))
+      });
+    });
+    await generatePassword.click();
+    await expectVisible(page.getByText('one-time-secret-4', { exact: true }), '复制失败场景临时密码');
+    await page.getByRole('button', { name: '复制临时密码', exact: true }).click();
+    await expectVisible(page.getByText('复制失败，请手动选择密码后复制。', { exact: true }), '临时密码复制失败反馈');
+    await page.getByRole('button', { name: '关闭临时密码', exact: true }).click();
+    assert.equal((await page.locator('body').innerText()).includes('one-time-secret-4'), false, '复制失败后的关闭仍应清除临时密码');
+    assert.equal((await page.locator('body').innerText()).includes('复制失败，请手动选择密码后复制。'), false, '复制失败反馈不得泄漏到其他页面状态');
+
+    await compact.back.click();
+    await expectVisible(page.locator('.admin-list-panel'), '360px 返回用户列表');
+    await expectFocused(compact.row, '360px 返回列表应恢复选中用户焦点');
+    await capture(page, '04c-admin-users-360x800-list.png', screenshots);
+
+    compact = await openCompactUserDetail(768, 1024);
+    await capture(page, '04d-admin-users-768x1024-detail.png', screenshots);
+    await page.getByRole('button', { name: /查看会话记录/ }).click();
+    await expectVisible(page.locator('.admin-audit-sessions'), '768px 会话索引');
+    await expectHidden(page.locator('.admin-transcript'), '768px 初始 transcript');
+    const sessionTarget = page.locator('[data-session-id="admin-session-17"]');
+    const savedScrollTop = await sessionTarget.evaluate((element) => {
+      const list = element.closest('.admin-audit-sessions');
+      list.scrollTop = list.scrollHeight;
+      const top = list.scrollTop;
+      element.click();
+      return top;
+    });
+    assert.ok(savedScrollTop > 0, `会话索引应可滚动：${savedScrollTop}`);
+    const auditBack = page.getByRole('button', { name: '返回会话列表', exact: true });
+    await expectVisible(auditBack, '768px transcript 返回');
+    await expectHidden(page.locator('.admin-audit-sessions'), '768px transcript 态会话索引');
+    await expectVisible(page.locator('.admin-transcript'), '768px transcript');
+    await expectFocused(auditBack, '768px transcript 焦点应进入返回按钮');
+    await expectVisible(page.getByText(auditLongContent, { exact: true }), '长中文、URL 与无空格内容');
+    await expectNoHorizontalOverflow(page.locator('.admin-audit-window'), '768px 会话审计窗口');
+    await expectNoHorizontalOverflow(page.locator('.admin-session-transcript'), '768px transcript');
+    await expectPlainAdminSurfaces(page, '768px 会话 transcript');
+    await capture(page, '05a-admin-audit-768x1024-transcript.png', screenshots);
+    await auditBack.click();
+    await expectVisible(page.locator('.admin-audit-sessions'), '768px 返回会话索引');
+    await expectHidden(page.locator('.admin-transcript'), '768px 返回后 transcript');
+    const restoredScrollTop = await page.locator('.admin-audit-sessions').evaluate((element) => element.scrollTop);
+    assert.ok(Math.abs(restoredScrollTop - savedScrollTop) <= 2, `返回会话索引应恢复 scrollTop：${JSON.stringify({ savedScrollTop, restoredScrollTop })}`);
+    await expectFocused(sessionTarget, '返回会话索引应恢复选中会话焦点');
+    assert.equal(await sessionTarget.getAttribute('aria-current'), 'page', '返回会话索引应保留选中状态');
+    await capture(page, '05b-admin-audit-768x1024-list.png', screenshots);
+    await page.getByRole('button', { name: '关闭会话审计', exact: true }).click();
+
+    compact = await openCompactUserDetail(1024, 768);
+    await capture(page, '04e-admin-users-1024x768-detail.png', screenshots);
+    await compact.back.click();
+
+    for (const viewport of [
+      { width: 360, height: 800 },
+      { width: 768, height: 1024 },
+      { width: 1024, height: 768 }
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
+      await expectVisible(page.getByRole('heading', { name: '模型管理', exact: true }), `${viewport.width}px 模型管理标题`);
+      await expectResponsiveShell(viewport.width, `${viewport.width}px`);
+      const summary = page.locator('.model-status-summary');
+      const form = page.locator('.model-config-panel');
+      const details = page.locator('.model-status-details');
+      await expectVisible(summary, `${viewport.width}px 当前状态摘要`);
+      await expectVisible(form, `${viewport.width}px 模型配置表单`);
+      await expectVisible(details, `${viewport.width}px 完整状态 details`);
+      await expectHidden(page.locator('.model-status-panel'), `${viewport.width}px 桌面状态栏`);
+      const positions = await Promise.all([summary, form, details].map((locator) => locator.evaluate((element) => element.getBoundingClientRect().top)));
+      assert.ok(positions[0] < positions[1] && positions[1] < positions[2], `${viewport.width}px 模型窄屏顺序错误：${positions.join(' < ')}`);
+      await expectHidden(details.locator('.model-status-content'), `${viewport.width}px 默认折叠完整状态`);
+      await page.locator('.model-admin-workspace').evaluate((element) => { element.scrollTop = 0; });
+      await capture(page, `06a-admin-models-${viewport.width}x${viewport.height}.png`, screenshots);
+      await details.locator('summary').click();
+      await expectVisible(details.locator('.model-status-content'), `${viewport.width}px 展开的完整状态`);
+      await expectNoHorizontalOverflow(page.locator('html'), `${viewport.width}px 模型管理整页`);
+      if (viewport.width === 768) {
+        await details.scrollIntoViewIfNeeded();
+        await capture(page, '06a-admin-models-768x1024-details.png', screenshots);
+      }
+    }
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
+    await expectResponsiveShell(1280, '1280px');
+    await expectVisible(page.locator('.admin-list-panel'), '1280px 用户列表');
+    await expectVisible(page.locator('.admin-detail-panel'), '1280px 用户详情栏');
+    await expectHidden(page.getByRole('button', { name: '返回用户列表', exact: true }), '1280px 紧凑返回按钮');
+    await page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email }).click();
+    await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), '1280px 用户详情');
+    const userColumns = await page.locator('.admin-workspace').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.match(userColumns, /\d+px \d+px/, `1280px 用户页应为双栏：${userColumns}`);
+    await capture(page, '04f-admin-users-1280x800.png', screenshots);
+
+    await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
+    await expectResponsiveShell(1280, '1280px 模型页');
+    await expectHidden(page.locator('.model-status-summary'), '1280px 窄屏状态摘要');
+    await expectHidden(page.locator('.model-status-details'), '1280px 窄屏完整状态');
+    await expectVisible(page.locator('.model-config-panel'), '1280px 模型配置表单');
+    await expectVisible(page.locator('.model-status-panel'), '1280px 桌面状态栏');
+    const modelColumns = await page.locator('.model-admin-workspace').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.match(modelColumns, /\d+px \d+px/, `1280px 模型页应为双栏：${modelColumns}`);
+    await expectNoHorizontalOverflow(page.locator('html'), '1280px 模型管理整页');
+    await capture(page, '06b-admin-models-1280x800.png', screenshots);
+
+    assert.deepEqual(state.unexpectedApiCalls, [], `响应式后台存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
+    assert.deepEqual(state.pageErrors, [], `响应式后台脚本错误：${state.pageErrors.join(' | ')}`);
+    assert.deepEqual(state.consoleErrors, [], `响应式后台控制台错误：${state.consoleErrors.join(' | ')}`);
+    assert.deepEqual(state.failedResponses, [], `响应式后台存在失败响应：${state.failedResponses.join(' | ')}`);
+    assert.deepEqual(state.failedRequests, [], `响应式后台存在失败请求：${state.failedRequests.join(' | ')}`);
+    return { screenshots, apiCalls: state.apiCalls };
   } finally {
     await context.close();
   }
@@ -1193,6 +1489,7 @@ try {
     args: ['--disable-background-networking', '--disable-component-update']
   });
   const result = await runDesktopAcceptance(browser);
+  const responsiveAdmin = await runResponsiveAdminAcceptance(browser);
   const backdropMaterial = await runMotionBackdropAcceptance(browser);
   const constrainedBackdrop = await runConstrainedBackdropAcceptance(browser);
   const productIsolation = await runDirectProductIsolationAcceptance(browser);
@@ -1204,8 +1501,13 @@ try {
     constrainedBackdrop,
     productIsolation,
     changePasswordSurface,
-    screenshotCount: result.screenshots.length,
-    screenshots: result.screenshots,
+    responsiveAdmin: {
+      screenshotCount: responsiveAdmin.screenshots.length,
+      screenshots: responsiveAdmin.screenshots,
+      apiCalls: responsiveAdmin.apiCalls
+    },
+    screenshotCount: result.screenshots.length + responsiveAdmin.screenshots.length,
+    screenshots: [...result.screenshots, ...responsiveAdmin.screenshots],
     apiCalls: result.apiCalls
   }, null, 2));
 } catch (error) {

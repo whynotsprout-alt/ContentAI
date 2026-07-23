@@ -64,6 +64,85 @@ body[data-surface='product'] {
   background: var(--product-bg);
 }
 
+body[data-surface='product'] .admin-shell {
+  color: var(--product-text);
+  background: var(--product-bg);
+  background-image: none;
+}
+
+body[data-surface='product'] .admin-topbar,
+body[data-surface='product'] .admin-workspace,
+body[data-surface='product'] .admin-list-panel,
+body[data-surface='product'] .admin-detail-panel,
+body[data-surface='product'] .model-config-panel,
+body[data-surface='product'] .model-status-panel,
+body[data-surface='product'] .admin-audit-window,
+body[data-surface='product'] .admin-audit-header,
+body[data-surface='product'] .admin-audit-sessions,
+body[data-surface='product'] .admin-transcript {
+  background: var(--product-surface);
+  background-image: none;
+  border-color: var(--product-border);
+  box-shadow: none;
+}
+
+body[data-surface='product'] .admin-audit-sessions,
+body[data-surface='product'] .admin-table thead,
+body[data-surface='product'] .detail-token-grid div {
+  background: var(--product-surface-subtle);
+  background-image: none;
+}
+
+body[data-surface='product'] .admin-audit-sessions > header {
+  background: var(--product-surface-subtle);
+}
+
+body[data-surface='product'] :is(
+  .admin-table tbody tr:hover,
+  .admin-table tbody tr.selected,
+  .admin-audit-sessions button:hover,
+  .admin-audit-sessions button.selected
+) {
+  background: color-mix(in srgb, var(--product-accent) 10%, var(--product-surface));
+  background-image: none;
+  border-color: var(--product-border);
+  box-shadow: none;
+}
+
+body[data-surface='product'] .admin-session-transcript {
+  background: var(--product-surface);
+  background-image: none;
+}
+
+body[data-surface='product'] .admin-session-transcript article,
+body[data-surface='product'] .admin-session-transcript article.user {
+  width: min(840px, 100%);
+}
+
+body[data-surface='product'] .admin-session-transcript article strong {
+  min-height: 0;
+  padding: 0;
+  color: var(--product-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+body[data-surface='product'] .admin-session-transcript article p {
+  color: var(--product-text);
+  background: var(--product-surface-subtle);
+  background-image: none;
+  border-color: var(--product-border);
+  border-radius: var(--product-radius-panel);
+  box-shadow: none;
+}
+
+body[data-surface='product'] .admin-session-transcript article.user p {
+  background: color-mix(in srgb, var(--product-accent) 8%, var(--product-surface));
+  background-image: none;
+  border-color: var(--product-border);
+}
+
 .product-shell,
 .workbench-shell {
   width: 100%;

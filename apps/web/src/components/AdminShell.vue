@@ -29,24 +29,24 @@ async function logout() {
 </script>
 
 <template>
-  <main class="admin-shell" aria-labelledby="admin-page-title">
+  <main class="admin-shell product-shell" aria-labelledby="admin-page-title">
     <a class="skip-link" href="#admin-main-content" @click="focusAdminContent">跳到管理内容</a>
-    <header class="admin-topbar liquid-glass">
+    <header class="admin-topbar">
       <div class="admin-brand">
         <span class="brand-symbol"><ShieldCheck :size="18" /></span>
         <div><strong>ContentAI 管理后台</strong><small>用户、模型与真实用量</small></div>
       </div>
       <nav class="admin-primary-nav" aria-label="管理后台导航">
         <RouterLink to="/admin/users" :aria-current="route.name === 'admin-users' ? 'page' : undefined">
-          <Users :size="16" />用户管理
+          <Users :size="16" /><span class="admin-nav-label">用户管理</span>
         </RouterLink>
         <RouterLink to="/admin/models" :aria-current="route.name === 'admin-models' ? 'page' : undefined">
-          <Boxes :size="16" />模型管理
+          <Boxes :size="16" /><span class="admin-nav-label">模型管理</span>
         </RouterLink>
       </nav>
       <nav class="admin-utility-nav" aria-label="账户操作">
-        <button type="button" @click="router.push('/app')"><ArrowLeft :size="16" />返回工作台</button>
-        <button type="button" @click="logout"><LogOut :size="16" />退出</button>
+        <button type="button" aria-label="返回工作台" @click="router.push('/app')"><ArrowLeft :size="16" /><span class="admin-nav-label">返回工作台</span></button>
+        <button type="button" aria-label="退出管理后台" @click="logout"><LogOut :size="16" /><span class="admin-nav-label">退出</span></button>
       </nav>
     </header>
 
