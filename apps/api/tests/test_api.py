@@ -2567,6 +2567,7 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
     interrupts_payload: list[dict[str, Any]],
     forbidden_fragment: str,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     caplog.set_level(logging.DEBUG)
     with Session(get_engine()) as db_session:
@@ -2603,6 +2604,7 @@ def test_unsafe_waiting_interrupt_status_is_total_resume_is_stale_and_cancel_wor
         execution_id = execution.id
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         status_response = client.get(f"/api/chat/runs/{execution_id}/status")
         assert status_response.status_code == 200
         assert status_response.json()["interrupt"] is None

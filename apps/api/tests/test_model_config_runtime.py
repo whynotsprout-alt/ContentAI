@@ -27,6 +27,7 @@ from models.chat import (
 from models.enums import MessageRole, RunStatus
 from models.model_configuration import ModelConfiguration
 from services import tasks as tasks_module
+from services.side_effects import execute_side_effect_job, read_side_effect_receipt
 from sqlalchemy import text
 from sqlmodel import Session, select
 
@@ -311,6 +312,9 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
         def build_research_final_model(self) -> object:
             return object()
 
+        def close(self) -> bool:
+            return True
+
     old_gateway = RecordingGateway(
         [
             AIMessage(
@@ -330,16 +334,21 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
     )
     new_gateway = RecordingGateway([AIMessage(content="new configuration")])
     selected_ids: list[str] = []
-    container = RuntimeContainer(settings=get_settings())
+    container = RuntimeContainer(
+        settings=get_settings(),
+        side_effect_dispatcher=execute_side_effect_job,
+        side_effect_receipt_poller=read_side_effect_receipt,
+    )
 
-    def select_gateway(model_config_id: str):
+    def build_gateway(**kwargs: Any) -> RecordingGateway:
+        model_config_id = str(kwargs["model_config_id"])
         selected_ids.append(model_config_id)
         return {
             DEFAULT_MODEL_CONFIG_ID: old_gateway,
             "model-config-worker-v2": new_gateway,
         }[model_config_id]
 
-    container.gateway_for_model_config = select_gateway  # type: ignore[method-assign]
+    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
     app = create_app(settings=get_settings(), runtime=container)
     app.dependency_overrides[authenticate_request] = default_test_auth_context
     _seed_chat("session-worker-old-config")
