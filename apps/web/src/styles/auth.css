@@ -1,4 +1,6 @@
 .auth-shell {
+  --auth-muted: #4F5D53;
+  --auth-placeholder: #4B584F;
   position: relative;
   width: 100%;
   height: 100dvh;
@@ -48,7 +50,7 @@
 .auth-hero__copy p {
   max-width: 650px;
   margin: 0;
-  color: var(--muted);
+  color: var(--auth-muted);
   font-size: 14px;
   line-height: 1.75;
 }
@@ -71,6 +73,20 @@
   box-shadow: 0 28px 80px rgb(43 59 47 / 0.16), inset 0 1px rgb(255 255 255 / 0.82);
 }
 
+.auth-form-surface {
+  position: relative;
+  isolation: isolate;
+}
+
+.auth-form-surface::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgb(255 255 255 / 0.62), transparent 32%, transparent 72%, rgb(115 143 120 / 0.08));
+  content: '';
+}
+
 .auth-form {
   display: grid;
   gap: 16px;
@@ -85,7 +101,7 @@
 
 .auth-form > header p {
   margin: 0;
-  color: var(--muted);
+  color: var(--auth-muted);
   font-size: 12px;
   line-height: 1.65;
 }
@@ -102,13 +118,13 @@
 .password-field button {
   position: absolute;
   top: 50%;
-  right: 7px;
+  right: 2px;
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   place-items: center;
-  color: var(--faint);
+  color: var(--auth-placeholder);
   background: transparent;
   border: 0;
   border-radius: 50%;
@@ -135,6 +151,7 @@
 
 .auth-links {
   display: flex;
+  min-height: 44px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -144,13 +161,16 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: var(--faint);
+  color: var(--auth-muted);
   font-size: 11px;
 }
 
 .auth-links a,
 .auth-link-button {
-  color: var(--muted);
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  color: var(--auth-muted);
   font-size: 11px;
   text-underline-offset: 4px;
   transition: color var(--transition-fast);
@@ -182,7 +202,7 @@
 
 .auth-state > p {
   margin: 0;
-  color: var(--muted);
+  color: var(--auth-muted);
   font-size: 12px;
   line-height: 1.7;
 }
@@ -201,6 +221,14 @@
 @keyframes auth-reveal {
   from { opacity: 0; transform: translateY(16px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+.auth-form .field-block {
+  color: var(--auth-muted);
+}
+
+.auth-form :is(input, textarea)::placeholder {
+  color: var(--auth-placeholder);
 }
 
 @media (max-width: 1023px) {

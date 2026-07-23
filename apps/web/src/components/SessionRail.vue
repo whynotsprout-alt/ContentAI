@@ -105,6 +105,7 @@ function relativeDate(value: string) {
           class="session-select"
           type="button"
           :aria-label="compact ? displayTitle(session) : undefined"
+          :aria-current="session.session_id === activeSessionId ? 'page' : undefined"
           @click="emit('select', session.session_id)"
         >
           <MessageCircle v-if="compact" :size="18" aria-hidden="true" />

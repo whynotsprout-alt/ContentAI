@@ -68,7 +68,7 @@ async function submit() {
 
 <template>
   <main class="auth-shell">
-    <AuthBackdrop mode="hero" />
+    <AuthBackdrop />
     <section class="auth-hero" aria-labelledby="auth-hero-title">
       <div class="auth-hero__copy">
         <span class="section-kicker">CONTENT INTELLIGENCE</span>
@@ -77,7 +77,7 @@ async function submit() {
       </div>
 
       <div class="auth-access">
-        <div class="auth-form-card liquid-glass-strong">
+        <div class="auth-form-card auth-form-surface">
           <form class="auth-form" @submit.prevent="submit">
           <header>
             <span class="section-kicker">YOUR WORKSPACE</span>

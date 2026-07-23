@@ -34,7 +34,6 @@ const emit = defineEmits<{
 
 const agentMenuOpen = ref(false);
 const userMenuOpen = ref(false);
-const highlighted = ref(0);
 const agentButton = ref<HTMLButtonElement | null>(null);
 
 const selectedAgent = computed(() => props.agents.find((agent) => agent.id === props.activeAgentId));
@@ -42,7 +41,6 @@ const selectedAgent = computed(() => props.agents.find((agent) => agent.id === p
 function toggleAgentMenu() {
   userMenuOpen.value = false;
   agentMenuOpen.value = !agentMenuOpen.value;
-  highlighted.value = Math.max(0, props.agents.findIndex((agent) => agent.id === props.activeAgentId));
 }
 
 function choose(agentId: string) {
@@ -51,22 +49,10 @@ function choose(agentId: string) {
   void nextTick(() => agentButton.value?.focus());
 }
 
-function onAgentKeydown(event: KeyboardEvent) {
-  if (!agentMenuOpen.value && ['ArrowDown', 'ArrowUp'].includes(event.key)) toggleAgentMenu();
-  if (!agentMenuOpen.value || !props.agents.length) return;
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    agentMenuOpen.value = false;
-    agentButton.value?.focus();
-  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault();
-    const direction = event.key === 'ArrowDown' ? 1 : -1;
-    highlighted.value = (highlighted.value + direction + props.agents.length) % props.agents.length;
-  } else if (event.key === 'Enter' || event.key === ' ') {
-    event.preventDefault();
-    const agent = props.agents[highlighted.value];
-    if (agent) choose(agent.id);
-  }
+function closeAgentMenu() {
+  if (!agentMenuOpen.value) return;
+  agentMenuOpen.value = false;
+  void nextTick(() => agentButton.value?.focus());
 }
 </script>
 
@@ -99,14 +85,14 @@ function onAgentKeydown(event: KeyboardEvent) {
     </nav>
 
     <div class="header-controls">
-      <div class="header-popover" @keydown="onAgentKeydown">
+      <div class="header-popover" @keydown.esc.prevent.stop="closeAgentMenu">
         <button
           ref="agentButton"
           class="agent-picker-button"
           data-agent-manager-trigger
           type="button"
           :aria-expanded="agentMenuOpen"
-          aria-haspopup="listbox"
+          aria-controls="agent-picker-options"
           :disabled="switching || !agents.length"
           @click="toggleAgentMenu"
         >
@@ -114,15 +100,11 @@ function onAgentKeydown(event: KeyboardEvent) {
           <span class="agent-picker-label">{{ selectedAgent?.name ?? (agents.length ? '选择内容账号' : '尚未创建账号') }}</span>
           <ChevronDown :size="15" />
         </button>
-        <div v-if="agentMenuOpen" class="popover-menu agent-options" role="listbox" aria-label="选择内容账号">
+        <div v-if="agentMenuOpen" id="agent-picker-options" class="popover-menu agent-options" aria-label="选择内容账号">
           <button
-            v-for="(agent, index) in agents"
+            v-for="agent in agents"
             :key="agent.id"
             type="button"
-            role="option"
-            :aria-selected="agent.id === activeAgentId"
-            :class="{ highlighted: highlighted === index }"
-            @mouseenter="highlighted = index"
             @click="choose(agent.id)"
           >
             <span><strong>{{ agent.name }}</strong><small>{{ agent.description || '未填写账号定位' }}</small></span>
@@ -141,17 +123,16 @@ function onAgentKeydown(event: KeyboardEvent) {
           :aria-label="`账号菜单：${userEmail}`"
           :aria-expanded="userMenuOpen"
           aria-controls="user-account-menu"
-          aria-haspopup="menu"
           @click="userMenuOpen = !userMenuOpen; agentMenuOpen = false"
         >
           {{ userEmail.slice(0, 1).toUpperCase() }}
         </button>
-        <div v-if="userMenuOpen" id="user-account-menu" class="popover-menu user-menu" role="menu">
+        <div v-if="userMenuOpen" id="user-account-menu" class="popover-menu user-menu">
           <span class="user-email">{{ userEmail }}</span>
-          <button class="user-menu-mobile-action" data-agent-manager-trigger type="button" role="menuitem" @click="userMenuOpen = false; emit('openAgents')"><Settings :size="15" /> 内容账号</button>
-          <button v-if="isAdmin" class="user-menu-mobile-action" type="button" role="menuitem" @click="userMenuOpen = false; emit('openAdmin')"><ShieldCheck :size="15" /> 管理后台</button>
-          <button type="button" role="menuitem" @click="userMenuOpen = false; emit('changePassword')"><KeyRound :size="15" /> 修改密码</button>
-          <button type="button" role="menuitem" @click="userMenuOpen = false; emit('logout')"><LogOut :size="15" /> 退出登录</button>
+          <button class="user-menu-mobile-action" data-agent-manager-trigger type="button" @click="userMenuOpen = false; emit('openAgents')"><Settings :size="15" /> 内容账号</button>
+          <button v-if="isAdmin" class="user-menu-mobile-action" type="button" @click="userMenuOpen = false; emit('openAdmin')"><ShieldCheck :size="15" /> 管理后台</button>
+          <button type="button" @click="userMenuOpen = false; emit('changePassword')"><KeyRound :size="15" /> 修改密码</button>
+          <button type="button" @click="userMenuOpen = false; emit('logout')"><LogOut :size="15" /> 退出登录</button>
         </div>
       </div>
     </div>

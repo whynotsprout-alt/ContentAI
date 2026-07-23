@@ -82,7 +82,7 @@ describe('frontend plan contracts', () => {
       read('../src/components/ChatCanvas.vue'),
       read('../src/components/SessionRail.vue'),
       readOptional('../src/styles/product.css'),
-      read('../src/styles/light-theme.css')
+      readOptional('../src/styles/light-theme.css')
     ]);
 
     expect(chat).toContain('class="message-expand"');

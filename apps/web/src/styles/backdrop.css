@@ -1,5 +1,4 @@
 .ambient-backdrop {
-  --backdrop-veil: 0.4;
   position: fixed;
   z-index: 0;
   inset: 0;
@@ -9,13 +8,8 @@
   user-select: none;
 }
 
-.ambient-backdrop--hero { --backdrop-veil: 0; }
-.ambient-backdrop--workspace { --backdrop-veil: 0; }
-.ambient-backdrop--admin { --backdrop-veil: 0; }
-
 .ambient-backdrop__poster,
-.ambient-backdrop__video,
-.ambient-backdrop__tint {
+.ambient-backdrop__video {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -42,22 +36,10 @@
   opacity: 1;
 }
 
-.ambient-backdrop--hero .ambient-backdrop__poster {
+.ambient-backdrop__poster {
   filter: saturate(0.7) contrast(0.86) brightness(1.16);
 }
 
-.ambient-backdrop--hero .ambient-backdrop__video {
+.ambient-backdrop__video {
   filter: saturate(0.7) contrast(0.86) brightness(1.16);
-}
-
-.ambient-backdrop__tint {
-  background: transparent;
-  transition: background 420ms var(--ease-out);
-}
-
-.ambient-backdrop--workspace .ambient-backdrop__poster,
-.ambient-backdrop--admin .ambient-backdrop__poster,
-.ambient-backdrop--workspace .ambient-backdrop__video,
-.ambient-backdrop--admin .ambient-backdrop__video {
-  filter: saturate(0.62) contrast(0.84) brightness(1.18);
 }

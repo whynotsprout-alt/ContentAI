@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { LoaderCircle } from '@lucide/vue';
 import { submitPasswordChange } from '../auth/foundation';
 import { authApi } from '../services/api';
 
-const props = defineProps<{ forced?: boolean; titleId?: string; onChanged?: () => Promise<void> }>();
+const props = defineProps<{ forced?: boolean; titleId?: string; headingLevel?: 1 | 2; onChanged?: () => Promise<void> }>();
 const emit = defineEmits<{ changed: []; close: []; busy: [value: boolean] }>();
 
 const currentPassword = ref('');
 const newPassword = ref('');
 const confirmPassword = ref('');
 const state = reactive({ busy: false, error: '' });
+const headingTag = computed(() => `h${props.headingLevel ?? 2}`);
 
 async function submit() {
   await submitPasswordChange(state, {
@@ -31,7 +32,7 @@ async function submit() {
 <template>
   <form class="password-dialog" @submit.prevent="submit">
     <button v-if="!forced" class="dialog-close" type="button" aria-label="关闭" :disabled="state.busy" @click="emit('close')">×</button>
-    <h2 :id="titleId">修改密码</h2>
+    <component :is="headingTag" :id="titleId">修改密码</component>
     <p v-if="forced">为保障账号安全，请先修改临时密码。</p>
     <p v-else>更新后，其他已登录设备会自动退出。</p>
     <label class="field-block"><span>当前密码</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label>

@@ -26,6 +26,7 @@ const promptError = ref('');
 const compositionActive = ref(false);
 const resumeSubmitting = ref(false);
 const copiedIndex = ref(-1);
+const copyErrorIndex = ref(-1);
 const expanded = ref(new Set<number>());
 const chatStream = ref<HTMLElement | null>(null);
 const promptInput = ref<HTMLTextAreaElement | null>(null);
@@ -73,9 +74,18 @@ function toggleExpanded(index: number) {
 }
 
 async function copyMessage(message: WorkbenchMessage, index: number) {
-  await navigator.clipboard.writeText(message.content);
-  copiedIndex.value = index;
-  window.setTimeout(() => { if (copiedIndex.value === index) copiedIndex.value = -1; }, 1600);
+  copyErrorIndex.value = -1;
+  try {
+    await navigator.clipboard.writeText(message.content);
+    copiedIndex.value = index;
+    announcement.value = '回复已复制';
+    window.setTimeout(() => { if (copiedIndex.value === index) copiedIndex.value = -1; }, 1600);
+  } catch {
+    copiedIndex.value = -1;
+    copyErrorIndex.value = index;
+    announcement.value = '复制失败，请手动选择回复内容。';
+    window.setTimeout(() => { if (copyErrorIndex.value === index) copyErrorIndex.value = -1; }, 3000);
+  }
 }
 
 async function send() {
@@ -175,12 +185,12 @@ watch(() => props.lifecycle, (next, previous) => {
             v-if="message.role === 'assistant' && message.content"
             class="message-copy"
             type="button"
-            :aria-label="copiedIndex === index ? '已复制' : '复制回复'"
+            :aria-label="copiedIndex === index ? '已复制' : copyErrorIndex === index ? '复制失败，请手动选择回复内容' : '复制回复'"
             @click="copyMessage(message, index)"
           >
             <Check v-if="copiedIndex === index" :size="14" />
             <Copy v-else :size="14" />
-            <span>{{ copiedIndex === index ? '已复制' : '复制' }}</span>
+            <span>{{ copiedIndex === index ? '已复制' : copyErrorIndex === index ? '复制失败' : '复制' }}</span>
           </button>
         </header>
         <div class="message-bubble">

@@ -21,7 +21,7 @@ async function changed() {
 <template>
   <main class="product-shell password-page">
     <section class="password-panel" aria-label="账号安全">
-      <ChangePasswordForm forced :on-changed="changed" />
+      <ChangePasswordForm forced :heading-level="1" :on-changed="changed" />
     </section>
   </main>
 </template>

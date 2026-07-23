@@ -23,7 +23,7 @@ describe('quiet product workbench contract', () => {
     expect(root).not.toContain('desktop-gate');
     expect(root).not.toMatch(/web-background\.(?:mp4|jpg)/);
     expect(auth).toContain("defineAsyncComponent(() => import('../components/AmbientBackdrop.vue'))");
-    expect(auth).toContain('<AuthBackdrop mode="hero" />');
+    expect(auth).toContain('<AuthBackdrop />');
     expect(backdrop).toContain('saveData');
     expect(backdrop).toContain("effectiveType === '2g'");
     expect(backdrop).toContain("effectiveType === 'slow-2g'");

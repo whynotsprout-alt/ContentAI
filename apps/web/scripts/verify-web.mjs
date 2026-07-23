@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import axe from 'axe-core';
 import { chromium } from 'playwright-core';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -15,6 +16,7 @@ let vitePort = configuredVitePort;
 assert.ok(Number.isInteger(vitePort) && vitePort > 0 && vitePort < 65536, `无效端口：${vitePort}`);
 let baseUrl = `http://${viteHost}:${vitePort}`;
 const viteEntry = resolve(webRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+const axeAudits = [];
 
 mkdirSync(outputDir, { recursive: true });
 rmSync(resolve(outputDir, 'verify-web-failure.png'), { force: true });
@@ -373,7 +375,11 @@ async function installApiMocks(page, state) {
       return fulfillJson(route, authUser);
     }
     if (path === '/api/agents' && method === 'GET') return fulfillJson(route, state.agentDeleted ? [] : [agent]);
-    if (path === `/api/agents/${agent.id}` && method === 'GET') return fulfillJson(route, agent);
+    if (path === `/api/agents/${agent.id}` && method === 'GET') {
+      const response = state.agentDetailResponses?.shift();
+      if (response?.delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, response.delay));
+      return fulfillJson(route, response ? { ...agent, name: response.name } : agent);
+    }
     if (path === `/api/agents/${agent.id}` && method === 'DELETE') {
       state.agentDeleted = true;
       return fulfillJson(route, null);
@@ -607,6 +613,77 @@ async function expectNoHorizontalOverflow(locator, label) {
   );
 }
 
+async function expectAxeClean(page, stateName) {
+  if (!await page.evaluate(() => Boolean(window.axe))) {
+    await page.addScriptTag({ content: axe.source });
+  }
+  const result = await page.evaluate(async () => window.axe.run(document, {
+    resultTypes: ['violations']
+  }));
+  const viewport = await page.evaluate(() => `${window.innerWidth}x${window.innerHeight}`);
+  const route = new URL(page.url()).pathname;
+  const blocking = result.violations
+    .filter((violation) => ['serious', 'critical'].includes(violation.impact))
+    .flatMap((violation) => violation.nodes.map((node) => ({
+      state: stateName,
+      route,
+      viewport,
+      ruleId: violation.id,
+      impact: violation.impact,
+      target: node.target,
+      summary: node.failureSummary
+    })));
+  axeAudits.push({
+    state: stateName,
+    route,
+    viewport,
+    violationCount: result.violations.length,
+    seriousCriticalCount: blocking.length
+  });
+  assert.deepEqual(
+    blocking,
+    [],
+    `[axe] state=${stateName} route=${route} viewport=${viewport} serious/critical violations:\n${blocking
+      .map((item) => `${item.ruleId} impact=${item.impact} target=${item.target.join(' ')} — ${item.summary}`)
+      .join('\n')}`
+  );
+}
+
+async function expectMinimumTouchTargets(locator, label) {
+  await locator.waitFor({ state: 'visible' });
+  const failures = await locator.evaluate((root) => {
+    const selectorFor = (element) => {
+      if (element.id) return `#${CSS.escape(element.id)}`;
+      const testId = element.getAttribute('data-testid');
+      if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+      const className = Array.from(element.classList).slice(0, 2).map((name) => `.${CSS.escape(name)}`).join('');
+      return `${element.tagName.toLowerCase()}${className}`;
+    };
+    return Array.from(root.querySelectorAll('button, a[href], input, textarea, select, summary'))
+      .filter((element) => {
+        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false;
+        if ('disabled' in element && element.disabled) return false;
+        return getComputedStyle(element).visibility !== 'hidden';
+      })
+      .map((element) => {
+        const { width, height } = element.getBoundingClientRect();
+        return {
+          selector: selectorFor(element),
+          width: Math.round(width * 10) / 10,
+          height: Math.round(height * 10) / 10
+        };
+      })
+      .filter(({ width, height }) => width < 44 || height < 44);
+  });
+  assert.deepEqual(
+    failures,
+    [],
+    `${label} 可见触控目标必须至少 44x44：${failures
+      .map(({ selector, width, height }) => `${selector}=${width}x${height}`)
+      .join(', ')}`
+  );
+}
+
 async function expectPlainAdminSurfaces(page, label) {
   const decorated = await page.locator([
     '.admin-topbar',
@@ -760,9 +837,11 @@ async function runDesktopAcceptance(browser) {
     modelVersion: 7,
     modelLoadFailure: false,
     modelPutPayloads: [],
-    agentDeleted: false
+    agentDeleted: false,
+    agentDetailResponses: []
   };
   const screenshots = [];
+  let authRegisterLayout = null;
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
   page.on('console', (message) => {
     if (message.type() === 'error') state.consoleErrors.push(message.text());
@@ -792,7 +871,59 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await page.locator('.ambient-backdrop__video').count(), 0, '浅色静态背景不应渲染视频节点');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-material'), 'web-background');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-video-state'), 'poster');
+    await expectAxeClean(page, 'auth-login');
+    await expectMinimumTouchTargets(page.locator('.auth-form'), '1440x900 登录');
     await capture(page, '01-auth-login-1440x900.png', screenshots);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expectVisible(page.getByRole('heading', { name: '欢迎回到 ContentAI', exact: true }), '1280px 登录标题');
+    await expectNoHorizontalOverflow(page.locator('html'), '1280x800 登录整页');
+    await capture(page, '01a-auth-login-1280x800.png', screenshots);
+
+    await page.getByRole('link', { name: '创建账号', exact: true }).click();
+    await page.waitForURL('**/register');
+    await expectVisible(page.getByRole('heading', { name: '创建你的内容空间', exact: true }), '注册标题');
+    await expectAxeClean(page, 'auth-register');
+    await expectMinimumTouchTargets(page.locator('.auth-form'), '1280x800 注册');
+    await capture(page, '01d-auth-register-1280x800.png', screenshots);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForFunction(() => window.scrollY === 0);
+    await settleVisuals(page);
+    authRegisterLayout = await page.evaluate(() => {
+      const hero = document.querySelector('.auth-hero')?.getBoundingClientRect();
+      const eyebrow = document.querySelector('.auth-hero__copy .section-kicker')?.getBoundingClientRect();
+      const title = document.querySelector('#auth-hero-title')?.getBoundingClientRect();
+      return {
+        scrollY: window.scrollY,
+        viewportHeight: window.innerHeight,
+        pageHeight: document.documentElement.scrollHeight,
+        hero: hero && { top: hero.top, bottom: hero.bottom, height: hero.height },
+        eyebrow: eyebrow && { top: eyebrow.top, bottom: eyebrow.bottom, height: eyebrow.height },
+        title: title && { top: title.top, bottom: title.bottom, height: title.height }
+      };
+    });
+    assert.equal(authRegisterLayout.scrollY, 0, '1440x900 注册页截图前滚动位置应归零');
+    assert.ok(authRegisterLayout.hero, '1440x900 注册页 hero 应可测量');
+    assert.ok(authRegisterLayout.eyebrow, '1440x900 注册页 eyebrow 应可测量');
+    assert.ok(authRegisterLayout.title, '1440x900 注册页标题应可测量');
+    assert.ok(authRegisterLayout.hero.top >= 0, `注册 hero 顶部被裁切：${JSON.stringify(authRegisterLayout)}`);
+    assert.ok(
+      authRegisterLayout.hero.bottom <= authRegisterLayout.viewportHeight,
+      `注册 hero 底部被裁切：${JSON.stringify(authRegisterLayout)}`
+    );
+    assert.ok(
+      authRegisterLayout.eyebrow.top >= authRegisterLayout.hero.top + 16,
+      `注册 eyebrow 贴近或越过 hero 顶部：${JSON.stringify(authRegisterLayout)}`
+    );
+    assert.ok(
+      authRegisterLayout.title.top >= authRegisterLayout.eyebrow.bottom,
+      `注册标题与 eyebrow 发生裁切或重叠：${JSON.stringify(authRegisterLayout)}`
+    );
+    await capture(page, '01e-auth-register-1440x900.png', screenshots);
+
+    await page.getByRole('link', { name: '返回登录', exact: true }).click();
+    await page.waitForURL('**/login');
     await page.setViewportSize({ width: 768, height: 1024 });
     await expectVisible(page.getByRole('heading', { name: '欢迎回到 ContentAI', exact: true }), '768px 登录标题');
     await capture(page, '01b-auth-login-768x1024.png', screenshots);
@@ -810,10 +941,30 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByText(agent.name, { exact: true }).first(), '当前内容账号');
     await expectVisible(page.getByText('平台补贴与消费趋势', { exact: true }), '会话条目');
     await expectVisible(page.getByText('你以为平台又在撒钱，其实它们真正争夺的，是你下一次消费时第一个打开谁。', { exact: true }), '对话消息');
+    await expectAxeClean(page, 'workbench-messages');
+    const agentPicker = page.locator('.agent-picker-button');
+    await agentPicker.click();
+    const firstAgentOption = page.locator('#agent-picker-options button').first();
+    await expectVisible(firstAgentOption, '原生内容账号选项');
+    await page.keyboard.press('Tab');
+    await expectFocused(firstAgentOption, 'Tab 应进入第一个原生内容账号按钮');
+    await page.keyboard.press('Escape');
+    await expectHidden(page.locator('#agent-picker-options'), 'Escape 应关闭内容账号 disclosure');
+    await expectFocused(agentPicker, 'Escape 应把焦点归还内容账号触发器');
     await capture(page, '02-workbench-1440x900.png', screenshots);
 
     const sessionRail = page.locator('#session-navigation');
     await expectElementWidth(sessionRail, 280, '1440px 侧栏应为 280px');
+
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await expectElementWidth(sessionRail, 280, '1920px 侧栏应为 280px');
+    await expectNoHorizontalOverflow(page.locator('html'), '1920x1080 工作台整页');
+    await capture(page, '02a-workbench-1920x1080.png', screenshots);
+
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expectElementWidth(sessionRail, 264, '1280x720 侧栏应为 264px');
+    await expectNoHorizontalOverflow(page.locator('html'), '1280x720 工作台整页');
+    await capture(page, '02aa-workbench-1280x720.png', screenshots);
 
     await page.setViewportSize({ width: 1280, height: 800 });
     await expectElementWidth(sessionRail, 264, '1280px 侧栏应为 264px');
@@ -873,10 +1024,10 @@ async function runDesktopAcceptance(browser) {
     await mobilePrompt.fill('');
     await capture(page, '02g-workbench-360x800.png', screenshots);
     await page.locator('.user-menu-button').click();
-    await expectVisible(page.getByRole('menuitem', { name: '内容账号', exact: true }), '手机内容账号入口');
-    await expectVisible(page.getByRole('menuitem', { name: '管理后台', exact: true }), '手机管理后台入口');
-    await expectVisible(page.getByRole('menuitem', { name: '修改密码', exact: true }), '手机改密入口');
-    await expectVisible(page.getByRole('menuitem', { name: '退出登录', exact: true }), '手机退出入口');
+    await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '内容账号', exact: true }), '手机内容账号入口');
+    await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '管理后台', exact: true }), '手机管理后台入口');
+    await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '修改密码', exact: true }), '手机改密入口');
+    await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '退出登录', exact: true }), '手机退出入口');
     await page.keyboard.press('Escape');
 
     await page.setViewportSize({ width: 390, height: 844 });
@@ -887,7 +1038,18 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await sessionRail.getAttribute('role'), 'dialog', '手机会话抽屉应使用 dialog 语义');
     assert.equal(await sessionRail.getAttribute('aria-modal'), 'true', '手机会话抽屉应声明 aria-modal');
     await expectInsideViewport(sessionRail, page, '390px 手机会话抽屉');
+    await expectAxeClean(page, 'session-drawer');
+    await expectMinimumTouchTargets(sessionRail, '390x844 会话抽屉');
     await capture(page, '02h-workbench-390x844-drawer.png', screenshots);
+    await page.keyboard.press('Escape');
+
+    await page.setViewportSize({ width: 320, height: 800 });
+    const narrowPhoneToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
+    await narrowPhoneToggle.click();
+    await expectElementWidth(sessionRail, 320, '320px 手机抽屉应全屏');
+    await expectNoHorizontalOverflow(page.locator('html'), '320x800 工作台整页');
+    await expectMinimumTouchTargets(page.locator('.workbench-shell'), '320x800 工作台');
+    await capture(page, '02ha-workbench-320x800-drawer.png', screenshots);
     await page.keyboard.press('Escape');
 
     await page.setViewportSize({ width: 600, height: 800 });
@@ -899,7 +1061,7 @@ async function runDesktopAcceptance(browser) {
     assert.equal(state.mediaRequests.length, 0, 'reduced-motion 登录及工作台不应请求 MP4');
 
     await page.locator('.user-menu-button').click();
-    await page.getByRole('menuitem', { name: '修改密码', exact: true }).click();
+    await page.locator('#user-account-menu').getByRole('button', { name: '修改密码', exact: true }).click();
     await expectVisible(page.getByRole('heading', { name: '修改密码', exact: true }), '工作台改密弹层');
     const passwordDialog = page.locator('.accessible-dialog-default');
     await expectSolidProductDialog(passwordDialog, '工作台改密弹层');
@@ -922,6 +1084,7 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('button', { name: '拒绝全部', exact: true }), '批次拒绝按钮');
     await expectVisible(page.getByRole('button', { name: '批准全部并继续', exact: true }), '批次批准按钮');
     await expectVisible(page.getByRole('button', { name: '取消本次运行', exact: true }), '取消运行按钮');
+    await expectAxeClean(page, 'structured-interrupt');
     await capture(page, '02k-workbench-interrupt-1440x900.png', screenshots);
     await page.locator('.session-select').filter({ hasText: '平台补贴与消费趋势' }).click();
 
@@ -942,10 +1105,12 @@ async function runDesktopAcceptance(browser) {
     await expectHidden(page.locator('.agent-editor'), '360px 初始编辑器');
     await expectNoHorizontalOverflow(managerDialog, '360px 内容账号弹层');
     await expectNoHorizontalOverflow(manager, '360px 内容账号主体');
+    await expectAxeClean(page, 'agent-directory');
+    await expectMinimumTouchTargets(manager, '360x800 内容账号目录');
     await capture(page, '03a-agent-manager-360x800-directory.png', screenshots);
 
     await page.locator('.agent-directory-row').filter({ hasText: agent.name }).click();
-    const accountName = page.getByRole('textbox', { name: '账号名称', exact: true });
+    const accountName = page.locator('#agent-name');
     await expectVisible(accountName, '360px 账号名称字段');
     assert.equal(await accountName.inputValue(), agent.name);
     await expectHidden(page.locator('.agent-directory'), '360px 编辑态目录');
@@ -975,6 +1140,15 @@ async function runDesktopAcceptance(browser) {
     await expectSingleVerticalScrollContainer(manager, '360px 账号编辑器');
     await expectInsideViewport(page.locator('.editor-footer'), page, '360px 底部操作栏');
     await expectNoHorizontalOverflow(page.locator('.manager-layout'), '360px 账号管理布局');
+    await expectAxeClean(page, 'agent-editor');
+    await expectMinimumTouchTargets(manager, '360x800 内容账号编辑器');
+    await basicTab.click();
+    await accountName.fill('');
+    await page.getByRole('button', { name: '保存内容账号', exact: true }).click();
+    assert.equal(await accountName.getAttribute('aria-invalid'), 'true', '空账号名称应声明 aria-invalid');
+    assert.equal(await accountName.getAttribute('aria-describedby'), 'agent-name-error', '空账号名称应关联错误说明');
+    await expectFocused(accountName, '保存失败后应聚焦首个无效字段');
+    await accountName.fill(agent.name);
     await capture(page, '03b-agent-manager-360x800-editor.png', screenshots);
 
     const directorySearch = page.getByRole('searchbox', { name: '搜索内容账号', exact: true });
@@ -1050,6 +1224,15 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await basicTab.getAttribute('aria-selected'), 'true', '纵向 tabs 应使用 ArrowUp 返回');
     const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(managerColumns, /^280px 184px /, `1280px 账号配置应保持三栏：${managerColumns}`);
+    state.agentDetailResponses.push(
+      { delay: 280, name: '过期慢响应账号' },
+      { delay: 20, name: agent.name }
+    );
+    const financeDirectoryRow = page.locator('.agent-directory-row').filter({ hasText: agent.name });
+    await financeDirectoryRow.click();
+    await financeDirectoryRow.click();
+    await page.waitForTimeout(340);
+    assert.equal(await accountName.inputValue(), agent.name, '过期 Agent 响应不得覆盖最新选择');
     await expectNoHoverLift(page.getByRole('button', { name: '保存内容账号', exact: true }), page, '内容账号保存按钮');
     await expectNoHorizontalOverflow(manager, '1280px 内容账号主体');
     await capture(page, '03d-agent-manager-1280x800.png', screenshots);
@@ -1071,20 +1254,30 @@ async function runDesktopAcceptance(browser) {
     await page.getByRole('button', { name: '删除', exact: true }).click();
     await page.getByRole('button', { name: '确认删除', exact: true }).click();
     await expectVisible(accountName, '删除最后账号后的新建编辑器');
+    await page.waitForFunction(() => {
+      const input = document.querySelector('#agent-name');
+      return input instanceof HTMLInputElement && input.value === '';
+    });
     assert.equal(await accountName.inputValue(), '', '删除最后账号后应进入空白新建状态');
     assert.equal(await accountName.evaluate((element) => element === document.activeElement), true, '删除最后账号后焦点应进入账号名称');
     await capture(page, '03e-agent-manager-1280x800-empty-after-delete.png', screenshots);
     await page.keyboard.press('Escape');
     await expectHidden(managerHeading, '关闭 1280px 内容账号弹窗');
+    await expectVisible(page.locator('.onboarding-empty'), '删除最后账号后的工作台空态');
+    await expectAxeClean(page, 'workbench-empty');
 
     await page.getByRole('button', { name: '管理后台', exact: true }).click();
     await page.waitForURL('**/admin/users');
     await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '管理后台标题');
+    await expectAxeClean(page, 'admin-user-list');
+    await expectMinimumTouchTargets(page.locator('.admin-list-panel'), '1440x900 后台用户列表');
     const userRow = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
     await expectVisible(userRow, '用户表格行');
     await userRow.click();
     await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), '用户详情');
     await expectVisible(page.getByRole('button', { name: /查看会话记录/ }), '会话审计入口');
+    await expectAxeClean(page, 'admin-user-detail');
+    await expectMinimumTouchTargets(page.locator('.admin-detail-panel'), '1440x900 后台用户详情');
     await capture(page, '04-admin-detail-1440x900.png', screenshots);
 
     await page.getByRole('button', { name: /查看会话记录/ }).click();
@@ -1095,6 +1288,7 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByText(olderAdminSession.title, { exact: true }), '追加的审计会话');
     await page.getByRole('button', { name: '加载更多消息', exact: true }).click();
     await expectVisible(page.getByText('补充加载的审计消息。', { exact: true }), '追加的审计消息');
+    await expectAxeClean(page, 'audit-transcript');
     await capture(page, '05-admin-audit-1440x900.png', screenshots);
 
     await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
@@ -1102,6 +1296,8 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.locator('.model-status-panel').getByText('gpt-4.1-mini', { exact: true }), '当前模型');
     await page.getByRole('button', { name: '刷新模型', exact: true }).click();
     await expectVisible(page.getByText('已刷新 3 个可用模型。', { exact: true }), '模型刷新反馈');
+    await expectAxeClean(page, 'model-config');
+    await expectMinimumTouchTargets(page.locator('.model-admin-workspace'), '1440x900 模型配置');
     await capture(page, '06-admin-models-1440x900.png', screenshots);
 
     const modelBaseUrl = page.getByRole('textbox', { name: /Base URL/ });
@@ -1141,7 +1337,7 @@ async function runDesktopAcceptance(browser) {
     assert.ok(state.apiCalls.some((call) => call === 'POST /api/admin/model-config/probe'), '未覆盖模型探测 API');
     assert.ok(state.apiCalls.some((call) => call === 'PUT /api/admin/model-config'), '未覆盖模型并发更新 API');
 
-    return { screenshots, apiCalls: state.apiCalls };
+    return { screenshots, apiCalls: state.apiCalls, authRegisterLayout };
   } catch (error) {
     const diagnosticPath = resolve(outputDir, 'verify-web-failure.png');
     await page.screenshot({ path: diagnosticPath, animations: 'disabled' }).catch(() => {});
@@ -1245,6 +1441,9 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectResponsiveShell(width, `${width}px`);
     await expectVisible(page.locator('.admin-list-panel'), `${width}px 用户列表`);
     await expectHidden(page.locator('.admin-detail-panel'), `${width}px 初始用户详情`);
+    if (width === 360) {
+      await expectMinimumTouchTargets(page.locator('.admin-list-panel'), '360x800 后台用户列表');
+    }
     const row = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
     await row.click();
     const back = page.getByRole('button', { name: '返回用户列表', exact: true });
@@ -1253,6 +1452,9 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), `${width}px 用户详情`);
     await expectFocused(back, `${width}px 详情焦点应进入返回按钮`);
     await expectNoHorizontalOverflow(page.locator('.admin-workspace'), `${width}px 用户详情工作区`);
+    if (width === 360) {
+      await expectMinimumTouchTargets(page.locator('.admin-detail-panel'), '360x800 后台用户详情');
+    }
     return { row, back };
   }
 
@@ -1280,6 +1482,8 @@ async function runResponsiveAdminAcceptance(browser) {
     await page.getByRole('button', { name: '复制临时密码', exact: true }).click();
     await expectVisible(page.getByText('临时密码已复制。', { exact: true }), '临时密码复制反馈');
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'one-time-secret-1', '复制操作应写入系统剪贴板');
+    await expectAxeClean(page, 'temporary-password');
+    await expectMinimumTouchTargets(page.locator('.accessible-dialog-default'), '360x800 临时密码弹窗');
     await capture(page, '04b-admin-password-360x800.png', screenshots);
     await page.getByRole('button', { name: '关闭临时密码', exact: true }).click();
     await expectHidden(page.getByRole('heading', { name: '临时密码（仅显示一次）', exact: true }), '按钮关闭临时密码弹窗');
@@ -1322,6 +1526,8 @@ async function runResponsiveAdminAcceptance(browser) {
     await page.getByRole('button', { name: /查看会话记录/ }).click();
     await expectVisible(page.locator('.admin-audit-sessions'), '768px 会话索引');
     await expectHidden(page.locator('.admin-transcript'), '768px 初始 transcript');
+    await expectAxeClean(page, 'audit-list');
+    await expectMinimumTouchTargets(page.locator('.admin-audit-window'), '768x1024 审计列表');
     const sessionTarget = page.locator('[data-session-id="admin-session-17"]');
     state.adminSessionFailureId = 'admin-session-17';
     state.expectedConsoleResourceErrors += 2;
@@ -1393,6 +1599,9 @@ async function runResponsiveAdminAcceptance(browser) {
       await expectVisible(form, `${viewport.width}px 模型配置表单`);
       await expectVisible(details, `${viewport.width}px 完整状态 details`);
       await expectHidden(page.locator('.model-status-panel'), `${viewport.width}px 桌面状态栏`);
+      if (viewport.width === 360) {
+        await expectMinimumTouchTargets(page.locator('.model-admin-workspace'), '360x800 模型配置');
+      }
       const positions = await Promise.all([summary, form, details].map((locator) => locator.evaluate((element) => element.getBoundingClientRect().top)));
       assert.ok(positions[0] < positions[1] && positions[1] < positions[2], `${viewport.width}px 模型窄屏顺序错误：${positions.join(' < ')}`);
       await expectHidden(details.locator('.model-status-content'), `${viewport.width}px 默认折叠完整状态`);
@@ -1605,16 +1814,49 @@ async function runDirectProductIsolationAcceptance(browser) {
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
   await installApiMocks(page, state);
   try {
-    await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
-    await expectVisible(page.locator('.workbench-shell'), '直接进入工作台');
-    assert.equal(await page.locator('.ambient-backdrop').count(), 0, '工作台不应挂载认证背景');
-    assert.deepEqual(state.mediaRequests, [], '直接进入工作台不应请求 MP4');
-    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
-    await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '直接进入管理后台');
-    assert.equal(await page.locator('.ambient-backdrop').count(), 0, '管理后台不应挂载认证背景');
-    assert.deepEqual(state.mediaRequests, [], '直接进入管理后台不应请求 MP4');
+    const authenticatedRoutes = ['/app', '/change-password', '/admin/users', '/admin/models'];
+    for (const route of authenticatedRoutes) {
+      await page.goto(`${baseUrl}${route}`, { waitUntil: 'domcontentloaded' });
+      await expectVisible(page.locator('main').first(), `直接进入认证路由 ${route}`);
+      assert.equal(
+        await page.locator('.ambient-backdrop').count(),
+        0,
+        `认证路由 ${route} 不应挂载认证背景`
+      );
+      assert.deepEqual(state.mediaRequests, [], `认证路由 ${route} 不应请求 MP4`);
+    }
     assert.deepEqual(state.pageErrors, [], `直接进入工作台脚本错误：${state.pageErrors.join(' | ')}`);
-    return 'product-and-admin-routes-no-backdrop';
+    return {
+      status: 'authenticated-routes-no-backdrop',
+      routes: authenticatedRoutes,
+      mp4RequestCount: state.mediaRequests.length
+    };
+  } finally {
+    await context.close();
+  }
+}
+
+async function runAuthVideoFailureAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    colorScheme: 'light',
+    reducedMotion: 'no-preference',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  await page.route('**/api/auth/me', (route) => fulfillJson(
+    route,
+    { detail: { code: 'UNAUTHENTICATED', message: '请先登录', retryable: false } },
+    401
+  ));
+  await page.route(/\.mp4(?:$|\?)/i, (route) => route.abort('failed'));
+  try {
+    await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '欢迎回到 ContentAI', exact: true }), '视频失败时的登录表单');
+    await expectVisible(page.locator('.ambient-backdrop__poster'), '视频失败时的静态海报');
+    await page.locator('.ambient-backdrop[data-video-state="failed"]').waitFor({ state: 'visible' });
+    await expectMinimumTouchTargets(page.locator('.auth-form-surface'), '视频失败时的认证表单');
+    return 'auth-video-failure-form-available';
   } finally {
     await context.close();
   }
@@ -1649,11 +1891,114 @@ async function runChangePasswordSurfaceAcceptance(browser) {
     assert.equal(await page.locator('.auth-shell').count(), 0, '修改密码不应复用认证 hero');
     assert.equal(await page.locator('.ambient-backdrop').count(), 0, '修改密码不应挂载认证背景');
     assert.deepEqual(mp4Requests, [], '直接进入修改密码不应请求 MP4');
+    await expectAxeClean(page, 'forced-change-password');
+    await expectMinimumTouchTargets(page.locator('.password-page'), '1024x768 强制修改密码');
     const screenshot = resolve(outputDir, '07-change-password-1024x768.png');
     await page.screenshot({ path: screenshot, animations: 'disabled' });
     assert.ok(statSync(screenshot).size > 1000, `截图为空：${screenshot}`);
     return { status: 'change-password-neutral-product-surface', screenshot };
   } finally {
+    await context.close();
+  }
+}
+
+async function runPageScaleAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+    colorScheme: 'light',
+    reducedMotion: 'reduce',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  const state = {
+    authenticated: true,
+    apiCalls: [],
+    unexpectedApiCalls: [],
+    pageErrors: [],
+    consoleErrors: [],
+    failedResponses: [],
+    failedRequests: [],
+    mediaRequests: [],
+    modelVersion: 7,
+    modelLoadFailure: false,
+    modelPutPayloads: [],
+    agentDeleted: false,
+    agentDetailResponses: []
+  };
+  await installApiMocks(page, state);
+  const cdp = await context.newCDPSession(page);
+  try {
+    await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.workbench-shell'), '1280x720 工作台');
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 640,
+      height: 360,
+      deviceScaleFactor: 2,
+      mobile: false,
+      screenWidth: 1280,
+      screenHeight: 720
+    });
+    await page.waitForFunction(() => window.innerWidth === 640 && window.devicePixelRatio === 2);
+    const zoomMetrics = await page.evaluate(() => ({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      visualViewportWidth: window.visualViewport.width,
+      visualViewportHeight: window.visualViewport.height
+    }));
+    assert.equal(zoomMetrics.innerWidth, 640, `200% browser zoom 应把 1280px 物理宽度重排为 640 CSS px：${JSON.stringify(zoomMetrics)}`);
+    assert.equal(zoomMetrics.devicePixelRatio, 2, `200% browser zoom DPR 错误：${JSON.stringify(zoomMetrics)}`);
+    assert.ok(
+      Math.abs(zoomMetrics.visualViewportWidth - 640) <= 1,
+      `200% browser zoom visual viewport 宽度错误：${JSON.stringify(zoomMetrics)}`
+    );
+    await expectNoHorizontalOverflow(page.locator('html'), '640x360 200% browser zoom 工作台');
+    await expectInsideViewport(page.locator('.workbench-header'), page, '200% browser zoom header');
+    const sessionToggle = page.locator('.session-nav-toggle');
+    await expectVisible(sessionToggle, '200% browser zoom 会话菜单触发器');
+    await sessionToggle.click();
+    const zoomDrawer = page.locator('#session-navigation');
+    await expectVisible(zoomDrawer, '200% browser zoom 会话抽屉');
+    await expectInsideViewport(zoomDrawer, page, '200% browser zoom 会话抽屉');
+    await expectMinimumTouchTargets(zoomDrawer, '200% browser zoom 会话抽屉');
+    await page.keyboard.press('Escape');
+    await expectHidden(zoomDrawer, '200% browser zoom Escape 关闭会话抽屉');
+    const zoomUserMenuButton = page.locator('.user-menu-button');
+    await zoomUserMenuButton.click();
+    const zoomUserMenu = page.locator('#user-account-menu');
+    await expectVisible(zoomUserMenu, '200% browser zoom 账号菜单');
+    await expectInsideViewport(zoomUserMenu, page, '200% browser zoom 账号菜单');
+    await expectMinimumTouchTargets(zoomUserMenu, '200% browser zoom 账号菜单');
+    await zoomUserMenuButton.click();
+    await expectHidden(zoomUserMenu, '200% browser zoom 关闭账号菜单');
+    const composer = page.getByRole('textbox', { name: '对话输入', exact: true });
+    await composer.fill('200% 缩放功能验证');
+    assert.equal(await composer.inputValue(), '200% 缩放功能验证', '200% 缩放下输入功能应保持可用');
+    await expectInsideViewport(composer, page, '200% browser zoom 对话输入');
+    const sendButton = page.locator('.send-button');
+    await expectVisible(sendButton, '200% browser zoom 发送按钮');
+    assert.equal(await sendButton.isEnabled(), true, '200% browser zoom 发送按钮应可用');
+    await expectInsideViewport(sendButton, page, '200% browser zoom 发送按钮');
+    await expectMinimumTouchTargets(page.locator('.workbench-shell'), '200% browser zoom 工作台');
+    const screenshot = resolve(outputDir, '08-workbench-1280x720-browser-zoom-200.png');
+    await page.screenshot({ path: screenshot, animations: 'disabled' });
+    assert.ok(statSync(screenshot).size > 1000, `截图为空：${screenshot}`);
+    await cdp.send('Emulation.clearDeviceMetricsOverride');
+    await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
+    await page.waitForFunction(() => window.visualViewport?.scale >= 1.9);
+    const visualScale = await page.evaluate(() => window.visualViewport.scale);
+    assert.ok(visualScale >= 1.9, `200% pinch zoom smoke 未生效：${visualScale}`);
+    assert.deepEqual(state.pageErrors, [], `200% 缩放脚本错误：${state.pageErrors.join(' | ')}`);
+    return {
+      status: 'browser-zoom-200-reflow-functional',
+      ...zoomMetrics,
+      pinchScale: visualScale,
+      screenshot
+    };
+  } finally {
+    await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 1 }).catch(() => {});
+    await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {});
+    await cdp.detach().catch(() => {});
     await context.close();
   }
 }
@@ -1691,21 +2036,38 @@ try {
   const backdropMaterial = await runMotionBackdropAcceptance(browser);
   const constrainedBackdrop = await runConstrainedBackdropAcceptance(browser);
   const productIsolation = await runDirectProductIsolationAcceptance(browser);
+  const authVideoFailure = await runAuthVideoFailureAcceptance(browser);
   const changePasswordSurface = await runChangePasswordSurfaceAcceptance(browser);
+  const pageScaleAcceptance = await runPageScaleAcceptance(browser);
   console.log(JSON.stringify({
     ok: true,
     baseUrl,
     backdropMaterial,
     constrainedBackdrop,
     productIsolation,
+    authVideoFailure,
     changePasswordSurface,
+    pageScaleAcceptance,
+    authRegisterLayout: result.authRegisterLayout,
+    axe: {
+      stateCount: axeAudits.length,
+      seriousCriticalViolationCount: axeAudits.reduce(
+        (count, audit) => count + audit.seriousCriticalCount,
+        0
+      ),
+      audits: axeAudits
+    },
     responsiveAdmin: {
       screenshotCount: responsiveAdmin.screenshots.length,
       screenshots: responsiveAdmin.screenshots,
       apiCalls: responsiveAdmin.apiCalls
     },
-    screenshotCount: result.screenshots.length + responsiveAdmin.screenshots.length,
-    screenshots: [...result.screenshots, ...responsiveAdmin.screenshots],
+    screenshotCount: result.screenshots.length + responsiveAdmin.screenshots.length + 1,
+    screenshots: [
+      ...result.screenshots,
+      ...responsiveAdmin.screenshots,
+      pageScaleAcceptance.screenshot
+    ],
     apiCalls: result.apiCalls
   }, null, 2));
 } catch (error) {

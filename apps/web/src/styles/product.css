@@ -388,8 +388,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   border-radius: var(--product-radius-control);
 }
 
-.popover-menu button:hover,
-.popover-menu button.highlighted {
+.popover-menu button:hover {
   background: var(--product-surface-subtle);
 }
 
@@ -548,7 +547,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
 }
 
 .workbench-shell .compact-search input {
-  height: 42px;
+  height: 44px;
   color: var(--product-text);
 }
 

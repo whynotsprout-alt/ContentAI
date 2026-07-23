@@ -2,15 +2,10 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import backgroundImage from '../assets/backgrounds/web-background-poster.jpg';
 
-type AmbientBackdropMode = 'hero' | 'workspace' | 'admin';
 type NetworkInformation = EventTarget & {
   effectiveType?: string;
   saveData?: boolean;
 };
-
-const props = defineProps<{
-  mode: AmbientBackdropMode;
-}>();
 
 const video = ref<HTMLVideoElement | null>(null);
 const backgroundVideo = ref('');
@@ -100,7 +95,6 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="ambient-backdrop"
-    :class="`ambient-backdrop--${mode}`"
     :data-video-state="videoFailed ? 'failed' : videoReady ? 'ready' : 'poster'"
     data-material="web-background"
     aria-hidden="true"
@@ -124,6 +118,5 @@ onBeforeUnmount(() => {
       @canplay="handleVideoReady"
       @error="handleVideoError"
     ></video>
-    <div class="ambient-backdrop__tint"></div>
   </div>
 </template>

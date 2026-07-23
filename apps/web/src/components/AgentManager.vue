@@ -100,12 +100,15 @@ const valid = computed(() => Object.values(fieldErrors.value).every((value) => !
 const snapshot = computed(() => JSON.stringify(form.value));
 const dirty = computed(() => snapshot.value !== originalSnapshot.value);
 let compactLayoutQuery: MediaQueryList | null = null;
+let agentLoadGeneration = 0;
 
 function syncCompactLayout(event?: MediaQueryListEvent) {
   compactLayout.value = event?.matches ?? compactLayoutQuery?.matches ?? true;
 }
 
 function resetForm(template?: TemplateId | null) {
+  agentLoadGeneration += 1;
+  loading.value = false;
   const source = template ? templates[template] : null;
   form.value = source
     ? { name: source.name, positioning: source.positioning, scoring: source.scoring, content: source.content, sources: [...source.sources] }
@@ -139,11 +142,13 @@ async function edit(agentId: string, navigate = true) {
     return;
   }
   if (navigate) compactView.value = 'editor';
+  const requestGeneration = ++agentLoadGeneration;
   loading.value = true;
   error.value = '';
   notice.value = '';
   try {
     const agent = await api.agent(agentId);
+    if (requestGeneration !== agentLoadGeneration) return;
     form.value = {
       name: agent.name,
       positioning: agent.description,
@@ -157,9 +162,10 @@ async function edit(agentId: string, navigate = true) {
     originalSnapshot.value = JSON.stringify(form.value);
     if (navigate) void focusActiveTab();
   } catch (value) {
+    if (requestGeneration !== agentLoadGeneration) return;
     error.value = value instanceof ApiError ? value.message : String(value);
   } finally {
-    loading.value = false;
+    if (requestGeneration === agentLoadGeneration) loading.value = false;
   }
 }
 
@@ -176,6 +182,16 @@ async function focusDirectoryTarget() {
 async function focusEditorFallback() {
   await nextTick();
   accountNameInput.value?.focus();
+}
+
+async function focusFirstInvalid(field: keyof typeof fieldErrors.value) {
+  if (field === 'sources') activeSection.value = 'sources';
+  else if (field === 'scoring') activeSection.value = 'scoring';
+  else if (field === 'content') activeSection.value = 'content';
+  else activeSection.value = 'basic';
+  await nextTick();
+  const selector = field === 'sources' ? '#agent-source-first' : `#agent-${field}`;
+  document.querySelector<HTMLElement>(selector)?.focus();
 }
 
 function onSectionKeydown(event: KeyboardEvent, sectionId: SectionId) {
@@ -233,10 +249,7 @@ async function save() {
   if (!valid.value) {
     error.value = '请先修正标记的字段。';
     const firstInvalid = (Object.keys(fieldErrors.value) as Array<keyof typeof fieldErrors.value>).find((key) => fieldErrors.value[key]);
-    if (firstInvalid === 'sources') activeSection.value = 'sources';
-    else if (firstInvalid === 'scoring') activeSection.value = 'scoring';
-    else if (firstInvalid === 'content') activeSection.value = 'content';
-    else activeSection.value = 'basic';
+    if (firstInvalid) void focusFirstInvalid(firstInvalid);
     return;
   }
   saving.value = true;
@@ -316,7 +329,11 @@ function discardChanges() {
 }
 
 watch(() => props.open, (open) => {
-  if (!open) return;
+  if (!open) {
+    agentLoadGeneration += 1;
+    loading.value = false;
+    return;
+  }
   confirmClose.value = false;
   confirmDelete.value = false;
   discardTarget.value = 'close';
@@ -335,6 +352,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  agentLoadGeneration += 1;
   compactLayoutQuery?.removeEventListener('change', syncCompactLayout);
 });
 </script>
@@ -396,27 +414,27 @@ onBeforeUnmount(() => {
               <span class="form-badge">{{ mode === 'create' ? '新建账号' : '基础信息' }}</span>
               <h3>让 Agent 理解你的内容边界</h3>
               <p>用受众和内容价值描述定位，避免只写宽泛行业词。</p>
-              <label class="field-block"><span>账号名称</span><input ref="accountNameInput" v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" /><small v-if="touched && fieldErrors.name" class="field-error">{{ fieldErrors.name }}</small></label>
-              <label class="field-block"><span>账号定位</span><textarea v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" /><small v-if="touched && fieldErrors.positioning" class="field-error">{{ fieldErrors.positioning }}</small></label>
+              <label class="field-block"><span>账号名称</span><input id="agent-name" ref="accountNameInput" v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" :aria-invalid="touched && Boolean(fieldErrors.name)" :aria-describedby="touched && fieldErrors.name ? 'agent-name-error' : undefined" /><small v-if="touched && fieldErrors.name" id="agent-name-error" class="field-error">{{ fieldErrors.name }}</small></label>
+              <label class="field-block"><span>账号定位</span><textarea id="agent-positioning" v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" :aria-invalid="touched && Boolean(fieldErrors.positioning)" :aria-describedby="touched && fieldErrors.positioning ? 'agent-positioning-error' : undefined" /><small v-if="touched && fieldErrors.positioning" id="agent-positioning-error" class="field-error">{{ fieldErrors.positioning }}</small></label>
             </section>
 
             <section id="manager-panel-sources" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-sources" :hidden="activeSection !== 'sources'" tabindex="0">
-              <span class="form-badge">热点来源</span><h3>选择信号来源</h3><p>已选择 {{ form.sources.length }} / {{ allSources.length }} 个来源。这里只控制来源偏好，不表示连通性状态。</p>
-              <div class="source-groups">
-                <fieldset v-for="group in sourceGroups" :key="group.title" class="source-group"><legend>{{ group.title }}</legend><div class="source-grid">
-                  <button v-for="source in group.sources" :key="source.id" type="button" :aria-pressed="form.sources.includes(source.id)" :class="{ selected: form.sources.includes(source.id) }" @click="toggleSource(source.id)"><Check v-if="form.sources.includes(source.id)" :size="14" />{{ source.label }}</button>
+              <span class="form-badge">热点来源</span><h3>选择信号来源</h3><p id="agent-sources-help">已选择 {{ form.sources.length }} / {{ allSources.length }} 个来源。这里只控制来源偏好，不表示连通性状态。</p>
+              <div class="source-groups" role="group" aria-label="热点来源" aria-describedby="agent-sources-help agent-sources-error" :aria-invalid="touched && Boolean(fieldErrors.sources)">
+                <fieldset v-for="(group, groupIndex) in sourceGroups" :key="group.title" class="source-group"><legend>{{ group.title }}</legend><div class="source-grid">
+                  <button v-for="(source, sourceIndex) in group.sources" :id="groupIndex === 0 && sourceIndex === 0 ? 'agent-source-first' : undefined" :key="source.id" type="button" :aria-pressed="form.sources.includes(source.id)" :class="{ selected: form.sources.includes(source.id) }" @click="toggleSource(source.id)"><Check v-if="form.sources.includes(source.id)" :size="14" />{{ source.label }}</button>
                 </div></fieldset>
-              </div><small v-if="touched && fieldErrors.sources" class="field-error">{{ fieldErrors.sources }}</small>
+              </div><small id="agent-sources-error" class="field-error" aria-live="polite">{{ touched ? fieldErrors.sources : '' }}</small>
             </section>
 
             <section id="manager-panel-scoring" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-scoring" :hidden="activeSection !== 'scoring'" tabindex="0">
               <span class="form-badge">评分规则</span><h3>定义什么值得做</h3><p>描述判断维度与取舍逻辑，输出仍会作为普通 Assistant 消息出现在对话中。</p>
-              <label class="field-block"><span>选题评分提示词</span><textarea v-model="form.scoring" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.scoring" class="field-error">{{ fieldErrors.scoring }}</small></label>
+              <label class="field-block"><span>选题评分提示词</span><textarea id="agent-scoring" v-model="form.scoring" class="prompt-editor" rows="18" :aria-invalid="touched && Boolean(fieldErrors.scoring)" :aria-describedby="touched && fieldErrors.scoring ? 'agent-scoring-error' : undefined" /><small v-if="touched && fieldErrors.scoring" id="agent-scoring-error" class="field-error">{{ fieldErrors.scoring }}</small></label>
             </section>
 
             <section id="manager-panel-content" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-content" :hidden="activeSection !== 'content'" tabindex="0">
               <span class="form-badge">内容规则</span><h3>定义最终表达</h3><p>写清结构、语气、事实边界和引用要求，避免塞入具体某一次任务。</p>
-              <label class="field-block"><span>内容生成提示词</span><textarea v-model="form.content" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.content" class="field-error">{{ fieldErrors.content }}</small></label>
+              <label class="field-block"><span>内容生成提示词</span><textarea id="agent-content" v-model="form.content" class="prompt-editor" rows="18" :aria-invalid="touched && Boolean(fieldErrors.content)" :aria-describedby="touched && fieldErrors.content ? 'agent-content-error' : undefined" /><small v-if="touched && fieldErrors.content" id="agent-content-error" class="field-error">{{ fieldErrors.content }}</small></label>
             </section>
 
           </template>
