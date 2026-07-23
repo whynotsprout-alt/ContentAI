@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router';
+import { refreshAfterPasswordChange, safeInternalTarget } from '../auth/foundation';
 import ChangePasswordForm from '../components/ChangePasswordForm.vue';
 import { useAuthStore } from '../stores/auth';
 
@@ -7,14 +8,13 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 
-function safeInternalTarget(value: unknown) {
-  const target = typeof value === 'string' ? value : '';
-  return target.startsWith('/') && !target.startsWith('//') && target !== '/change-password' ? target : '/app';
-}
-
 async function changed() {
-  await auth.refresh();
-  await router.replace(safeInternalTarget(route.query.redirect));
+  try {
+    await refreshAfterPasswordChange({ refresh: () => auth.refresh(), clear: () => auth.clear() });
+    await router.replace(safeInternalTarget(route.query.redirect, router.resolve));
+  } catch {
+    await router.replace({ path: '/login', query: { notice: 'password-changed' } });
+  }
 }
 </script>
 
@@ -22,7 +22,7 @@ async function changed() {
   <main class="auth-shell">
     <section class="auth-access">
       <div class="auth-form-card liquid-glass-strong">
-        <ChangePasswordForm forced @changed="changed" />
+        <ChangePasswordForm forced :on-changed="changed" />
       </div>
     </section>
   </main>

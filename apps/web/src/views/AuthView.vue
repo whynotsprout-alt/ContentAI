@@ -16,7 +16,7 @@ const showPassword = ref(false);
 const showConfirmPassword = ref(false);
 const loading = ref(false);
 const error = ref('');
-const message = ref('');
+const message = ref(route.query.notice === 'password-changed' ? '密码已更新，请重新登录。' : '');
 
 const mode = computed(() => String(route.name ?? 'login'));
 const isLogin = computed(() => mode.value === 'login');

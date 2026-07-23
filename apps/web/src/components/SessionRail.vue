@@ -8,13 +8,16 @@ const props = withDefaults(defineProps<{
   activeSessionId: string;
   busy?: boolean;
   canCreate?: boolean;
+  hasMore?: boolean;
 }>(), {
   busy: false,
-  canCreate: true
+  canCreate: true,
+  hasMore: false
 });
 
 const emit = defineEmits<{
   create: [];
+  loadMore: [];
   select: [sessionId: string];
   delete: [session: ChatSessionSummary];
 }>();
@@ -96,6 +99,7 @@ function relativeDate(value: string) {
         <strong>{{ sessions.length ? '没有匹配的会话' : '还没有会话' }}</strong>
         <span>{{ sessions.length ? '尝试修改搜索词或筛选条件。' : '发送第一条消息后，会话会保存在这里。' }}</span>
       </div>
+      <button v-if="hasMore" type="button" class="session-load-more" :disabled="busy" @click="emit('loadMore')">加载更多会话</button>
     </div>
   </aside>
 </template>

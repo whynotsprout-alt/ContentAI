@@ -3,6 +3,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { AlertTriangle, LoaderCircle, Trash2, X } from '@lucide/vue';
 import { useRouter } from 'vue-router';
 import type { ChatSessionSummary, ResumeDecision } from './services/api';
+import { refreshAfterPasswordChange } from './auth/foundation';
 import { useAuthStore } from './stores/auth';
 import { useWorkbenchStore } from './stores/workbench';
 import AccessibleDialog from './components/AccessibleDialog.vue';
@@ -22,6 +23,7 @@ const initialAgentTemplate = ref<'finance' | 'ai' | null>(null);
 const deleteTarget = ref<ChatSessionSummary | null>(null);
 const deleteBusy = ref(false);
 const changePasswordOpen = ref(false);
+const passwordBusy = ref(false);
 let agentManagerReturnFocus: HTMLElement | null = null;
 
 function openAgentManager(template: 'finance' | 'ai' | null = null) {
@@ -88,6 +90,15 @@ function openPasswordDialog() {
   changePasswordOpen.value = true;
 }
 
+async function passwordChanged() {
+  try {
+    await refreshAfterPasswordChange({ refresh: () => auth.refresh(), clear: () => auth.clear() });
+    changePasswordOpen.value = false;
+  } catch {
+    await router.replace({ path: '/login', query: { notice: 'password-changed' } });
+  }
+}
+
 async function logout() {
   await auth.logout();
   await router.replace('/login');
@@ -127,7 +138,9 @@ onBeforeUnmount(() => {
         :active-session-id="store.sessionId"
         :busy="store.isSwitchingAgent || store.isLoadingSession"
         :can-create="Boolean(store.agentId)"
+        :has-more="Boolean(store.sessionNextCursor)"
         @create="createSession"
+        @load-more="store.loadMoreSessions()"
         @select="loadSession"
         @delete="requestDeleteSession"
       />
@@ -169,8 +182,8 @@ onBeforeUnmount(() => {
       </div>
     </AccessibleDialog>
 
-    <AccessibleDialog v-if="changePasswordOpen" title-id="change-password-title" @close="changePasswordOpen = false">
-      <ChangePasswordForm title-id="change-password-title" @close="changePasswordOpen = false" @changed="auth.refresh().then(() => { changePasswordOpen = false; })" />
+    <AccessibleDialog v-if="changePasswordOpen" title-id="change-password-title" :busy="passwordBusy" @close="changePasswordOpen = false">
+      <ChangePasswordForm title-id="change-password-title" :on-changed="passwordChanged" @busy="passwordBusy = $event" @close="changePasswordOpen = false" />
     </AccessibleDialog>
   </main>
 </template>

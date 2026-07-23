@@ -51,7 +51,7 @@ describe('API client usage contract', () => {
     expect(apiSource).toContain('export interface ChatSessionList');
     expect(apiSource).toContain('items: ChatSessionSummary[];');
     expect(apiSource).toContain('next_cursor: string | null;');
-    expect(apiSource).toContain('sessions: (cursor = \'\', limit = 50)');
+    expect(apiSource).toContain('sessions: (agentId = \'\', cursor = \'\', limit = 50)');
     expect(apiSource).toContain('session: (sessionId: string, cursor = \'\', limit = 50)');
     expect(apiSource).toContain('export interface PublicMemoryProposal');
     expect(apiSource).toContain('export interface PublicInterruptAction');
@@ -64,11 +64,12 @@ describe('API client usage contract', () => {
   });
 
   it('removes self-service reset APIs and routes while retaining password changes', async () => {
-    const [apiSource, routerSource, authViewSource, rootSource] = await Promise.all([
+    const [apiSource, routerSource, authViewSource, rootSource, foundationSource] = await Promise.all([
       readFile(resolve(process.cwd(), 'src/services/api.ts'), 'utf8'),
       readFile(resolve(process.cwd(), 'src/router.ts'), 'utf8'),
       readFile(resolve(process.cwd(), 'src/views/AuthView.vue'), 'utf8'),
-      readFile(resolve(process.cwd(), 'src/Root.vue'), 'utf8')
+      readFile(resolve(process.cwd(), 'src/Root.vue'), 'utf8'),
+      readFile(resolve(process.cwd(), 'src/auth/foundation.ts'), 'utf8')
     ]);
 
     expect(apiSource).not.toContain('forgotPassword');
@@ -81,7 +82,8 @@ describe('API client usage contract', () => {
     expect(apiSource).toContain('must_change_password: boolean;');
     expect(apiSource).toContain('temporary_password_expires_at: string | null;');
     expect(routerSource).toContain("path: '/change-password'");
-    expect(routerSource).toContain('auth.user?.must_change_password');
+    expect(routerSource).toContain('resolveAuthNavigation(to, auth.user)');
+    expect(foundationSource).toContain('user.must_change_password');
     expect(rootSource).toContain("window.addEventListener('contentai:auth-expired'");
   });
 });

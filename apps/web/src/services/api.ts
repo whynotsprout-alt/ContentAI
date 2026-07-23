@@ -343,8 +343,9 @@ export const api = {
     }),
   deleteAgent: (agentId: string) =>
     request<void>(`/api/agents/${agentId}`, { method: 'DELETE' }),
-  sessions: (cursor = '', limit = 50) => {
+  sessions: (agentId = '', cursor = '', limit = 50) => {
     const query = new URLSearchParams({ limit: String(limit) });
+    if (agentId) query.set('agent_id', agentId);
     if (cursor) query.set('cursor', cursor);
     return request<ChatSessionList>(`/api/chat/sessions?${query}`);
   },

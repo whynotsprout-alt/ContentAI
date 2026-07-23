@@ -29,8 +29,13 @@ export const useAuthStore = defineStore('auth', {
       this.loaded = true;
     },
     async refresh() {
-      this.user = await authApi.me();
-      this.loaded = true;
+      try {
+        this.user = await authApi.me();
+        this.loaded = true;
+      } catch (error) {
+        this.clear();
+        throw error;
+      }
     },
     async logout() {
       try {

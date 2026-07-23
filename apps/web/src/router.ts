@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router';
+import { resolveAuthNavigation } from './auth/foundation';
 import { useAuthStore } from './stores/auth';
 
 export const router = createRouter({
@@ -18,18 +19,5 @@ export const router = createRouter({
 router.beforeEach(async (to) => {
   const auth = useAuthStore();
   await auth.ensureLoaded();
-  if (to.meta.public) {
-    if (auth.isAuthenticated && ['login', 'register'].includes(String(to.name))) {
-      return auth.user?.must_change_password ? '/change-password' : '/app';
-    }
-    return true;
-  }
-  if (!auth.isAuthenticated) {
-    return { path: '/login', query: { redirect: to.fullPath } };
-  }
-  if (auth.user?.must_change_password && to.name !== 'change-password') {
-    return { path: '/change-password', query: { redirect: to.fullPath } };
-  }
-  if (to.meta.admin && !auth.isAdmin) return '/app';
-  return true;
+  return resolveAuthNavigation(to, auth.user);
 });

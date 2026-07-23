@@ -207,6 +207,43 @@ beforeEach(() => {
   setActivePinia(createPinia());
 });
 describe('workbench cross-session recovery', () => {
+  it('keeps pagination scoped to the selected agent and appends later pages', async () => {
+    const calls = [];
+    api.sessions = async (agentId, cursor) => {
+      calls.push({ agentId, cursor });
+      if (cursor) return { items: [{ session_id: 's2', agent_id: agentId, title: 'older', created_at: '', updated_at: '', latest_execution_status: 'idle', message_count: 0 }], next_cursor: null };
+      return { items: [{ session_id: 's1', agent_id: agentId, title: 'newer', created_at: '', updated_at: '', latest_execution_status: 'idle', message_count: 0 }], next_cursor: 'cursor-2' };
+    };
+    const store = initStore();
+
+    await store.refreshSessions();
+    store._beginConversationContext();
+    expect(store.sessionNextCursor).toBe('cursor-2');
+    await store.loadMoreSessions();
+
+    expect(calls).toEqual([{ agentId: 'acc-1', cursor: '' }, { agentId: 'acc-1', cursor: 'cursor-2' }]);
+    expect(store.sessions.map((session) => session.session_id)).toEqual(['s1', 's2']);
+    expect(store.sessionNextCursor).toBeNull();
+  });
+
+  it('merges refreshed messages by backend id without moving the older-page cursor', async () => {
+    setSession('s1', {
+      next_cursor: 'older-boundary',
+      messages: [{ id: 'old-1', role: 'assistant', message_type: 'text', content: 'same content', created_at: '' }]
+    });
+    const store = initStore();
+    await store.loadSession('s1');
+    api.session = async () => ({
+      ...apiState.sessionState.get('s1'),
+      next_cursor: 'newer-boundary',
+      messages: [{ id: 'new-2', role: 'assistant', message_type: 'text', content: 'same content', created_at: '' }]
+    });
+
+    await store.refreshSession();
+
+    expect(store.messages.map((message) => message.id)).toEqual(['old-1', 'new-2']);
+    expect(store.messageNextCursor).toBe('older-boundary');
+  });
   it('consumes actual V3 SSE frames and advances a composite event cursor', async () => {
     const executionId = 'exe-contract';
     setSession('s1', {

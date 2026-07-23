@@ -34,6 +34,7 @@ export interface TimelineEvent {
 }
 
 export type WorkbenchMessage = {
+  id?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   message_type: 'text' | 'markdown' | 'json';
@@ -233,6 +234,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       await this.refreshAgents();
       if (!this.agentId) {
         this.sessions = [];
+        this.sessionNextCursor = null;
         this.resetConversationContext();
         return;
       }
@@ -244,19 +246,25 @@ export const useWorkbenchStore = defineStore('workbench', {
       }
     },
 
-    async refreshSessions(cursor = '') {
-      const result = await api.sessions(cursor);
-      const allSessions = result.items;
-      this.sessions = this.agentId
-        ? allSessions.filter((session) => session.agent_id === this.agentId)
-        : allSessions;
+    async refreshSessions(cursor = '', append = false) {
+      const result = await api.sessions(this.agentId, cursor);
+      this.sessions = append
+        ? [...this.sessions, ...result.items.filter((session) => !this.sessions.some((item) => item.session_id === session.session_id))]
+        : result.items;
       this.sessionNextCursor = result.next_cursor;
+    },
+
+    async loadMoreSessions() {
+      if (!this.sessionNextCursor || !this.agentId) return;
+      await this.refreshSessions(this.sessionNextCursor, true);
     },
 
     async chooseAgent(agentId: string, force = false) {
       if (!force && this.agentId === agentId && this.sessionInfo?.agent_id === agentId) return true;
       const contextToken = this._beginConversationContext();
       this.agentId = agentId;
+      this.sessions = [];
+      this.sessionNextCursor = null;
       this.isSwitchingAgent = true;
       this.lastErrorCode = '';
       try {
@@ -355,6 +363,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         this.messages = session.messages
           .filter((message) => ['text', 'markdown'].includes(message.message_type))
           .map((message) => ({
+            id: message.id,
             role: message.role as WorkbenchMessage['role'],
             content: message.content,
             message_type: message.message_type,
@@ -399,7 +408,6 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.sessionInfo = null;
       this.executionInfo = null;
       this.pendingInterrupt = null;
-      this.sessionNextCursor = null;
       this.messageNextCursor = null;
       this.error = '';
       this.lastErrorCode = '';
@@ -568,7 +576,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.executionId = '';
       this.processedSseEventIds = [];
       this.lastEventSequence = 0;
-      const optimisticUserMessage: WorkbenchMessage = { role: 'user', content: message, message_type: 'text' };
+      const optimisticUserMessage: WorkbenchMessage = { role: 'user', content: message, message_type: 'text', assistant_state: 'normal' };
       this.messages.push(optimisticUserMessage);
       this._ensureAssistantPlaceholder();
       try {
@@ -1282,22 +1290,31 @@ export const useWorkbenchStore = defineStore('workbench', {
       this._removeActiveStreamingAssistantPlaceholder();
     },
 
-    async _hydrateMessages(session: ChatSessionDetail) {
+    async _hydrateMessages(session: ChatSessionDetail, preserveCursor = true) {
       const mapped: WorkbenchMessage[] = session.messages
         .filter((message) => ['text', 'markdown'].includes(message.message_type))
         .map((message) => ({
+          id: message.id,
           role: message.role as WorkbenchMessage['role'],
           content: message.content,
           message_type: message.message_type,
           assistant_state: 'normal' as AssistantBubbleState
         }));
-      const existing = this.messages.filter((message) => message.assistant_state === 'normal');
-      const missing = existing.filter((message) => !mapped.some((candidate) =>
-        candidate.role === message.role &&
-        candidate.content === message.content
-      ));
-      this.messages = [...missing, ...mapped];
-      this.messageNextCursor = session.next_cursor;
+      const merged = [...this.messages];
+      for (const message of mapped) {
+        const sameId = message.id ? merged.findIndex((item) => item.id === message.id) : -1;
+        if (sameId >= 0) {
+          merged.splice(sameId, 1, message);
+          continue;
+        }
+        const optimistic = !message.id
+          ? -1
+          : merged.findIndex((item) => !item.id && item.role === message.role && item.content === message.content);
+        if (optimistic >= 0) merged.splice(optimistic, 1, message);
+        else merged.push(message);
+      }
+      this.messages = merged;
+      if (!preserveCursor) this.messageNextCursor = session.next_cursor;
     },
 
     _stopSseRecoveryPoll(resetAttempts = true) {
