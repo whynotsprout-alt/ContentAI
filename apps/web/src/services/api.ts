@@ -92,18 +92,35 @@ export interface RunMessage {
 }
 
 export interface SendMessageRequest {
-  agent_id: string;
   message: string;
   message_id?: string;
   idempotency_key?: string;
 }
+
+export interface PublicMemoryProposal {
+  type: string;
+  content: string;
+}
+
+export interface PublicInterruptAction {
+  tool_name: string;
+  purpose: string;
+  memory: PublicMemoryProposal | null;
+}
+
+export interface PublicInterrupt {
+  interrupt_id: string;
+  actions: PublicInterruptAction[];
+}
+
+export type ResumeDecision = 'approve' | 'reject';
 
 export interface ChatExecutionInfo {
   id: string;
   session_id: string;
   status: ExecutionStatus;
   error?: { code: string; message: string; retryable: boolean } | null;
-  interrupt_payload?: Record<string, unknown>;
+  interrupt: PublicInterrupt | null;
   streaming_degraded?: boolean;
   streaming_degraded_reason?: string;
   queue_stage?: 'dispatching' | 'waiting_worker' | 'starting' | null;
@@ -130,7 +147,13 @@ export interface ChatSessionSummary {
 
 export interface ChatSessionDetail extends ChatSessionSummary {
   messages: RunMessage[];
+  next_cursor: string | null;
   latest_execution: ChatExecutionInfo | null;
+}
+
+export interface ChatSessionList {
+  items: ChatSessionSummary[];
+  next_cursor: string | null;
 }
 
 export type AgentProfileDetail = AgentProfile;
@@ -179,7 +202,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const error = await apiErrorFromResponse(response);
-    const isCredentialRequest = ['/api/auth/login', '/api/auth/register', '/api/auth/forgot-password', '/api/auth/reset-password'].includes(path);
+    const isCredentialRequest = ['/api/auth/login', '/api/auth/register'].includes(path);
     const accountUnavailable = error.status === 401 || (error.status === 403 && /disabled|禁用/i.test(`${error.code} ${error.message}`));
     if (!isCredentialRequest && accountUnavailable && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('contentai:auth-expired', { detail: error }));
@@ -320,8 +343,16 @@ export const api = {
     }),
   deleteAgent: (agentId: string) =>
     request<void>(`/api/agents/${agentId}`, { method: 'DELETE' }),
-  sessions: () => request<ChatSessionSummary[]>('/api/chat/sessions'),
-  session: (sessionId: string) => request<ChatSessionDetail>(`/api/chat/sessions/${sessionId}`),
+  sessions: (cursor = '', limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    return request<ChatSessionList>(`/api/chat/sessions?${query}`);
+  },
+  session: (sessionId: string, cursor = '', limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    return request<ChatSessionDetail>(`/api/chat/sessions/${sessionId}?${query}`);
+  },
   createSession: (payload: { agent_id: string }) =>
     request<{ session_id: string; agent_id: string; agent_version_id: string; title: string }>('/api/chat/sessions', {
       method: 'POST',
@@ -338,7 +369,6 @@ export const api = {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        agent_id: payload.agent_id,
         message: payload.message,
         ...(payload.message_id ? { message_id: payload.message_id } : {}),
         ...(payload.idempotency_key ? { idempotency_key: payload.idempotency_key } : {})
@@ -348,7 +378,7 @@ export const api = {
   executionEvents: (runId: string, afterSequence = 0) =>
     new FetchEventStream(`${API_BASE}/api/chat/runs/${runId}/events?after_sequence=${afterSequence}`),
   runStatus: (runId: string) => request<ChatExecutionInfo>(`/api/chat/runs/${runId}/status`),
-  resumeRun: (runId: string, payload: { agent_id: string; message: string }) =>
+  resumeRun: (runId: string, payload: { interrupt_id: string; decision: ResumeDecision }) =>
     request<ChatExecutionInfo>(`/api/chat/runs/${runId}/resume`, {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -364,6 +394,8 @@ export interface CurrentUser {
   status: string;
   email_verified_at: string | null;
   password_changed_at: string;
+  must_change_password: boolean;
+  temporary_password_expires_at: string | null;
   created_at: string;
   last_login_at: string | null;
 }
@@ -456,16 +488,6 @@ export const authApi = {
     }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   me: () => request<CurrentUser>('/api/auth/me'),
-  forgotPassword: (email: string) =>
-    request<{ message: string }>('/api/auth/forgot-password', {
-      method: 'POST',
-      body: JSON.stringify({ email })
-    }),
-  resetPassword: (token: string, password: string) =>
-    request<{ message: string }>('/api/auth/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({ token, password })
-    }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ message: string }>('/api/auth/change-password', {
       method: 'POST',

@@ -28,6 +28,10 @@ export const useAuthStore = defineStore('auth', {
       this.user = await authApi.login(email, password);
       this.loaded = true;
     },
+    async refresh() {
+      this.user = await authApi.me();
+      this.loaded = true;
+    },
     async logout() {
       try {
         await authApi.logout();

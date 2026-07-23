@@ -98,7 +98,7 @@ function installApiMock() {
       updateAgent: async (id, payload) => ({ id, ...payload }),
       deleteAgent: async () => undefined,
       sessions: async () => {
-        return Array.from(apiState.sessionState.values()).map((session) => ({
+        return { items: Array.from(apiState.sessionState.values()).map((session) => ({
           session_id: session.session_id,
           agent_id: session.agent_id,
           title: session.title,
@@ -106,7 +106,7 @@ function installApiMock() {
           updated_at: session.updated_at,
           latest_execution_status: session.latest_execution_status,
           message_count: session.messages.length
-        }));
+        })), next_cursor: null };
       },
       session: async (sessionId) => apiState.sessionState.get(sessionId),
       createSession: async () => {
@@ -710,7 +710,10 @@ describe('workbench cross-session recovery', () => {
         session_id: 'waiting',
         agent_id: 'acc-1',
         status: 'waiting_input',
-        interrupt_payload: { interrupts: [{ value: 'Confirm publication' }] }
+        interrupt: {
+          interrupt_id: 'interrupt-waiting',
+          actions: [{ tool_name: 'remember', purpose: '保存一条长期记忆', memory: { type: 'semantic', content: 'Confirm publication' } }]
+        }
       }
     });
     const store = initStore();
@@ -719,6 +722,54 @@ describe('workbench cross-session recovery', () => {
     expect(store.runLifecycle).toBe('waiting_input');
     expect(store.canResume).toBe(true);
     expect(store.executionId).toBe('exe-waiting');
+  });
+
+  it('fails closed for malformed interrupts while keeping cancellation available', async () => {
+    setSession('waiting', {
+      latest_execution_status: 'waiting_input',
+      latest_execution: {
+        id: 'exe-waiting',
+        session_id: 'waiting',
+        status: 'waiting_input',
+        interrupt: { interrupt_id: '', actions: [] }
+      }
+    });
+    const store = initStore();
+
+    await store.loadSession('waiting');
+
+    expect(store.canResume).toBe(false);
+    await store.cancelActiveRun();
+    expect(store.runLifecycle).toBe('cancelled');
+  });
+
+  it('resumes a valid interrupt with its id and a decision only', async () => {
+    setSession('waiting', {
+      latest_execution_status: 'waiting_input',
+      latest_execution: {
+        id: 'exe-waiting',
+        session_id: 'waiting',
+        status: 'waiting_input',
+        interrupt: {
+          interrupt_id: 'interrupt-1',
+          actions: [{ tool_name: 'remember', purpose: '保存记忆', memory: null }]
+        }
+      }
+    });
+    const store = initStore();
+    let received = null;
+    api.resumeRun = async (runId, payload) => {
+      received = { runId, payload };
+      return { id: runId, session_id: 'waiting', status: 'running', interrupt: null };
+    };
+
+    await store.loadSession('waiting');
+
+    expect(await store.resume('approve')).toBe(true);
+    expect(received).toEqual({
+      runId: 'exe-waiting',
+      payload: { interrupt_id: 'interrupt-1', decision: 'approve' }
+    });
   });
 
   it('keeps an active session when backend rejects deletion', async () => {

@@ -1,16 +1,28 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { RouterView, useRoute } from 'vue-router';
+import { computed, onBeforeUnmount, onMounted } from 'vue';
+import { RouterView, useRoute, useRouter } from 'vue-router';
 import AmbientBackdrop from './components/AmbientBackdrop.vue';
+import { useAuthStore } from './stores/auth';
 
 type AmbientBackdropMode = 'hero' | 'workspace' | 'admin';
 
 const route = useRoute();
+const router = useRouter();
+const auth = useAuthStore();
 
 const visualMode = computed<AmbientBackdropMode>(() => {
   const mode = route.meta.visualMode;
   return mode === 'hero' || mode === 'admin' ? mode : 'workspace';
 });
+
+function handleAuthExpired() {
+  const redirect = route.fullPath.startsWith('/') && !route.fullPath.startsWith('//') ? route.fullPath : '/app';
+  auth.clear();
+  void router.replace({ path: '/login', query: { redirect } });
+}
+
+onMounted(() => window.addEventListener('contentai:auth-expired', handleAuthExpired));
+onBeforeUnmount(() => window.removeEventListener('contentai:auth-expired', handleAuthExpired));
 </script>
 
 <template>

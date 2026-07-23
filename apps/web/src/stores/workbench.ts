@@ -9,7 +9,9 @@ import {
   type AgentProfileUpdatePayload,
   type ChatSessionDetail,
   type ChatExecutionInfo,
-  type FetchEventStream
+  type FetchEventStream,
+  type PublicInterrupt,
+  type ResumeDecision
 } from '../services/api';
 
 const SSE_RECOVERY_INITIAL_DELAY_MS = 1000;
@@ -147,10 +149,36 @@ function streamEventSequence(event: MessageEvent) {
   }
 }
 
+function publicInterrupt(value: unknown): PublicInterrupt | null {
+  if (!value || typeof value !== 'object') return null;
+  const interrupt = value as Record<string, unknown>;
+  const interruptId = typeof interrupt.interrupt_id === 'string' ? interrupt.interrupt_id.trim() : '';
+  if (!interruptId || !Array.isArray(interrupt.actions) || !interrupt.actions.length) return null;
+  const actions = interrupt.actions.map((value) => {
+    if (!value || typeof value !== 'object') return null;
+    const action = value as Record<string, unknown>;
+    const toolName = typeof action.tool_name === 'string' ? action.tool_name.trim() : '';
+    const purpose = typeof action.purpose === 'string' ? action.purpose.trim() : '';
+    if (!toolName || !purpose) return null;
+    const memoryValue = action.memory;
+    if (memoryValue === null || memoryValue === undefined) return { tool_name: toolName, purpose, memory: null };
+    if (typeof memoryValue !== 'object') return null;
+    const memory = memoryValue as Record<string, unknown>;
+    const type = typeof memory.type === 'string' ? memory.type.trim() : '';
+    const content = typeof memory.content === 'string' ? memory.content.trim() : '';
+    return type && content ? { tool_name: toolName, purpose, memory: { type, content } } : null;
+  });
+  return actions.every((action): action is NonNullable<typeof action> => action !== null)
+    ? { interrupt_id: interruptId, actions }
+    : null;
+}
+
 export const useWorkbenchStore = defineStore('workbench', {
   state: () => ({
     agents: [] as AgentProfile[],
     sessions: [] as ChatSessionSummary[],
+    sessionNextCursor: null as string | null,
+    messageNextCursor: null as string | null,
     agentId: '',
     sessionId: '',
     executionId: '',
@@ -160,6 +188,7 @@ export const useWorkbenchStore = defineStore('workbench', {
     events: [] as TimelineEvent[],
     sessionInfo: null as ChatSessionDetail | null,
     executionInfo: null as ChatExecutionInfo | null,
+    pendingInterrupt: null as PublicInterrupt | null,
     error: '',
     assistantStreamingBuffer: '',
     assistantStreamingState: 'normal' as AssistantBubbleState,
@@ -191,14 +220,12 @@ export const useWorkbenchStore = defineStore('workbench', {
     canResume(state) {
       return Boolean(
         state.sessionId &&
+          state.pendingInterrupt &&
           (state.status === 'waiting_input' || state.runLifecycle === 'waiting_input')
       );
     },
     selectedAgent(state) {
       return state.agents.find((item) => item.id === state.agentId);
-    },
-    interruptPayload(state) {
-      return state.executionInfo?.interrupt_payload ?? {};
     }
   },
   actions: {
@@ -217,11 +244,13 @@ export const useWorkbenchStore = defineStore('workbench', {
       }
     },
 
-    async refreshSessions() {
-      const allSessions = await api.sessions();
+    async refreshSessions(cursor = '') {
+      const result = await api.sessions(cursor);
+      const allSessions = result.items;
       this.sessions = this.agentId
         ? allSessions.filter((session) => session.agent_id === this.agentId)
         : allSessions;
+      this.sessionNextCursor = result.next_cursor;
     },
 
     async chooseAgent(agentId: string, force = false) {
@@ -267,6 +296,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.events = [];
       this.sessionInfo = null;
       this.executionInfo = null;
+      this.pendingInterrupt = null;
       this.executionId = '';
       this.activeSessionId = '';
 
@@ -306,6 +336,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.lastEventSequence = 0;
       this.sessionInfo = null;
       this.executionInfo = null;
+      this.pendingInterrupt = null;
 
       try {
         const session = await api.session(sessionId);
@@ -329,6 +360,7 @@ export const useWorkbenchStore = defineStore('workbench', {
             message_type: message.message_type,
             assistant_state: 'normal'
           }));
+        this.messageNextCursor = session.next_cursor;
         this.executionId = session.latest_execution?.id ?? '';
         this.activeSessionId = '';
         const resolvedStatus = resolveSessionStatus(session, 'idle');
@@ -337,7 +369,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         this.assistantStreamingState = 'normal';
 
         this.sessionInfo = session;
-        this.executionInfo = session.latest_execution;
+        this._setExecutionInfo(session.latest_execution);
         if (['queued', 'running', 'reconnecting'].includes(this.runLifecycle)) {
           this._scheduleSseRecovery(session.session_id, contextToken);
           this._ensureAssistantPlaceholder();
@@ -366,6 +398,9 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.events = [];
       this.sessionInfo = null;
       this.executionInfo = null;
+      this.pendingInterrupt = null;
+      this.sessionNextCursor = null;
+      this.messageNextCursor = null;
       this.error = '';
       this.lastErrorCode = '';
       this.statusNotice = '';
@@ -423,6 +458,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         this.events = [];
         this.sessionInfo = null;
         this.executionInfo = null;
+        this.pendingInterrupt = null;
         this.executionId = '';
         this.activeSessionId = '';
         this.status = 'idle';
@@ -537,7 +573,6 @@ export const useWorkbenchStore = defineStore('workbench', {
       this._ensureAssistantPlaceholder();
       try {
         const submitted = await api.sendMessage(requestSessionId, {
-          agent_id: this.agentId,
           message,
           idempotency_key: requestIdempotencyKey
         });
@@ -564,7 +599,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       }
     },
 
-    async resume(message: string) {
+    async resume(decision: ResumeDecision) {
       if (!this.canResume) return false;
       const contextToken = this.sessionContextToken;
       const requestSessionId = this.sessionId;
@@ -582,13 +617,15 @@ export const useWorkbenchStore = defineStore('workbench', {
         if (this.sessionInfo?.agent_id !== this.agentId) {
           throw new Error('当前会话与所选 Agent 不一致，请重新选择 Agent 后继续。');
         }
+        const interrupt = this.pendingInterrupt;
+        if (!interrupt) throw new Error('当前确认请求已失效，请刷新会话后重试。');
         const execution = await api.resumeRun(requestExecutionId, {
-          agent_id: this.agentId,
-          message
+          interrupt_id: interrupt.interrupt_id,
+          decision
         });
         if (!this._isConversationContextCurrent(contextToken)) return false;
         this.executionId = execution.id;
-        this.executionInfo = execution;
+        this._setExecutionInfo(execution);
         this.listen(requestSessionId, contextToken, api.executionEvents(execution.id));
         await this.refreshSessions().catch(() => undefined);
         return true;
@@ -608,7 +645,7 @@ export const useWorkbenchStore = defineStore('workbench', {
     },
 
     async cancelActiveRun() {
-      if (!['queued', 'running', 'reconnecting'].includes(this.runLifecycle) || !this.sessionId) return;
+      if (!['queued', 'running', 'reconnecting', 'waiting_input'].includes(this.runLifecycle) || !this.sessionId) return;
       const contextToken = this.sessionContextToken;
       const sessionId = this.sessionId;
       this._setRunLifecycle('cancelling');
@@ -628,14 +665,14 @@ export const useWorkbenchStore = defineStore('workbench', {
         const execution = await api.cancelRun(executionId);
         if (!this._isConversationContextCurrent(contextToken) || this.sessionId !== sessionId) return;
         this.executionId = execution.id;
-        this.executionInfo = execution;
+        this._setExecutionInfo(execution);
 
         for (let attempt = 0; attempt < 20; attempt += 1) {
           const latest = await api.session(sessionId);
           if (!this._isConversationContextCurrent(contextToken) || this.sessionId !== sessionId) return;
           const latestExecution = latest.latest_execution;
           this.sessionInfo = latest;
-          this.executionInfo = latestExecution;
+          this._setExecutionInfo(latestExecution);
           this.executionId = latestExecution?.id ?? executionId;
           const lifecycle = toRunLifecycle(latestExecution?.status);
           if (!['queued', 'running', 'reconnecting'].includes(lifecycle)) {
@@ -1077,13 +1114,20 @@ export const useWorkbenchStore = defineStore('workbench', {
       return !this.executionId || !executionId || executionId === this.executionId;
     },
 
+    _setExecutionInfo(execution: ChatExecutionInfo | null) {
+      this.executionInfo = execution;
+      this.pendingInterrupt = execution?.status === 'waiting_input'
+        ? publicInterrupt(execution.interrupt)
+        : null;
+    },
+
     async refreshSession(hydrateMessages = true) {
       if (!this.sessionId) return;
       const contextToken = this.sessionContextToken;
       const sessionInfo = await api.session(this.sessionId);
       if (!this._isConversationContextCurrent(contextToken)) return;
       this.sessionInfo = sessionInfo;
-      this.executionInfo = this.sessionInfo.latest_execution;
+      this._setExecutionInfo(this.sessionInfo.latest_execution);
       this.executionId = this.executionInfo?.id ?? '';
       const latestStatus = resolveSessionStatus(this.sessionInfo, 'idle');
       this.status = latestStatus;
@@ -1197,7 +1241,7 @@ export const useWorkbenchStore = defineStore('workbench', {
       const execution = await api.runStatus(this.executionId).catch(() => null);
       if (!this._isConversationContextCurrent(contextToken) || this.sessionId !== sessionId) return;
       if (execution) {
-        this.executionInfo = execution;
+        this._setExecutionInfo(execution);
         this.executionId = execution.id;
       }
       const status = execution?.status ?? this.executionInfo?.status;
@@ -1247,7 +1291,13 @@ export const useWorkbenchStore = defineStore('workbench', {
           message_type: message.message_type,
           assistant_state: 'normal' as AssistantBubbleState
         }));
-      this.messages = mapped;
+      const existing = this.messages.filter((message) => message.assistant_state === 'normal');
+      const missing = existing.filter((message) => !mapped.some((candidate) =>
+        candidate.role === message.role &&
+        candidate.content === message.content
+      ));
+      this.messages = [...missing, ...mapped];
+      this.messageNextCursor = session.next_cursor;
     },
 
     _stopSseRecoveryPoll(resetAttempts = true) {
@@ -1280,7 +1330,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         if (this.executionId) {
           const execution = await api.runStatus(this.executionId).catch(() => null);
           if (execution) {
-            this.executionInfo = execution;
+            this._setExecutionInfo(execution);
             const lifecycle = toRunLifecycle(execution.status);
             if (!['queued', 'running'].includes(lifecycle)) {
               this.ssePollTimer = null;
@@ -1343,7 +1393,7 @@ export const useWorkbenchStore = defineStore('workbench', {
           this.ssePollTimer = window.setTimeout(poll, RUN_STATUS_POLL_MS);
           return;
         }
-        this.executionInfo = execution;
+        this._setExecutionInfo(execution);
         this.executionId = execution.id;
         const lifecycle = toRunLifecycle(execution.status);
         if (lifecycle === 'queued' || lifecycle === 'running') {

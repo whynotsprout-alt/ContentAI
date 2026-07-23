@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { Check, Copy, LoaderCircle, MessageSquareText, Play, Square, Sparkles } from '@lucide/vue';
 import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
+import type { PublicInterrupt, ResumeDecision } from '../services/api';
 import type { RunLifecycle, WorkbenchMessage } from '../stores/workbench';
 
 const props = defineProps<{
@@ -10,17 +11,16 @@ const props = defineProps<{
   lifecycle: RunLifecycle;
   canSubmit: boolean;
   canResume: boolean;
-  interruptSummary: string;
+  pendingInterrupt: PublicInterrupt | null;
   hasAgent: boolean;
   switchingAgent: boolean;
   submitMessage: (message: string) => Promise<boolean>;
-  resumeRun: (message: string) => Promise<boolean>;
+  resumeRun: (decision: ResumeDecision) => Promise<boolean>;
   cancelRun: () => Promise<void>;
 }>();
 
 const emit = defineEmits<{ createAgent: [template: 'finance' | 'ai'] }>();
 const prompt = ref('');
-const resumePrompt = ref('');
 const promptError = ref('');
 const resumeSubmitting = ref(false);
 const copiedIndex = ref(-1);
@@ -46,7 +46,7 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
   return defaultLinkOpen(tokens, index, options, env, self);
 };
 
-const isActive = computed(() => ['queued', 'running', 'reconnecting', 'cancelling'].includes(props.lifecycle));
+const isActive = computed(() => ['queued', 'running', 'reconnecting', 'cancelling', 'waiting_input'].includes(props.lifecycle));
 const sendDisabled = computed(() => !prompt.value.trim() || !props.canSubmit || props.switchingAgent);
 const lastMessageContent = computed(() =>
   props.messages.length ? props.messages[props.messages.length - 1]?.content ?? '' : ''
@@ -95,13 +95,11 @@ async function send() {
   promptInput.value?.focus();
 }
 
-async function resume() {
-  const value = resumePrompt.value.trim();
-  if (!value || resumeSubmitting.value) return;
+async function resume(decision: ResumeDecision) {
+  if (resumeSubmitting.value) return;
   resumeSubmitting.value = true;
   try {
-    const accepted = await props.resumeRun(value);
-    if (accepted) resumePrompt.value = '';
+    await props.resumeRun(decision);
   } finally {
     resumeSubmitting.value = false;
   }
@@ -199,13 +197,20 @@ watch(() => props.lifecycle, (next, previous) => {
       </article>
     </div>
 
-    <div v-if="canResume" class="resume-card liquid-glass" role="region" aria-label="等待确认">
-      <div><strong>需要你的确认</strong><span>{{ interruptSummary }}</span></div>
+    <div v-if="canResume && pendingInterrupt" class="resume-card liquid-glass" role="region" aria-label="等待确认">
+      <div>
+        <strong>需要你的确认</strong>
+        <ul>
+          <li v-for="action in pendingInterrupt.actions" :key="`${action.tool_name}-${action.purpose}`">
+            {{ action.purpose }}<span v-if="action.memory">：{{ action.memory.content }}</span>
+          </li>
+        </ul>
+      </div>
       <div class="resume-controls">
-        <input v-model="resumePrompt" type="text" autocomplete="off" placeholder="输入确认或补充信息" @keydown.enter.prevent="resume" />
-        <button type="button" :disabled="!resumePrompt.trim() || resumeSubmitting" @click="resume">
+        <button type="button" :disabled="resumeSubmitting" @click="resume('reject')">拒绝</button>
+        <button type="button" :disabled="resumeSubmitting" @click="resume('approve')">
           <LoaderCircle v-if="resumeSubmitting" :size="16" class="spin" /><Play v-else :size="16" />
-          {{ resumeSubmitting ? '提交中' : '继续' }}
+          {{ resumeSubmitting ? '提交中' : '批准并继续' }}
         </button>
       </div>
     </div>

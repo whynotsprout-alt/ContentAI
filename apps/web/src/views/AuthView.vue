@@ -21,18 +21,12 @@ const message = ref('');
 const mode = computed(() => String(route.name ?? 'login'));
 const isLogin = computed(() => mode.value === 'login');
 const isRegister = computed(() => mode.value === 'register');
-const isForgot = computed(() => mode.value === 'forgot-password');
-const isReset = computed(() => mode.value === 'reset-password');
 const title = computed(() => {
   if (isRegister.value) return '创建你的内容空间';
-  if (isForgot.value) return '找回账号访问权';
-  if (isReset.value) return '设置新密码';
   return '欢迎回到 ContentAI';
 });
 const description = computed(() => {
   if (isRegister.value) return '创建独立账号，管理属于你的内容配置和历史对话。';
-  if (isForgot.value) return '输入注册邮箱，我们会发送一次性密码重置链接。';
-  if (isReset.value) return '密码更新后，其他已登录设备会自动退出。';
   return '登录后继续管理内容账号和对话。';
 });
 
@@ -46,7 +40,7 @@ function errorText(value: unknown) {
 async function submit() {
   error.value = '';
   message.value = '';
-  if ((isRegister.value || isReset.value) && password.value !== confirmPassword.value) {
+  if (isRegister.value && password.value !== confirmPassword.value) {
     error.value = '两次输入的密码不一致。';
     return;
   }
@@ -61,15 +55,6 @@ async function submit() {
       password.value = '';
       confirmPassword.value = '';
       await router.replace('/login');
-    } else if (isForgot.value) {
-      const result = await authApi.forgotPassword(email.value);
-      message.value = result.message;
-    } else if (isReset.value) {
-      const token = String(route.query.token || '');
-      if (!token) throw new Error('缺少密码重置令牌。');
-      const result = await authApi.resetPassword(token, password.value);
-      message.value = result.message;
-      window.setTimeout(() => void router.replace('/login'), 900);
     }
   } catch (value) {
     error.value = errorText(value);
@@ -98,11 +83,11 @@ async function submit() {
             <p>{{ description }}</p>
           </header>
 
-            <label v-if="!isReset" class="field-block">
+            <label class="field-block">
               <span>邮箱</span>
               <input v-model="email" type="email" autocomplete="email" required placeholder="name@example.com" />
             </label>
-            <label v-if="!isForgot" class="field-block">
+            <label class="field-block">
               <span>{{ isLogin ? '密码' : '新密码' }}</span>
               <span class="password-field">
                 <input v-model="password" :type="showPassword ? 'text' : 'password'" :autocomplete="isLogin ? 'current-password' : 'new-password'" required :minlength="isLogin ? 1 : 10" maxlength="128" placeholder="至少 10 个字符" />
@@ -112,7 +97,7 @@ async function submit() {
                 </button>
               </span>
             </label>
-            <label v-if="isRegister || isReset" class="field-block">
+            <label v-if="isRegister" class="field-block">
               <span>确认密码</span>
               <span class="password-field">
                 <input v-model="confirmPassword" :type="showConfirmPassword ? 'text' : 'password'" autocomplete="new-password" required minlength="10" maxlength="128" />
@@ -127,11 +112,10 @@ async function submit() {
             <p v-if="message" class="auth-success" role="status">{{ message }}</p>
             <button class="auth-submit" type="submit" :disabled="loading">
               <LoaderCircle v-if="loading" :size="18" class="spin" />
-              <span v-else>{{ isLogin ? '登录' : isRegister ? '创建账号' : isForgot ? '发送重置邮件' : '保存新密码' }}</span>
+              <span v-else>{{ isLogin ? '登录' : '创建账号' }}</span>
               <ArrowRight v-if="!loading" :size="18" />
             </button>
             <nav class="auth-links" aria-label="认证辅助链接">
-              <RouterLink v-if="isLogin" to="/forgot-password">忘记密码</RouterLink>
               <span v-if="isLogin" class="auth-links__alternate">
                 <span>还没有账号？</span>
                 <RouterLink to="/register">创建账号</RouterLink>
