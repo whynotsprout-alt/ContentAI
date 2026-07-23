@@ -490,6 +490,26 @@ async function expectNoHorizontalOverflow(locator, label) {
   );
 }
 
+async function expectSingleVerticalScrollContainer(locator, label) {
+  await locator.waitFor({ state: 'visible' });
+  const containers = await locator.evaluate((root) => Array.from(root.querySelectorAll('*'))
+    .filter((element) => {
+      if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false;
+      const overflowY = getComputedStyle(element).overflowY;
+      return ['auto', 'scroll'].includes(overflowY) && element.scrollHeight > element.clientHeight + 1;
+    })
+    .map((element) => ({
+      className: element.className,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight
+    })));
+  assert.equal(
+    containers.length,
+    1,
+    `${label} 应只有一个 vertical scroll container：${JSON.stringify(containers)}`
+  );
+}
+
 async function expectSolidProductDialog(locator, label) {
   await locator.waitFor({ state: 'visible' });
   const style = await locator.evaluate((element) => {
@@ -730,33 +750,128 @@ async function runDesktopAcceptance(browser) {
     await capture(page, '02k-workbench-interrupt-1440x900.png', screenshots);
     await page.locator('.session-select').filter({ hasText: '平台补贴与消费趋势' }).click();
 
-    await page.getByRole('button', { name: '内容账号', exact: true }).click();
-    await expectVisible(page.getByRole('heading', { name: '配置你的 ContentAI', exact: true }), '内容账号配置');
-    await expectVisible(page.getByRole('textbox', { name: '账号名称', exact: true }), '账号名称字段');
-    await page.getByRole('textbox', { name: '账号名称', exact: true }).waitFor();
-    assert.equal(await page.getByRole('textbox', { name: '账号名称', exact: true }).inputValue(), agent.name);
-    const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
-    assert.match(managerColumns, /^280px 184px /, `账号配置列宽不正确：${managerColumns}`);
-    await expectSolidProductDialog(page.locator('.accessible-dialog-fullscreen'), '内容账号弹层');
-    await expectSolidProductDialog(page.locator('.agent-manager'), '内容账号弹层主体');
-    await expectNoHoverLift(page.getByRole('button', { name: '保存内容账号', exact: true }), page, '内容账号保存按钮');
-    await capture(page, '03-agent-manager-1440x900.png', screenshots);
+    const managerTrigger = page.getByRole('button', { name: '内容账号', exact: true });
+    await managerTrigger.click();
+    const managerHeading = page.getByRole('heading', { name: '配置你的 ContentAI', exact: true });
+    const manager = page.locator('.agent-manager');
     const managerDialog = page.locator('.accessible-dialog-fullscreen');
+    const rootShell = page.locator('#app');
+    await expectVisible(managerHeading, '内容账号配置');
+    assert.equal(await rootShell.getAttribute('inert'), '', '最外层弹窗打开后根页面应 inert');
+    assert.equal(await rootShell.getAttribute('aria-hidden'), 'true', '最外层弹窗打开后根页面应隐藏于辅助技术');
+    await expectSolidProductDialog(managerDialog, '内容账号弹层');
+    await expectSolidProductDialog(manager, '内容账号弹层主体');
+
+    await page.setViewportSize({ width: 360, height: 800 });
+    await expectVisible(page.locator('.agent-directory'), '360px 内容账号目录');
+    await expectHidden(page.locator('.agent-editor'), '360px 初始编辑器');
+    await expectNoHorizontalOverflow(managerDialog, '360px 内容账号弹层');
+    await expectNoHorizontalOverflow(manager, '360px 内容账号主体');
+    await capture(page, '03a-agent-manager-360x800-directory.png', screenshots);
+
+    await page.locator('.agent-directory-row').filter({ hasText: agent.name }).click();
+    const accountName = page.getByRole('textbox', { name: '账号名称', exact: true });
+    await expectVisible(accountName, '360px 账号名称字段');
+    assert.equal(await accountName.inputValue(), agent.name);
+    await expectHidden(page.locator('.agent-directory'), '360px 编辑态目录');
+    const tabs = page.getByRole('tab');
+    assert.equal(await tabs.count(), 4, '账号编辑器应提供四个标准 tab');
+    const basicTab = page.getByRole('tab', { name: '基础信息', exact: true });
+    const sourcesTab = page.getByRole('tab', { name: '热点来源', exact: true });
+    const contentTab = page.getByRole('tab', { name: '内容规则', exact: true });
+    assert.equal(await page.getByRole('tablist').getAttribute('aria-orientation'), 'horizontal', '紧凑布局应声明水平 tabs');
+    assert.equal(await basicTab.getAttribute('aria-selected'), 'true');
+    assert.equal(await basicTab.getAttribute('tabindex'), '0');
+    assert.equal(await contentTab.getAttribute('tabindex'), '-1');
+    await basicTab.focus();
+    await page.keyboard.press('ArrowRight');
+    assert.equal(await sourcesTab.getAttribute('aria-selected'), 'true', 'ArrowRight 应切换到下一个 tab');
+    assert.equal(await sourcesTab.evaluate((element) => element === document.activeElement), true, '切换后的 tab 应获得焦点');
+    const hiddenNamePanel = page.locator('#manager-panel-basic');
+    assert.equal(await hiddenNamePanel.getAttribute('hidden'), '', '非活动 panel 应使用 hidden');
+    const hiddenNameInput = hiddenNamePanel.locator('input');
+    await hiddenNameInput.evaluate((element) => element.focus());
+    assert.equal(await hiddenNameInput.evaluate((element) => element === document.activeElement), false, '隐藏 panel 的字段不得进入焦点序列');
+    await page.keyboard.press('End');
+    assert.equal(await contentTab.getAttribute('aria-selected'), 'true', 'End 应切换到最后一个 tab');
+    await page.keyboard.press('Home');
+    assert.equal(await basicTab.getAttribute('aria-selected'), 'true', 'Home 应切换到第一个 tab');
+    await page.keyboard.press('ArrowRight');
+    await expectSingleVerticalScrollContainer(manager, '360px 账号编辑器');
+    await expectInsideViewport(page.locator('.editor-footer'), page, '360px 底部操作栏');
+    await expectNoHorizontalOverflow(page.locator('.manager-layout'), '360px 账号管理布局');
+    await capture(page, '03b-agent-manager-360x800-editor.png', screenshots);
+
+    await basicTab.click();
+    await accountName.fill(`${agent.name}（草稿）`);
+    await page.getByRole('button', { name: '关闭内容账号管理', exact: true }).click();
+    await expectVisible(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '嵌套未保存确认');
+    const dialogLayers = page.locator('.modal-backdrop');
+    assert.equal(await dialogLayers.count(), 2, '嵌套确认应产生两层弹窗');
+    assert.deepEqual(await dialogLayers.evaluateAll((elements) => elements.map((element) => element.getAttribute('data-dialog-layer'))), ['1', '2']);
+    assert.equal(await dialogLayers.first().getAttribute('inert'), '', '嵌套确认打开后外层弹窗应 inert');
+    assert.equal(await dialogLayers.last().evaluate((element) => element.contains(document.activeElement)), true, '焦点应进入顶层确认弹窗');
+    await page.keyboard.press('Escape');
+    await expectHidden(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), 'Escape 只关闭顶层确认');
+    await expectVisible(managerHeading, 'Escape 后外层账号弹窗仍保留');
+    assert.equal(await dialogLayers.first().getAttribute('inert'), null, '顶层关闭后外层弹窗应恢复交互');
+    assert.equal(await rootShell.getAttribute('inert'), '', '顶层关闭后根页面仍应 inert');
+
+    await page.getByRole('button', { name: '关闭内容账号管理', exact: true }).click();
+    await expectVisible(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '再次打开未保存确认');
+    await dialogLayers.last().click({ position: { x: 4, y: 4 } });
+    await expectHidden(page.getByRole('heading', { name: '放弃未保存的更改？', exact: true }), '遮罩关闭顶层确认');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await accountName.fill(agent.name);
+    await page.keyboard.press('Escape');
+    await expectHidden(managerHeading, '清除草稿后 Escape 关闭外层账号弹窗');
+    assert.equal(await rootShell.getAttribute('inert'), null, '根页面应在最外层弹窗关闭后恢复');
+    assert.equal(await rootShell.getAttribute('aria-hidden'), null, '根页面辅助技术状态应恢复');
+    assert.equal(await managerTrigger.evaluate((element) => element === document.activeElement), true, '外层弹窗关闭后焦点应归还触发器');
+
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await managerTrigger.click();
+    await expectVisible(page.locator('.agent-directory'), '768px 内容账号目录');
+    await page.locator('.agent-directory-row').filter({ hasText: agent.name }).click();
+    await expectVisible(accountName, '768px 账号编辑器');
+    await sourcesTab.click();
+    await expectSingleVerticalScrollContainer(manager, '768px 账号编辑器');
+    await expectNoHorizontalOverflow(manager, '768px 内容账号主体');
+    await capture(page, '03c-agent-manager-768x1024-editor.png', screenshots);
+    await page.keyboard.press('Escape');
+    await expectHidden(managerHeading, '关闭 768px 内容账号弹窗');
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await managerTrigger.click();
+    await expectVisible(accountName, '1280px 账号名称字段');
+    assert.equal(await page.getByRole('tablist').getAttribute('aria-orientation'), 'vertical', '三栏布局应声明纵向 tabs');
+    await basicTab.focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await sourcesTab.getAttribute('aria-selected'), 'true', '纵向 tabs 应使用 ArrowDown 前进');
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await basicTab.getAttribute('aria-selected'), 'true', '纵向 tabs 应使用 ArrowUp 返回');
+    const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.match(managerColumns, /^280px 184px /, `1280px 账号配置应保持三栏：${managerColumns}`);
+    await expectNoHoverLift(page.getByRole('button', { name: '保存内容账号', exact: true }), page, '内容账号保存按钮');
+    await expectNoHorizontalOverflow(manager, '1280px 内容账号主体');
+    await capture(page, '03d-agent-manager-1280x800.png', screenshots);
     assert.equal(await managerDialog.evaluate((element) => element.contains(document.activeElement)), true, '打开弹窗后焦点应进入弹窗');
     await managerDialog.evaluate((element) => {
       const focusable = Array.from(element.querySelectorAll(
         'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )).filter((item) => item instanceof HTMLElement && !item.hidden && item.getAttribute('aria-hidden') !== 'true');
+      )).filter((item) => item instanceof HTMLElement && item.getClientRects().length > 0);
       focusable.at(-1)?.focus();
     });
     await page.keyboard.press('Tab');
     assert.equal(
-      await managerDialog.evaluate((element) => element.querySelector('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') === document.activeElement),
+      await managerDialog.evaluate((element) => Array.from(element.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).find((item) => item instanceof HTMLElement && item.getClientRects().length > 0) === document.activeElement),
       true,
-      'Tab 应在弹窗尾部回绕到首个控件'
+      'Tab 应在弹窗尾部回绕到首个可见控件'
     );
     await page.keyboard.press('Escape');
-    await expectHidden(page.getByRole('heading', { name: '配置你的 ContentAI', exact: true }), '内容账号配置');
+    await expectHidden(managerHeading, '关闭 1280px 内容账号弹窗');
 
     await page.getByRole('button', { name: '管理后台', exact: true }).click();
     await page.waitForURL('**/admin/users');

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   AlertTriangle,
+  ArrowLeft,
   Bot,
   Check,
   ChevronRight,
@@ -63,6 +64,8 @@ const templates: Record<TemplateId, { name: string; positioning: string; scoring
 
 const search = ref('');
 const activeSection = ref<SectionId>('basic');
+const compactView = ref<'directory' | 'editor'>('directory');
+const compactLayout = ref(true);
 const mode = ref<'create' | 'edit'>('create');
 const editingId = ref('');
 const originalSnapshot = ref('');
@@ -72,6 +75,7 @@ const error = ref('');
 const notice = ref('');
 const confirmClose = ref(false);
 const confirmDelete = ref(false);
+const discardTarget = ref<'close' | 'directory'>('close');
 const touched = ref(false);
 const form = ref({ name: '', positioning: '', scoring: '', content: '', sources: [] as string[] });
 
@@ -93,6 +97,11 @@ const fieldErrors = computed(() => ({
 const valid = computed(() => Object.values(fieldErrors.value).every((value) => !value));
 const snapshot = computed(() => JSON.stringify(form.value));
 const dirty = computed(() => snapshot.value !== originalSnapshot.value);
+let compactLayoutQuery: MediaQueryList | null = null;
+
+function syncCompactLayout(event?: MediaQueryListEvent) {
+  compactLayout.value = event?.matches ?? compactLayoutQuery?.matches ?? true;
+}
 
 function resetForm(template?: TemplateId | null) {
   const source = template ? templates[template] : null;
@@ -114,17 +123,20 @@ function startNewAgent() {
     return;
   }
   resetForm();
+  compactView.value = 'editor';
+  void focusActiveTab();
 }
 
 function selectedSources(agent: AgentProfileDetail) {
   return agent.current_version?.hotspot_sources ?? [];
 }
 
-async function edit(agentId: string) {
+async function edit(agentId: string, navigate = true) {
   if (dirty.value && originalSnapshot.value && editingId.value !== agentId) {
     error.value = '当前配置尚未保存，请先保存或新建后再切换。';
     return;
   }
+  if (navigate) compactView.value = 'editor';
   loading.value = true;
   error.value = '';
   notice.value = '';
@@ -141,11 +153,51 @@ async function edit(agentId: string) {
     editingId.value = agent.id;
     touched.value = false;
     originalSnapshot.value = JSON.stringify(form.value);
+    if (navigate) void focusActiveTab();
   } catch (value) {
     error.value = value instanceof ApiError ? value.message : String(value);
   } finally {
     loading.value = false;
   }
+}
+
+async function focusActiveTab() {
+  await nextTick();
+  document.getElementById(`manager-tab-${activeSection.value}`)?.focus();
+}
+
+function onSectionKeydown(event: KeyboardEvent, sectionId: SectionId) {
+  const current = sections.findIndex((section) => section.id === sectionId);
+  let target = current;
+  switch (event.key) {
+    case 'ArrowRight':
+      if (!compactLayout.value) return;
+      target = (current + 1) % sections.length;
+      break;
+    case 'ArrowDown':
+      if (compactLayout.value) return;
+      target = (current + 1) % sections.length;
+      break;
+    case 'ArrowLeft':
+      if (!compactLayout.value) return;
+      target = (current - 1 + sections.length) % sections.length;
+      break;
+    case 'ArrowUp':
+      if (compactLayout.value) return;
+      target = (current - 1 + sections.length) % sections.length;
+      break;
+    case 'Home':
+      target = 0;
+      break;
+    case 'End':
+      target = sections.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  activeSection.value = sections[target].id;
+  void focusActiveTab();
 }
 
 function toggleSource(sourceId: string) {
@@ -220,23 +272,52 @@ async function removeAgent() {
 }
 
 function requestClose() {
+  discardTarget.value = 'close';
   if (dirty.value) confirmClose.value = true;
   else emit('close');
 }
 
-function discardAndClose() {
+function requestDirectory() {
+  discardTarget.value = 'directory';
+  if (dirty.value) {
+    confirmClose.value = true;
+    return;
+  }
+  compactView.value = 'directory';
+}
+
+function discardChanges() {
   confirmClose.value = false;
-  emit('close');
+  if (discardTarget.value === 'close') {
+    emit('close');
+    return;
+  }
+  compactView.value = 'directory';
+  if (store.agentId) void edit(store.agentId, false);
+  else resetForm();
 }
 
 watch(() => props.open, (open) => {
   if (!open) return;
   confirmClose.value = false;
   confirmDelete.value = false;
+  discardTarget.value = 'close';
+  activeSection.value = 'basic';
+  compactView.value = props.initialTemplate ? 'editor' : 'directory';
   if (props.initialTemplate) resetForm(props.initialTemplate);
-  else if (store.agentId) void edit(store.agentId);
+  else if (store.agentId) void edit(store.agentId, false);
   else resetForm();
   void nextTick(() => { originalSnapshot.value = JSON.stringify(form.value); });
+});
+
+onMounted(() => {
+  compactLayoutQuery = window.matchMedia('(max-width: 1279px)');
+  syncCompactLayout();
+  compactLayoutQuery.addEventListener('change', syncCompactLayout);
+});
+
+onBeforeUnmount(() => {
+  compactLayoutQuery?.removeEventListener('change', syncCompactLayout);
 });
 </script>
 
@@ -251,7 +332,7 @@ watch(() => props.open, (open) => {
         </div>
       </header>
 
-      <div class="manager-layout">
+      <div class="manager-layout" :data-manager-view="compactView">
         <aside class="agent-directory" aria-label="内容账号目录">
           <label class="compact-search"><Search :size="15" /><input v-model="search" type="search" placeholder="搜索内容账号" aria-label="搜索内容账号" /></label>
           <button class="new-agent-button" type="button" @click="startNewAgent"><Plus :size="16" /> 新建内容账号</button>
@@ -266,26 +347,34 @@ watch(() => props.open, (open) => {
           <p v-if="!filteredAgents.length" class="directory-empty">没有匹配的内容账号。</p>
         </aside>
 
-        <nav class="manager-sections" aria-label="配置分区">
-          <button
-            v-for="section in sections"
-            :id="`manager-tab-${section.id}`"
-            :key="section.id"
-            type="button"
-            :class="{ active: activeSection === section.id }"
-            :aria-controls="`manager-panel-${section.id}`"
-            :aria-current="activeSection === section.id ? 'step' : undefined"
-            @click="activeSection = section.id"
-          >
-            {{ section.label }}
-            <span v-if="touched && fieldErrors[section.id === 'basic' ? 'name' : section.id === 'sources' ? 'sources' : section.id === 'scoring' ? 'scoring' : section.id === 'content' ? 'content' : 'name']" class="section-error"></span>
+        <div class="manager-sections">
+          <button class="manager-back-button" type="button" @click="requestDirectory">
+            <ArrowLeft :size="16" /> 返回账号目录
           </button>
-        </nav>
+          <nav class="manager-section-tabs" aria-label="配置分区" role="tablist" :aria-orientation="compactLayout ? 'horizontal' : 'vertical'">
+            <button
+              v-for="section in sections"
+              :id="`manager-tab-${section.id}`"
+              :key="section.id"
+              type="button"
+              role="tab"
+              :class="{ active: activeSection === section.id }"
+              :aria-controls="`manager-panel-${section.id}`"
+              :aria-selected="activeSection === section.id"
+              :tabindex="activeSection === section.id ? 0 : -1"
+              @click="activeSection = section.id"
+              @keydown="onSectionKeydown($event, section.id)"
+            >
+              {{ section.label }}
+              <span v-if="touched && fieldErrors[section.id === 'basic' ? 'name' : section.id === 'sources' ? 'sources' : section.id === 'scoring' ? 'scoring' : section.id === 'content' ? 'content' : 'name']" class="section-error"></span>
+            </button>
+          </nav>
+        </div>
 
         <form class="agent-editor" aria-label="内容账号配置编辑器" :aria-busy="loading || saving" @submit.prevent="save">
           <div v-if="loading" class="editor-loading" role="status"><LoaderCircle :size="20" class="spin" /> 正在加载配置</div>
           <template v-else>
-            <section id="manager-panel-basic" v-show="activeSection === 'basic'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-basic">
+            <section id="manager-panel-basic" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-basic" :hidden="activeSection !== 'basic'" tabindex="0">
               <span class="form-badge">{{ mode === 'create' ? '新建账号' : '基础信息' }}</span>
               <h3>让 Agent 理解你的内容边界</h3>
               <p>用受众和内容价值描述定位，避免只写宽泛行业词。</p>
@@ -293,7 +382,7 @@ watch(() => props.open, (open) => {
               <label class="field-block"><span>账号定位</span><textarea v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" /><small v-if="touched && fieldErrors.positioning" class="field-error">{{ fieldErrors.positioning }}</small></label>
             </section>
 
-            <section id="manager-panel-sources" v-show="activeSection === 'sources'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-sources">
+            <section id="manager-panel-sources" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-sources" :hidden="activeSection !== 'sources'" tabindex="0">
               <span class="form-badge">热点来源</span><h3>选择信号来源</h3><p>已选择 {{ form.sources.length }} / {{ allSources.length }} 个来源。这里只控制来源偏好，不表示连通性状态。</p>
               <div class="source-groups">
                 <fieldset v-for="group in sourceGroups" :key="group.title" class="source-group"><legend>{{ group.title }}</legend><div class="source-grid">
@@ -302,12 +391,12 @@ watch(() => props.open, (open) => {
               </div><small v-if="touched && fieldErrors.sources" class="field-error">{{ fieldErrors.sources }}</small>
             </section>
 
-            <section id="manager-panel-scoring" v-show="activeSection === 'scoring'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-scoring">
+            <section id="manager-panel-scoring" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-scoring" :hidden="activeSection !== 'scoring'" tabindex="0">
               <span class="form-badge">评分规则</span><h3>定义什么值得做</h3><p>描述判断维度与取舍逻辑，输出仍会作为普通 Assistant 消息出现在对话中。</p>
               <label class="field-block"><span>选题评分提示词</span><textarea v-model="form.scoring" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.scoring" class="field-error">{{ fieldErrors.scoring }}</small></label>
             </section>
 
-            <section id="manager-panel-content" v-show="activeSection === 'content'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-content">
+            <section id="manager-panel-content" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-content" :hidden="activeSection !== 'content'" tabindex="0">
               <span class="form-badge">内容规则</span><h3>定义最终表达</h3><p>写清结构、语气、事实边界和引用要求，避免塞入具体某一次任务。</p>
               <label class="field-block"><span>内容生成提示词</span><textarea v-model="form.content" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.content" class="field-error">{{ fieldErrors.content }}</small></label>
             </section>
@@ -333,7 +422,7 @@ watch(() => props.open, (open) => {
         <div class="manager-confirm-card">
           <AlertTriangle :size="22" /><h3 id="manager-confirm-title">{{ confirmDelete ? '删除这个内容账号？' : '放弃未保存的更改？' }}</h3>
           <p>{{ confirmDelete ? '删除后不能用于新的对话，且无法撤销。' : '刚才修改的配置不会被保留。' }}</p>
-          <div><button type="button" @click="confirmClose = false; confirmDelete = false">取消</button><button class="danger-button" type="button" @click="confirmDelete ? removeAgent() : discardAndClose()">{{ confirmDelete ? '确认删除' : '放弃并关闭' }}</button></div>
+          <div><button type="button" @click="confirmClose = false; confirmDelete = false">取消</button><button class="danger-button" type="button" @click="confirmDelete ? removeAgent() : discardChanges()">{{ confirmDelete ? '确认删除' : discardTarget === 'directory' ? '放弃并返回目录' : '放弃并关闭' }}</button></div>
         </div>
       </AccessibleDialog>
     </div>

@@ -1,4 +1,5 @@
 body[data-surface='product'],
+.modal-backdrop[data-surface='product'],
 .product-shell,
 .workbench-shell {
   --product-bg: #F5F5F2;
@@ -1303,12 +1304,15 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   box-shadow: none;
 }
 
-body[data-surface='product'] .modal-backdrop {
+body[data-surface='product'] .modal-backdrop,
+.modal-backdrop[data-surface='product'] {
   background: var(--product-overlay);
 }
 
 body[data-surface='product'] .accessible-dialog-default,
-body[data-surface='product'] .accessible-dialog-fullscreen {
+[data-surface='product'] .accessible-dialog-default,
+[data-surface='product'] .accessible-dialog-fullscreen,
+[data-surface='product'] .accessible-dialog-drawer {
   color: var(--product-text);
   background: var(--product-surface);
   border-color: var(--product-border);
@@ -1316,17 +1320,19 @@ body[data-surface='product'] .accessible-dialog-fullscreen {
   box-shadow: 0 6px 8px var(--product-shadow-strong);
 }
 
-body[data-surface='product'] .accessible-dialog-default {
+body[data-surface='product'] .accessible-dialog-default,
+[data-surface='product'] .accessible-dialog-default {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
 
-body[data-surface='product'] .agent-manager {
+body[data-surface='product'] .agent-manager,
+[data-surface='product'] .agent-manager {
   background: var(--product-surface);
   background-image: none;
 }
 
-body[data-surface='product'] .agent-manager :is(
+[data-surface='product'] .agent-manager :is(
   .manager-header,
   .agent-editor,
   .editor-footer
@@ -1335,7 +1341,7 @@ body[data-surface='product'] .agent-manager :is(
   background-image: none;
 }
 
-body[data-surface='product'] .agent-manager :is(
+[data-surface='product'] .agent-manager :is(
   .agent-directory,
   .manager-sections
 ) {
@@ -1343,7 +1349,7 @@ body[data-surface='product'] .agent-manager :is(
   background-image: none;
 }
 
-body[data-surface='product'] .agent-manager :is(
+[data-surface='product'] .agent-manager :is(
   .compact-search,
   .agent-directory-row,
   .new-agent-button,
@@ -1352,23 +1358,24 @@ body[data-surface='product'] .agent-manager :is(
   .source-grid button,
   .form-badge
 ),
-body[data-surface='product'] .accessible-dialog .field-block :is(input, textarea) {
+[data-surface='product'] .accessible-dialog .field-block :is(input, textarea) {
   background: var(--product-surface);
   background-image: none;
 }
 
-body[data-surface='product'] .accessible-dialog :is(.confirmation-dialog, .password-dialog) {
+[data-surface='product'] .accessible-dialog :is(.confirmation-dialog, .password-dialog) {
   background: var(--product-surface);
   background-image: none;
 }
 
 body[data-surface='product'] .accessible-dialog button:not(:disabled):hover,
-body[data-surface='product'] .accessible-dialog button:not(:disabled):active {
+[data-surface='product'] .accessible-dialog button:not(:disabled):hover,
+[data-surface='product'] .accessible-dialog button:not(:disabled):active {
   transform: none;
 }
 
-body[data-surface='product'] .accessible-dialog .dialog-close,
-body[data-surface='product'] .accessible-dialog .icon-action {
+[data-surface='product'] .accessible-dialog .dialog-close,
+[data-surface='product'] .accessible-dialog .icon-action {
   width: 44px;
   height: 44px;
   color: var(--product-muted);
@@ -1377,20 +1384,20 @@ body[data-surface='product'] .accessible-dialog .icon-action {
   border-radius: var(--product-radius-control);
 }
 
-body[data-surface='product'] .accessible-dialog .primary-action,
-body[data-surface='product'] .accessible-dialog .danger-button,
-body[data-surface='product'] .accessible-dialog .dialog-actions > button {
+[data-surface='product'] .accessible-dialog .primary-action,
+[data-surface='product'] .accessible-dialog .danger-button,
+[data-surface='product'] .accessible-dialog .dialog-actions > button {
   min-height: 44px;
   border-radius: var(--product-radius-control);
   box-shadow: none;
 }
 
-body[data-surface='product'] .accessible-dialog .primary-action {
+[data-surface='product'] .accessible-dialog .primary-action {
   background: var(--product-accent);
   border-color: var(--product-accent);
 }
 
-body[data-surface='product'] .accessible-dialog .danger-button {
+[data-surface='product'] .accessible-dialog .danger-button {
   color: var(--product-on-accent);
   background: var(--product-danger);
   border-color: var(--product-danger);
@@ -1426,6 +1433,14 @@ body[data-surface='product'] .accessible-dialog .danger-button {
 }
 
 @media (max-width: 767px) {
+  .modal-backdrop[data-surface='product'] .accessible-dialog-fullscreen {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
   .workbench-nav {
     display: none;
   }

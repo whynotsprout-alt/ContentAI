@@ -5,7 +5,7 @@ body.dialog-open {
 
 .modal-backdrop {
   position: fixed;
-  z-index: 200;
+  z-index: calc(200 + (var(--dialog-layer, 0) * 2));
   inset: 0;
   display: grid;
   place-items: center;
@@ -21,6 +21,11 @@ body.dialog-open {
 
 .modal-fullscreen {
   padding: 16px;
+}
+
+.modal-drawer {
+  place-items: stretch end;
+  padding: 0;
 }
 
 .accessible-dialog {
@@ -53,6 +58,15 @@ body.dialog-open {
   overflow: hidden;
   background: var(--panel-strong);
   border-radius: var(--radius-shell);
+}
+
+.accessible-dialog-drawer {
+  width: min(560px, 100vw);
+  height: 100dvh;
+  max-height: none;
+  overflow: hidden;
+  background: var(--panel-strong);
+  border-radius: var(--radius-shell) 0 0 var(--radius-shell);
 }
 
 .accessible-dialog button,
@@ -236,11 +250,15 @@ body.dialog-open {
   position: relative;
   z-index: 2;
   display: flex;
-  min-height: 116px;
+  min-height: 96px;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 28px;
-  padding: 24px 28px 20px;
+  gap: 16px;
+  padding:
+    max(16px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    16px
+    max(16px, env(safe-area-inset-left));
   background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
   border-bottom: 1px solid var(--line);
 }
@@ -263,9 +281,9 @@ body.dialog-open {
 .manager-header h2 {
   margin: 7px 0 5px;
   color: var(--text);
-  font-size: clamp(30px, 2.8vw, 42px);
-  line-height: 1;
-  letter-spacing: -.045em;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: -.03em;
 }
 
 .manager-header p {
@@ -307,18 +325,25 @@ body.dialog-open {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: 280px 184px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
 
+.manager-layout[data-manager-view='editor'] {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
 .agent-directory {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   min-height: 0;
   padding: 16px 14px 20px;
   overflow-x: hidden;
   overflow-y: auto;
   background: color-mix(in srgb, var(--panel) 76%, transparent);
-  border-right: 1px solid var(--line);
+  border-right: 0;
   scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent;
   scrollbar-width: thin;
 }
@@ -437,19 +462,60 @@ body.dialog-open {
 }
 
 .manager-sections {
-  display: grid;
+  display: none;
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   min-height: 0;
-  align-content: start;
-  gap: 5px;
-  padding: 18px 12px;
-  overflow-y: auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+  overflow: hidden;
   background: color-mix(in srgb, var(--panel) 66%, transparent);
-  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.manager-layout[data-manager-view='directory'] :is(.manager-sections, .agent-editor),
+.manager-layout[data-manager-view='editor'] .agent-directory {
+  display: none;
+}
+
+.manager-layout[data-manager-view='editor'] .manager-sections {
+  display: flex;
+}
+
+.manager-layout[data-manager-view='editor'] .agent-editor {
+  display: grid;
+}
+
+.manager-section-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.manager-section-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.manager-sections .manager-back-button {
+  display: inline-flex;
+  min-width: max-content;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border-color: var(--line);
 }
 
 .manager-sections button {
   position: relative;
+  min-width: max-content;
   min-height: 42px;
   padding: 0 13px;
   color: var(--muted);
@@ -468,16 +534,15 @@ body.dialog-open {
   border-color: color-mix(in srgb, var(--accent) 22%, var(--line));
 }
 
-.manager-sections button.active::before {
+.manager-section-tabs button.active::before {
   position: absolute;
-  top: 50%;
-  left: 5px;
-  width: 2px;
-  height: 18px;
+  right: 10px;
+  bottom: 3px;
+  left: 10px;
+  height: 2px;
   background: var(--accent);
   border-radius: 99px;
   content: '';
-  transform: translateY(-50%);
 }
 
 .section-error {
@@ -493,7 +558,9 @@ body.dialog-open {
 }
 
 .agent-editor {
-  display: grid;
+  display: none;
+  grid-column: 1;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
   grid-template-rows: minmax(0, 1fr) minmax(76px, auto);
@@ -516,7 +583,7 @@ body.dialog-open {
   height: 100%;
   min-height: 0;
   margin: 0 auto;
-  padding: 44px clamp(34px, 4vw, 64px) 64px;
+  padding: 28px max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent;
@@ -528,9 +595,9 @@ body.dialog-open {
   max-width: 760px;
   margin: 10px 0 8px;
   color: var(--text);
-  font-size: clamp(30px, 3vw, 44px);
+  font-size: 30px;
   line-height: 1.08;
-  letter-spacing: -.045em;
+  letter-spacing: -.035em;
   text-wrap: balance;
 }
 
@@ -596,7 +663,7 @@ body.dialog-open {
 
 .source-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -634,11 +701,16 @@ body.dialog-open {
   z-index: 3;
   display: flex;
   min-width: 0;
-  min-height: 76px;
-  align-items: center;
+  min-height: 0;
+  align-items: stretch;
   justify-content: space-between;
-  gap: 20px;
-  padding: 12px 22px;
+  gap: 8px;
+  padding:
+    10px
+    max(12px, env(safe-area-inset-right))
+    max(10px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  flex-direction: column;
   background: var(--panel-strong);
   border-top: 1px solid var(--line);
   box-shadow: 0 -18px 44px color-mix(in srgb, var(--bg) 32%, transparent);
@@ -654,6 +726,10 @@ body.dialog-open {
   flex: 0 0 auto;
   align-items: center;
   gap: 9px;
+}
+
+.editor-actions > button {
+  flex: 1 1 0;
 }
 
 /* Default confirmation and password dialogs */
@@ -754,6 +830,199 @@ body.dialog-open {
   background: color-mix(in srgb, var(--accent) 12%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
   border-radius: 14px;
+}
+
+@media (max-width: 767px) {
+  .modal-fullscreen {
+    padding: 0;
+  }
+
+  .accessible-dialog-fullscreen {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .manager-header p {
+    display: none;
+  }
+
+  .manager-header .section-kicker {
+    font-size: 10px;
+    letter-spacing: .08em;
+  }
+
+  .manager-header-actions {
+    gap: 6px;
+  }
+
+  .dirty-indicator {
+    width: 36px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .dirty-indicator > span {
+    width: 8px;
+    height: 8px;
+  }
+
+  .dirty-indicator {
+    font-size: 0;
+  }
+
+  .manager-sections {
+    padding-block: 6px;
+  }
+
+  .manager-sections .manager-back-button {
+    width: 42px;
+    min-width: 42px;
+    padding: 0;
+    justify-content: center;
+    font-size: 0;
+  }
+
+  .manager-sections .manager-back-button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .manager-section-tabs button {
+    min-height: 44px;
+    padding-inline: 12px;
+  }
+
+  .editor-section > p {
+    margin-bottom: 22px;
+  }
+
+  .positioning-editor {
+    min-height: 240px;
+  }
+
+  .prompt-editor {
+    min-height: 320px;
+  }
+
+  .manager-confirm-card {
+    padding: 24px;
+  }
+}
+
+@media (min-width: 768px) {
+  .manager-header {
+    min-height: 108px;
+    padding: 20px 24px 18px;
+  }
+
+  .manager-header h2 {
+    font-size: 32px;
+  }
+
+  .editor-section {
+    padding: 36px 32px 56px;
+  }
+
+  .editor-section h3 {
+    font-size: 36px;
+  }
+
+  .source-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .editor-footer {
+    min-height: 76px;
+    align-items: center;
+    gap: 20px;
+    padding: 12px 22px max(12px, env(safe-area-inset-bottom));
+    flex-direction: row;
+  }
+
+  .editor-actions > button {
+    flex: 0 0 auto;
+  }
+}
+
+@media (min-width: 1280px) {
+  .manager-header {
+    min-height: 116px;
+    padding: 24px 28px 20px;
+  }
+
+  .manager-header h2 {
+    font-size: 40px;
+  }
+
+  .manager-layout,
+  .manager-layout[data-manager-view='editor'] {
+    grid-template-columns: 280px 184px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .manager-layout[data-manager-view] .agent-directory {
+    display: block;
+    grid-column: 1;
+    grid-row: 1;
+    border-right: 1px solid var(--line);
+  }
+
+  .manager-layout[data-manager-view] .manager-sections {
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    align-content: start;
+    gap: 5px;
+    padding: 18px 12px;
+    overflow-y: auto;
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+  }
+
+  .manager-sections .manager-back-button {
+    display: none;
+  }
+
+  .manager-section-tabs {
+    display: grid;
+    align-content: start;
+    gap: 5px;
+    overflow: visible;
+  }
+
+  .manager-section-tabs button {
+    width: 100%;
+  }
+
+  .manager-section-tabs button.active::before {
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    left: 5px;
+    width: 2px;
+    height: 18px;
+    transform: translateY(-50%);
+  }
+
+  .manager-layout[data-manager-view] .agent-editor {
+    display: grid;
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .editor-section {
+    padding: 44px clamp(34px, 4vw, 64px) 64px;
+  }
+
+  .editor-section h3 {
+    font-size: 42px;
+  }
+
+  .source-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 @keyframes dialog-backdrop-in {
