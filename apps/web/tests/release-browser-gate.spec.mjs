@@ -58,6 +58,8 @@ describe('release browser quality gate', () => {
     expect(verify).toContain('window.innerWidth');
     expect(verify).toContain('window.devicePixelRatio');
     expect(verify).toContain('visualViewport.width');
+    expect(verify).toContain(`cdp.send('Page.captureScreenshot'`);
+    expect(verify).toContain('writeFileSync(screenshot');
   });
 
   it('measures visible touch targets and reports the failing selector and dimensions', async () => {

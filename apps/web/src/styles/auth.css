@@ -159,6 +159,7 @@
 
 .auth-links__alternate {
   display: inline-flex;
+  margin-inline-start: auto;
   align-items: center;
   gap: 5px;
   color: var(--auth-muted);

@@ -35,6 +35,7 @@ const emit = defineEmits<{
 const agentMenuOpen = ref(false);
 const userMenuOpen = ref(false);
 const agentButton = ref<HTMLButtonElement | null>(null);
+const userButton = ref<HTMLButtonElement | null>(null);
 
 const selectedAgent = computed(() => props.agents.find((agent) => agent.id === props.activeAgentId));
 
@@ -53,6 +54,12 @@ function closeAgentMenu() {
   if (!agentMenuOpen.value) return;
   agentMenuOpen.value = false;
   void nextTick(() => agentButton.value?.focus());
+}
+
+function closeUserMenu() {
+  if (!userMenuOpen.value) return;
+  userMenuOpen.value = false;
+  void nextTick(() => userButton.value?.focus());
 }
 </script>
 
@@ -116,8 +123,9 @@ function closeAgentMenu() {
         </div>
       </div>
 
-      <div class="header-popover" @keydown.esc="userMenuOpen = false">
+      <div class="header-popover" @keydown.esc.prevent.stop="closeUserMenu">
         <button
+          ref="userButton"
           class="user-menu-button"
           type="button"
           :aria-label="`账号菜单：${userEmail}`"

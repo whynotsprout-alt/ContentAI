@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import axe from 'axe-core';
@@ -381,6 +381,17 @@ async function installApiMocks(page, state) {
       return fulfillJson(route, response ? { ...agent, name: response.name } : agent);
     }
     if (path === `/api/agents/${agent.id}` && method === 'DELETE') {
+      const response = state.agentDeleteResponses?.shift();
+      if (response?.delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, response.delay));
+      if (response?.status && response.status >= 400) {
+        return fulfillJson(route, {
+          detail: {
+            code: 'AGENT_DELETE_UNAVAILABLE',
+            message: '内容账号删除服务暂不可用',
+            retryable: true
+          }
+        }, response.status);
+      }
       state.agentDeleted = true;
       return fulfillJson(route, null);
     }
@@ -427,7 +438,12 @@ async function installApiMocks(page, state) {
       });
     }
     if (path === '/api/admin/users' && method === 'GET') {
-      return fulfillJson(route, { items: [targetUser, reviewerUser], next_cursor: null });
+      const response = state.adminUserListResponses?.shift();
+      if (response?.delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, response.delay));
+      return fulfillJson(route, {
+        items: response?.items ?? [targetUser, reviewerUser],
+        next_cursor: response?.nextCursor ?? null
+      });
     }
     const adminUserSessionsMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/sessions$/);
     if (adminUserSessionsMatch && method === 'GET') {
@@ -838,7 +854,10 @@ async function runDesktopAcceptance(browser) {
     modelLoadFailure: false,
     modelPutPayloads: [],
     agentDeleted: false,
-    agentDetailResponses: []
+    agentDetailResponses: [],
+    agentDeleteResponses: [],
+    expectedAgentDeleteFailure: false,
+    adminUserListResponses: []
   };
   const screenshots = [];
   let authRegisterLayout = null;
@@ -850,7 +869,11 @@ async function runDesktopAcceptance(browser) {
     const expectedAnonymousMe = !state.authenticated && response.url().includes('/api/auth/me') && response.status() === 401;
     const expectedModelConflict = response.request().method() === 'PUT' && response.url().includes('/api/admin/model-config') && response.status() === 409;
     const expectedModelLoadFailure = state.modelLoadFailure && response.request().method() === 'GET' && response.url().includes('/api/admin/model-config') && response.status() === 502;
-    if (response.status() >= 400 && !expectedAnonymousMe && !expectedModelConflict && !expectedModelLoadFailure) {
+    const expectedAgentDeleteFailure = state.expectedAgentDeleteFailure
+      && response.request().method() === 'DELETE'
+      && response.url().includes(`/api/agents/${agent.id}`)
+      && response.status() === 503;
+    if (response.status() >= 400 && !expectedAnonymousMe && !expectedModelConflict && !expectedModelLoadFailure && !expectedAgentDeleteFailure) {
       state.failedResponses.push(`${response.status()} ${response.url()}`);
     }
   });
@@ -873,6 +896,13 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-video-state'), 'poster');
     await expectAxeClean(page, 'auth-login');
     await expectMinimumTouchTargets(page.locator('.auth-form'), '1440x900 登录');
+    const authLinksBox = await page.locator('.auth-links').boundingBox();
+    const createAccountLinkBox = await page.getByRole('link', { name: '创建账号', exact: true }).boundingBox();
+    assert.ok(authLinksBox && createAccountLinkBox, '登录辅助链接应可测量');
+    assert.ok(
+      Math.abs((authLinksBox.x + authLinksBox.width) - (createAccountLinkBox.x + createAccountLinkBox.width)) <= 1,
+      '移除忘记密码后，创建账号入口仍应保持在原桌面构图右侧'
+    );
     await capture(page, '01-auth-login-1440x900.png', screenshots);
 
     await page.setViewportSize({ width: 1280, height: 800 });
@@ -1023,12 +1053,17 @@ async function runDesktopAcceptance(browser) {
     assert.equal((await mobilePrompt.inputValue()).endsWith('\n'), true, '手机 Enter 应插入换行');
     await mobilePrompt.fill('');
     await capture(page, '02g-workbench-360x800.png', screenshots);
-    await page.locator('.user-menu-button').click();
+    const mobileUserMenuButton = page.locator('.user-menu-button');
+    const mobileUserMenu = page.locator('#user-account-menu');
+    await mobileUserMenuButton.click();
     await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '内容账号', exact: true }), '手机内容账号入口');
     await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '管理后台', exact: true }), '手机管理后台入口');
     await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '修改密码', exact: true }), '手机改密入口');
     await expectVisible(page.locator('#user-account-menu').getByRole('button', { name: '退出登录', exact: true }), '手机退出入口');
+    await mobileUserMenu.locator('button').last().focus();
     await page.keyboard.press('Escape');
+    await expectHidden(mobileUserMenu, 'Escape 应关闭账号菜单');
+    await expectFocused(mobileUserMenuButton, 'Escape 应把焦点归还账号菜单触发器');
 
     await page.setViewportSize({ width: 390, height: 844 });
     const mediumPhoneToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
@@ -1251,8 +1286,33 @@ async function runDesktopAcceptance(browser) {
       true,
       'Tab 应在弹窗尾部回绕到首个可见控件'
     );
+    state.expectedAgentDeleteFailure = true;
+    state.agentDeleteResponses.push(
+      { delay: 220, status: 503 },
+      { delay: 0, status: 200 }
+    );
     await page.getByRole('button', { name: '删除', exact: true }).click();
-    await page.getByRole('button', { name: '确认删除', exact: true }).click();
+    const deleteAgentConfirmation = dialogLayers.last();
+    const confirmDeleteAgentButton = deleteAgentConfirmation.getByRole('button', { name: '确认删除', exact: true });
+    await confirmDeleteAgentButton.click();
+    await confirmDeleteAgentButton.evaluate((element) => new Promise((resolvePromise) => {
+      const deadline = performance.now() + 1200;
+      const check = () => {
+        if (element instanceof HTMLButtonElement && (element.disabled || performance.now() >= deadline)) {
+          resolvePromise();
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+      check();
+    }));
+    assert.equal(await confirmDeleteAgentButton.isDisabled(), true, '删除请求期间确认按钮应禁用以防重复提交');
+    const deleteAgentError = deleteAgentConfirmation.getByRole('alert');
+    await expectVisible(deleteAgentError, '删除失败反馈应显示在当前确认弹窗');
+    assert.match(await deleteAgentError.innerText(), /删除服务暂不可用/);
+    assert.equal(await confirmDeleteAgentButton.isEnabled(), true, '删除失败后确认按钮应恢复以便重试');
+    state.expectedAgentDeleteFailure = false;
+    await confirmDeleteAgentButton.click();
     await expectVisible(accountName, '删除最后账号后的新建编辑器');
     await page.waitForFunction(() => {
       const input = document.querySelector('#agent-name');
@@ -1271,6 +1331,37 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '管理后台标题');
     await expectAxeClean(page, 'admin-user-list');
     await expectMinimumTouchTargets(page.locator('.admin-list-panel'), '1440x900 后台用户列表');
+    const adminUserSearch = page.getByRole('searchbox', { name: '搜索用户邮箱', exact: true });
+    state.adminUserListResponses.push(
+      { delay: 500, items: [targetUser] },
+      { delay: 20, items: [reviewerUser] }
+    );
+    const slowUserListRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/admin/users' && url.searchParams.get('search') === 'creator';
+    });
+    const slowUserListResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/admin/users' && url.searchParams.get('search') === 'creator';
+    });
+    await adminUserSearch.fill('creator');
+    await slowUserListRequest;
+    const fastUserListResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/admin/users' && url.searchParams.get('search') === 'reviewer';
+    });
+    await adminUserSearch.fill('reviewer');
+    await fastUserListResponse;
+    await slowUserListResponse;
+    const reviewerRaceRow = page.locator('.admin-table tbody tr').filter({ hasText: reviewerUser.email });
+    await expectVisible(reviewerRaceRow, '较新的用户搜索结果应保留');
+    await expectHidden(page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email }), '较慢的旧搜索结果不得覆盖新结果');
+    const resetUserListResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/admin/users' && !url.searchParams.get('search');
+    });
+    await adminUserSearch.fill('');
+    await resetUserListResponse;
     const userRow = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
     await expectVisible(userRow, '用户表格行');
     await userRow.click();
@@ -1944,10 +2035,12 @@ async function runPageScaleAcceptance(browser) {
       innerHeight: window.innerHeight,
       devicePixelRatio: window.devicePixelRatio,
       visualViewportWidth: window.visualViewport.width,
-      visualViewportHeight: window.visualViewport.height
+      visualViewportHeight: window.visualViewport.height,
+      mobileMediaQuery: window.matchMedia('(max-width: 767px)').matches
     }));
     assert.equal(zoomMetrics.innerWidth, 640, `200% browser zoom 应把 1280px 物理宽度重排为 640 CSS px：${JSON.stringify(zoomMetrics)}`);
     assert.equal(zoomMetrics.devicePixelRatio, 2, `200% browser zoom DPR 错误：${JSON.stringify(zoomMetrics)}`);
+    assert.equal(zoomMetrics.mobileMediaQuery, true, `200% browser zoom 应触发手机端重排断点：${JSON.stringify(zoomMetrics)}`);
     assert.ok(
       Math.abs(zoomMetrics.visualViewportWidth - 640) <= 1,
       `200% browser zoom visual viewport 宽度错误：${JSON.stringify(zoomMetrics)}`
@@ -1981,8 +2074,23 @@ async function runPageScaleAcceptance(browser) {
     await expectInsideViewport(sendButton, page, '200% browser zoom 发送按钮');
     await expectMinimumTouchTargets(page.locator('.workbench-shell'), '200% browser zoom 工作台');
     const screenshot = resolve(outputDir, '08-workbench-1280x720-browser-zoom-200.png');
-    await page.screenshot({ path: screenshot, animations: 'disabled' });
+    const screenshotData = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false
+    });
+    writeFileSync(screenshot, Buffer.from(screenshotData.data, 'base64'));
     assert.ok(statSync(screenshot).size > 1000, `截图为空：${screenshot}`);
+    const postScreenshotMetrics = await page.evaluate(() => ({
+      innerWidth: window.innerWidth,
+      devicePixelRatio: window.devicePixelRatio,
+      mobileMediaQuery: window.matchMedia('(max-width: 767px)').matches
+    }));
+    assert.deepEqual(
+      postScreenshotMetrics,
+      { innerWidth: 640, devicePixelRatio: 2, mobileMediaQuery: true },
+      `200% 截图捕获不得恢复桌面视口：${JSON.stringify(postScreenshotMetrics)}`
+    );
     await cdp.send('Emulation.clearDeviceMetricsOverride');
     await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
     await page.waitForFunction(() => window.visualViewport?.scale >= 1.9);

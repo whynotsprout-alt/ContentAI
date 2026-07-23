@@ -62,6 +62,7 @@ const confirmStatusChange = ref(false);
 const confirmRoleChange = ref(false);
 const statusChangeError = ref('');
 const roleChangeError = ref('');
+const listRequestGuard = createAdminRequestGenerationGuard();
 const userRequestGuard = createAdminRequestGenerationGuard();
 const sessionRequestGuard = createAdminRequestGenerationGuard();
 const auditPaginationRequestGuard = createAdminRequestGenerationGuard();
@@ -85,17 +86,26 @@ function parseError(value: unknown) {
 }
 
 async function load() {
+  const request = listRequestGuard.begin();
+  const query = {
+    search: search.value.trim(),
+    status: status.value,
+    cursor: currentCursor.value,
+    limit: 50
+  };
   loading.value = true;
   listError.value = '';
   try {
-    const result = await adminApi.users({ search: search.value.trim(), status: status.value, cursor: currentCursor.value, limit: 50 });
+    const result = await adminApi.users(query);
+    if (!listRequestGuard.isCurrent(request)) return;
     users.value = result.items;
     nextCursor.value = result.next_cursor;
     if (selected.value) selected.value = users.value.find((user) => user.id === selected.value?.id) ?? selected.value;
   } catch (value) {
+    if (!listRequestGuard.isCurrent(request)) return;
     listError.value = parseError(value);
   } finally {
-    loading.value = false;
+    if (listRequestGuard.isCurrent(request)) loading.value = false;
   }
 }
 

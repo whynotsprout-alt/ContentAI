@@ -75,6 +75,7 @@ const loading = ref(false);
 const saving = ref(false);
 const error = ref('');
 const notice = ref('');
+const deleteError = ref('');
 const confirmClose = ref(false);
 const confirmDelete = ref(false);
 const discardTarget = ref<'close' | 'directory'>('close');
@@ -280,9 +281,9 @@ async function save() {
 }
 
 async function removeAgent() {
-  if (!editingId.value) return;
+  if (!editingId.value || saving.value) return;
   saving.value = true;
-  error.value = '';
+  deleteError.value = '';
   try {
     await store.deleteAgent(editingId.value);
     confirmDelete.value = false;
@@ -294,10 +295,23 @@ async function removeAgent() {
     }
     notice.value = '内容账号已删除。';
   } catch (value) {
-    error.value = value instanceof ApiError ? value.message : String(value);
+    deleteError.value = value instanceof ApiError ? value.message : String(value);
   } finally {
     saving.value = false;
   }
+}
+
+function openDeleteConfirmation() {
+  if (saving.value) return;
+  deleteError.value = '';
+  confirmDelete.value = true;
+}
+
+function closeConfirmation() {
+  if (saving.value) return;
+  confirmClose.value = false;
+  confirmDelete.value = false;
+  deleteError.value = '';
 }
 
 function requestClose() {
@@ -336,6 +350,7 @@ watch(() => props.open, (open) => {
   }
   confirmClose.value = false;
   confirmDelete.value = false;
+  deleteError.value = '';
   discardTarget.value = 'close';
   activeSection.value = 'basic';
   compactView.value = props.initialTemplate ? 'editor' : 'directory';
@@ -442,7 +457,7 @@ onBeforeUnmount(() => {
           <footer class="editor-footer">
             <div><p v-if="error" class="form-feedback error" role="alert">{{ error }}</p><p v-if="notice" class="form-feedback success" role="status">{{ notice }}</p></div>
             <div class="editor-actions">
-              <button v-if="mode === 'edit'" class="danger-button" type="button" :disabled="saving" @click="confirmDelete = true"><Trash2 :size="16" /> 删除</button>
+              <button v-if="mode === 'edit'" class="danger-button" type="button" :disabled="saving" @click="openDeleteConfirmation"><Trash2 :size="16" /> 删除</button>
               <button class="primary-action" type="submit" :disabled="saving"><LoaderCircle v-if="saving" :size="16" class="spin" /><Save v-else :size="16" />{{ saving ? '保存中' : '保存内容账号' }}</button>
             </div>
           </footer>
@@ -453,12 +468,13 @@ onBeforeUnmount(() => {
         v-if="confirmClose || confirmDelete"
         title-id="manager-confirm-title"
         :busy="saving"
-        @close="confirmClose = false; confirmDelete = false"
+        @close="closeConfirmation"
       >
         <div class="manager-confirm-card">
           <AlertTriangle :size="22" /><h3 id="manager-confirm-title">{{ confirmDelete ? '删除这个内容账号？' : '放弃未保存的更改？' }}</h3>
           <p>{{ confirmDelete ? '删除后不能用于新的对话，且无法撤销。' : '刚才修改的配置不会被保留。' }}</p>
-          <div><button type="button" @click="confirmClose = false; confirmDelete = false">取消</button><button class="danger-button" type="button" @click="confirmDelete ? removeAgent() : discardChanges()">{{ confirmDelete ? '确认删除' : discardTarget === 'directory' ? '放弃并返回目录' : '放弃并关闭' }}</button></div>
+          <p v-if="confirmDelete && deleteError" class="form-feedback error" role="alert">{{ deleteError }}</p>
+          <div><button type="button" :disabled="saving" @click="closeConfirmation">取消</button><button class="danger-button" type="button" :disabled="saving" @click="confirmDelete ? removeAgent() : discardChanges()"><LoaderCircle v-if="saving" :size="16" class="spin" />{{ confirmDelete ? '确认删除' : discardTarget === 'directory' ? '放弃并返回目录' : '放弃并关闭' }}</button></div>
         </div>
       </AccessibleDialog>
     </div>
