@@ -3305,6 +3305,7 @@ def test_waiting_input_transition_rechecks_worker_user_and_cancel_fences(
             assert attempt.finished_at is not None
 
 
+@pytest.mark.parametrize("disable_user", [False, True], ids=["active-user", "disabled-user"])
 @pytest.mark.parametrize(
     ("terminal_status", "terminal_error", "attempt_status"),
     [
@@ -3316,6 +3317,7 @@ def test_waiting_input_stale_worker_does_not_project_cancellation_over_terminal_
     terminal_status: RunStatus,
     terminal_error: str,
     attempt_status: ExecutionAttemptStatus,
+    disable_user: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Writer:
@@ -3351,6 +3353,7 @@ def test_waiting_input_stale_worker_does_not_project_cancellation_over_terminal_
                 execution.status = terminal_status
                 execution.error = terminal_error
                 execution.finished_at = now
+                execution.cancel_requested_at = now
                 competing_session.add(execution)
                 attempt = competing_session.get(
                     AgentExecutionAttempt,
@@ -3360,10 +3363,11 @@ def test_waiting_input_stale_worker_does_not_project_cancellation_over_terminal_
                 attempt.status = attempt_status
                 attempt.finished_at = now
                 competing_session.add(attempt)
-                user = competing_session.get(AppUser, claimed.auth.user_id)
-                assert user is not None
-                user.status = "disabled"
-                competing_session.add(user)
+                if disable_user:
+                    user = competing_session.get(AppUser, claimed.auth.user_id)
+                    assert user is not None
+                    user.status = "disabled"
+                    competing_session.add(user)
                 competing_session.commit()
             return SimpleNamespace(
                 interrupt_payload=interrupt_payload,

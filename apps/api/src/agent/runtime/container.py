@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import weakref
 from collections import OrderedDict
@@ -42,43 +43,243 @@ class Checkpointer(Protocol):
 
 
 class _GatewayOwner:
-    def __init__(self, gateway: ModelGateway, *, close_when_retired: bool) -> None:
+    def __init__(
+        self,
+        gateway: ModelGateway,
+        *,
+        close_when_retired: bool,
+        on_closed: Callable[[_GatewayOwner], None] | None = None,
+    ) -> None:
         self.gateway = gateway
         self.close_when_retired = close_when_retired
+        self._on_closed = on_closed
         self._lock = threading.Lock()
+        self._close_complete = threading.Event()
+        self._close_complete.set()
         self._references = 0
         self._retired = False
-        self._closed = False
+        self._state = "active"
+        self._close_error: BaseException | None = None
+        self._close_generation = 0
+        self._close_monitor: asyncio.Task[None] | None = None
+        self._close_monitor_token: object | None = None
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._state == "closed"
 
     def retain(self) -> None:
         with self._lock:
             self._references += 1
 
     def release(self) -> None:
-        should_close = False
         with self._lock:
             self._references -= 1
-            should_close = self._should_close()
-            if should_close:
-                self._closed = True
+            should_close = self._can_close_locked()
         if should_close:
-            self.gateway.close()
+            try:
+                self.close()
+            except Exception:
+                pass
 
-    def retire(self) -> None:
-        should_close = False
+    def retire(self) -> bool:
         with self._lock:
             self._retired = True
-            should_close = self._should_close()
-            if should_close:
-                self._closed = True
-        if should_close:
-            self.gateway.close()
+            if not self.close_when_retired:
+                self._settle_injected_locked()
+                return True
+            should_close = self._can_close_locked()
+            if not should_close:
+                return self._state == "closed"
+        return self.close()
 
-    def _should_close(self) -> bool:
+    def close(self) -> bool:
+        with self._lock:
+            self._retired = True
+            if not self.close_when_retired:
+                self._settle_injected_locked()
+                return True
+            if self._state == "closed":
+                return True
+            if not self._can_close_locked():
+                return False
+            self._begin_close_locked()
+        try:
+            completed = self.gateway.close()
+        except Exception as exc:
+            self._finish_close(error=exc)
+            raise
+        if completed is False:
+            if self._schedule_close_monitor():
+                return False
+            self._finish_close(error=None, pending=True)
+            return False
+        self._finish_close(error=None)
+        return True
+
+    async def aclose(self) -> None:
+        while True:
+            with self._lock:
+                self._retired = True
+                if not self.close_when_retired:
+                    self._settle_injected_locked()
+                    return
+                if self._state == "closed":
+                    return
+                if self._references != 0:
+                    raise RuntimeError(
+                        "Cannot close a gateway owner with retained runtime values."
+                    )
+                if self._state == "closing":
+                    close_complete = self._close_complete
+                else:
+                    self._begin_close_locked()
+                    break
+            await asyncio.to_thread(close_complete.wait)
+        try:
+            await self.gateway.aclose()
+        except asyncio.CancelledError as exc:
+            self._finish_close(error=exc)
+            raise
+        except Exception as exc:
+            self._finish_close(error=exc)
+            raise
+        self._finish_close(error=None)
+
+    def _schedule_close_monitor(self) -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        with self._lock:
+            if self._state != "closing":
+                return False
+            if self._close_monitor_token is not None:
+                return True
+            generation = self._close_generation
+            monitor_token = object()
+            self._close_monitor_token = monitor_token
+        monitor_coroutine = self._monitor_async_close(
+            generation,
+            monitor_token,
+        )
+        try:
+            monitor_task = loop.create_task(
+                monitor_coroutine,
+            )
+        except BaseException as exc:
+            monitor_coroutine.close()
+            self._finish_close(
+                error=exc,
+                generation=generation,
+                monitor_token=monitor_token,
+            )
+            raise
+        monitor_task.add_done_callback(
+            lambda completed: self._finish_unstarted_monitor(
+                completed,
+                generation=generation,
+                monitor_token=monitor_token,
+            )
+        )
+        with self._lock:
+            if (
+                generation == self._close_generation
+                and monitor_token is self._close_monitor_token
+            ):
+                self._close_monitor = monitor_task
+        return True
+
+    async def _monitor_async_close(
+        self,
+        generation: int,
+        monitor_token: object,
+    ) -> None:
+        try:
+            await self.gateway.aclose()
+        except asyncio.CancelledError as exc:
+            self._finish_close(
+                error=exc,
+                generation=generation,
+                monitor_token=monitor_token,
+            )
+        except Exception as exc:
+            self._finish_close(
+                error=exc,
+                generation=generation,
+                monitor_token=monitor_token,
+            )
+        else:
+            self._finish_close(
+                error=None,
+                generation=generation,
+                monitor_token=monitor_token,
+            )
+
+    def _finish_unstarted_monitor(
+        self,
+        monitor_task: asyncio.Task[None],
+        *,
+        generation: int,
+        monitor_token: object,
+    ) -> None:
+        if not monitor_task.cancelled():
+            return
+        self._finish_close(
+            error=asyncio.CancelledError(),
+            generation=generation,
+            monitor_token=monitor_token,
+        )
+
+    def _begin_close_locked(self) -> None:
+        self._close_generation += 1
+        self._close_monitor = None
+        self._close_monitor_token = None
+        self._state = "closing"
+        self._close_error = None
+        self._close_complete.clear()
+
+    def _finish_close(
+        self,
+        *,
+        error: BaseException | None,
+        pending: bool = False,
+        generation: int | None = None,
+        monitor_token: object | None = None,
+    ) -> None:
+        on_closed: Callable[[_GatewayOwner], None] | None = None
+        with self._lock:
+            if generation is not None and (
+                generation != self._close_generation
+                or monitor_token is not self._close_monitor_token
+            ):
+                return
+            self._close_error = error
+            if monitor_token is not None:
+                self._close_monitor = None
+                self._close_monitor_token = None
+            if error is not None:
+                self._state = "active"
+            elif pending:
+                self._state = "pending"
+            else:
+                self._state = "closed"
+                on_closed = self._on_closed
+            self._close_complete.set()
+        if on_closed is not None:
+            on_closed(self)
+
+    def _settle_injected_locked(self) -> None:
+        self._state = "closed"
+        self._close_error = None
+        self._close_complete.set()
+
+    def _can_close_locked(self) -> bool:
         return (
             self.close_when_retired
             and self._retired
-            and not self._closed
+            and self._state in {"active", "pending"}
             and self._references == 0
         )
 
@@ -109,11 +310,18 @@ class _RuntimeCacheEntry:
     models: OrderedDict[tuple[str, ...], AgentModel] = field(default_factory=OrderedDict)
     graphs: OrderedDict[tuple[str, ...], AgentGraph] = field(default_factory=OrderedDict)
 
-    def retire(self) -> None:
-        self.owner.retire()
-        self.gateway = None
-        self.models.clear()
-        self.graphs.clear()
+    def retire(self, *, explicit_close: bool = False) -> bool:
+        if explicit_close:
+            self.gateway = None
+            self.models.clear()
+            self.graphs.clear()
+            return self.owner.retire()
+        try:
+            return self.owner.retire()
+        finally:
+            self.gateway = None
+            self.models.clear()
+            self.graphs.clear()
 
 
 @dataclass(frozen=True)
@@ -139,6 +347,7 @@ class RuntimeContainer:
         default_factory=OrderedDict,
         init=False,
     )
+    _retired_owners: set[_GatewayOwner] = field(default_factory=set, init=False)
     _cache_lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _owns_checkpointer: bool = field(default=False, init=False)
 
@@ -244,7 +453,11 @@ class RuntimeContainer:
                 model_name=configuration.model_name,
             )
             close_when_retired = True
-        owner = _GatewayOwner(gateway, close_when_retired=close_when_retired)
+        owner = _GatewayOwner(
+            gateway,
+            close_when_retired=close_when_retired,
+            on_closed=self._discard_retired_owner,
+        )
         entry = _RuntimeCacheEntry(
             owner=owner,
             gateway=_RetainedRuntimeValue(gateway, owner),
@@ -253,7 +466,7 @@ class RuntimeContainer:
         self._runtime_entries.move_to_end(model_config_id)
         while len(self._runtime_entries) > self._cache_capacity:
             _, evicted = self._runtime_entries.popitem(last=False)
-            evicted.retire()
+            self._retire_entry(evicted)
         return entry
 
     def _model_for_entry(
@@ -396,11 +609,85 @@ class RuntimeContainer:
                 cache.popitem(last=False)
 
     def close(self) -> None:
+        errors: list[Exception] = []
+        failed_owners: set[_GatewayOwner] = set()
         with self._cache_lock:
             entries = tuple(self._runtime_entries.values())
             self._runtime_entries.clear()
-        for entry in entries:
-            entry.retire()
+            for entry in entries:
+                try:
+                    self._retire_entry(entry, explicit_close=True)
+                except Exception as exc:
+                    errors.append(exc)
+                    failed_owners.add(entry.owner)
+            owners = tuple(self._retired_owners)
+        for owner in owners:
+            if owner in failed_owners:
+                continue
+            try:
+                owner.close()
+            except Exception as exc:
+                errors.append(exc)
+            if owner.closed:
+                with self._cache_lock:
+                    self._retired_owners.discard(owner)
+        try:
+            self._close_owned_persistence()
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    async def aclose(self) -> None:
+        errors: list[Exception] = []
+        failed_owners: set[_GatewayOwner] = set()
+        with self._cache_lock:
+            entries = tuple(self._runtime_entries.values())
+            self._runtime_entries.clear()
+            for entry in entries:
+                try:
+                    self._retire_entry(entry)
+                except Exception as exc:
+                    errors.append(exc)
+                    failed_owners.add(entry.owner)
+            owners = tuple(self._retired_owners)
+        for owner in owners:
+            if owner in failed_owners:
+                continue
+            try:
+                await owner.aclose()
+            except Exception as exc:
+                errors.append(exc)
+            if owner.closed:
+                with self._cache_lock:
+                    self._retired_owners.discard(owner)
+        try:
+            self._close_owned_persistence()
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def _retire_entry(
+        self,
+        entry: _RuntimeCacheEntry,
+        *,
+        explicit_close: bool = False,
+    ) -> None:
+        owner = entry.owner
+        try:
+            entry.retire(explicit_close=explicit_close)
+        finally:
+            if owner.closed:
+                self._retired_owners.discard(owner)
+            else:
+                self._retired_owners.add(owner)
+
+    def _discard_retired_owner(self, owner: _GatewayOwner) -> None:
+        with self._cache_lock:
+            self._retired_owners.discard(owner)
+
+    def _close_owned_persistence(self) -> None:
         if self._owns_checkpointer and self.persistence is not None:
             self.persistence.close()
             self._owns_checkpointer = False

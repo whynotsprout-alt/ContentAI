@@ -1,10 +1,13 @@
+import asyncio
+
 import pytest
-from api.app import _normalize_origins, app, create_app
+from api.app import _normalize_origins, _shutdown, app, create_app
 from client import ApiClient as TestClient
 from core.config import Settings
 from db.session import get_engine
 from models.schemas import AgentVersionCreate
 from pydantic import ValidationError
+from services.agent_service import AgentService
 from services.service_heartbeat import REQUIRED_WORKER_QUEUES, upsert_service_heartbeat
 from sqlalchemy import inspect
 from sqlmodel import Session
@@ -122,8 +125,8 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
             self.runtime = runtime or object()
             self.runner = object()
 
-        def close(self):
-            pass
+        async def aclose(self):
+            return None
 
         def start(self):
             pass
@@ -148,6 +151,131 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
     assert agent_service_settings == [test_settings]
     assert agent_service_runtimes == [None]
     assert isinstance(created_app.state.agent_service, DummyAgentService)
+
+
+def test_lifespan_awaits_agent_service_async_close(monkeypatch):
+    close_order: list[str] = []
+
+    class DummyAgentService:
+        def __init__(self, settings, runtime=None):
+            self.settings = settings
+            self.runtime = runtime or object()
+            self.runner = object()
+
+        def start(self):
+            return None
+
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("agent")
+
+    monkeypatch.setattr("api.app.AgentService", DummyAgentService)
+    monkeypatch.setattr("api.app.init_database", lambda _settings: None)
+    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+
+    with TestClient(create_app()):
+        pass
+
+    assert close_order == ["agent", "database"]
+
+
+def test_agent_service_async_close_awaits_runtime_after_runner_close():
+    close_order: list[str] = []
+
+    class DummyRunner:
+        def close(self):
+            close_order.append("runner")
+
+    class DummyRuntime:
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("runtime")
+
+    service = AgentService.__new__(AgentService)
+    service.runner = DummyRunner()
+    service.runtime = DummyRuntime()
+
+    asyncio.run(service.aclose())
+
+    assert close_order == ["runner", "runtime"]
+
+
+def test_shutdown_awaits_agent_runtime_after_runner_close_failure(monkeypatch):
+    close_order: list[str] = []
+
+    class FailingRunner:
+        def close(self):
+            close_order.append("runner")
+            raise RuntimeError("runner close failed")
+
+    class DummyRuntime:
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("runtime")
+
+    service = AgentService.__new__(AgentService)
+    service.runner = FailingRunner()
+    service.runtime = DummyRuntime()
+    created_app = create_app()
+    created_app.state.agent_service = service
+    created_app.state.ready = True
+    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+
+    asyncio.run(_shutdown(created_app))
+
+    assert created_app.state.ready is False
+    assert close_order == ["runner", "runtime", "database"]
+
+
+def test_agent_service_close_then_async_close_is_idempotent():
+    close_order: list[str] = []
+
+    class DummyRunner:
+        def close(self):
+            close_order.append("runner")
+
+    class DummyRuntime:
+        def close(self):
+            close_order.append("runtime-sync")
+
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("runtime-async")
+
+    service = AgentService.__new__(AgentService)
+    service.runner = DummyRunner()
+    service.runtime = DummyRuntime()
+
+    service.close()
+    asyncio.run(service.aclose())
+    asyncio.run(service.aclose())
+
+    assert close_order == ["runner", "runtime-sync", "runtime-async"]
+
+
+def test_shutdown_continues_after_async_hook_failure(monkeypatch):
+    close_order: list[str] = []
+    created_app = create_app()
+
+    class FailingConversationService:
+        async def close(self):
+            close_order.append("conversation")
+            raise RuntimeError("conversation close failed")
+
+    class DummyAgentService:
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("agent")
+
+    created_app.state.conversation_service = FailingConversationService()
+    created_app.state.agent_service = DummyAgentService()
+    created_app.state.ready = True
+    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+
+    asyncio.run(_shutdown(created_app))
+
+    assert created_app.state.ready is False
+    assert close_order == ["conversation", "agent", "database"]
 
 
 def test_settings_reject_sqlite_database_url():

@@ -59,6 +59,7 @@ class _OwnerLoopAsyncClient(httpx.AsyncClient):
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._close_state_lock = threading.Lock()
         self._close_future: Future[None] | None = None
+        self._close_generation = 0
         self._async_closed = False
         self._transport_closed = False
         self._closed_mount_ids: set[int] = set()
@@ -155,25 +156,34 @@ class _OwnerLoopAsyncClient(httpx.AsyncClient):
                 completed: Future[None] = Future()
                 completed.set_result(None)
                 return completed
-            if self._close_future is not None and not self._close_future.done():
+            if self._close_future is not None:
                 return self._close_future
             future = asyncio.run_coroutine_threadsafe(
                 self._close_on_owner_loop(),
                 self._require_owner_loop(),
             )
+            self._close_generation += 1
+            generation = self._close_generation
             self._close_future = future
-        future.add_done_callback(self._finish_close)
+        future.add_done_callback(
+            lambda completed: self._finish_close(completed, generation=generation)
+        )
         return future
 
-    def _finish_close(self, future: Future[None]) -> None:
-        error = None if future.cancelled() else future.exception()
+    def _finish_close(self, future: Future[None], *, generation: int) -> None:
+        succeeded = not future.cancelled() and future.exception() is None
+        should_stop = False
         with self._close_state_lock:
-            if error is None and not future.cancelled():
+            if future is not self._close_future or generation != self._close_generation:
+                return
+            if succeeded:
                 self._async_closed = True
+                should_stop = True
             else:
                 self._close_future = None
-        if error is None and not future.cancelled():
-            self._require_owner_loop().call_soon_threadsafe(self._require_owner_loop().stop)
+        if should_stop:
+            owner_loop = self._require_owner_loop()
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
 
     def close_from_sync(self) -> bool:
         future = self._submit_close()

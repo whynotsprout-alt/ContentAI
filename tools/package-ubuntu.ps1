@@ -50,18 +50,29 @@ if (Test-Path -LiteralPath $checksum) { Remove-Item -LiteralPath $checksum -Forc
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
 $manifest = [ordered]@{ version = $Version; commit = $commit } | ConvertTo-Json -Compress
-$escapedManifest = $manifest.Replace('"', '\"')
-$archiveArguments = @(
-  "archive",
-  "--format=tar.gz",
-  "--prefix=$name/",
-  "--output=$archive",
-  "--add-virtual-file=$name/release-manifest.json:$escapedManifest",
-  $commit,
-  "--"
-) + $requiredPaths
-& git -C $root @archiveArguments
-if ($LASTEXITCODE -ne 0) { throw "Unable to create the release archive." }
+$manifestDirectory = Join-Path ([IO.Path]::GetTempPath()) ("contentai-package-" + [Guid]::NewGuid().ToString("N"))
+$manifestFile = Join-Path $manifestDirectory "release-manifest.json"
+
+try {
+  New-Item -ItemType Directory -Path $manifestDirectory -Force | Out-Null
+  $encoding = New-Object Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($manifestFile, $manifest, $encoding)
+  $archiveArguments = @(
+    "archive",
+    "--format=tar.gz",
+    "--prefix=$name/",
+    "--output=$archive",
+    "--add-file=$manifestFile",
+    $commit,
+    "--"
+  ) + $requiredPaths
+  & git -C $root @archiveArguments
+  if ($LASTEXITCODE -ne 0) { throw "Unable to create the release archive." }
+}
+finally {
+  if (Test-Path -LiteralPath $manifestFile) { Remove-Item -LiteralPath $manifestFile -Force }
+  if (Test-Path -LiteralPath $manifestDirectory) { Remove-Item -LiteralPath $manifestDirectory -Force }
+}
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
 "$hash  $name.tar.gz" | Set-Content -LiteralPath $checksum -Encoding ASCII -NoNewline
 Write-Output $archive

@@ -19,6 +19,14 @@ def _canonical_version() -> str:
         return str(tomllib.load(stream)["project"]["version"])
 
 
+def _powershell_hosts() -> list[str]:
+    return [
+        executable
+        for name in ("powershell", "pwsh")
+        if (executable := shutil.which(name)) is not None
+    ]
+
+
 def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> None:
     version = _canonical_version()
     web_package = json.loads((ROOT / "apps/web/package.json").read_text(encoding="utf-8"))
@@ -40,6 +48,37 @@ def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> No
     assert "0.4.3" not in maintained_docs
     assert f"contentai-{version}-ubuntu.tar.gz" in maintained_docs
     assert f"V{version}" in maintained_docs
+
+
+def test_release_manifest_uses_add_file_without_shell_escaping() -> None:
+    package_script = (ROOT / "tools/package-ubuntu.ps1").read_text(encoding="utf-8")
+
+    assert "--add-file=" in package_script
+    assert "--add-virtual-file" not in package_script
+    assert "$escapedManifest" not in package_script
+    assert "[IO.File]::WriteAllText" in package_script
+    assert "Text.UTF8Encoding($false)" in package_script
+
+
+def test_release_manifest_directory_creation_is_inside_cleanup_scope() -> None:
+    package_script = (ROOT / "tools/package-ubuntu.ps1").read_text(encoding="utf-8")
+
+    try_block = package_script[package_script.index("try {") : package_script.index("finally {")]
+    finally_block = package_script[package_script.index("finally {") :]
+
+    assert "New-Item -ItemType Directory -Path $manifestDirectory -Force" in try_block
+    file_cleanup = (
+        "if (Test-Path -LiteralPath $manifestFile) "
+        "{ Remove-Item -LiteralPath $manifestFile -Force }"
+    )
+    directory_cleanup = (
+        "if (Test-Path -LiteralPath $manifestDirectory) "
+        "{ Remove-Item -LiteralPath $manifestDirectory -Force }"
+    )
+
+    assert file_cleanup in finally_block
+    assert directory_cleanup in finally_block
+    assert finally_block.index(file_cleanup) < finally_block.index(directory_cleanup)
 
 
 def test_maintained_docs_match_current_authentication_and_compose_topology() -> None:
@@ -75,11 +114,10 @@ def test_model_config_persistence_failure_is_a_documented_stable_code() -> None:
     assert "503" in api_documentation
 
 
-def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path: Path) -> None:
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if powershell is None:
-        pytest.skip("Ubuntu package script requires PowerShell.")
-
+@pytest.mark.parametrize("powershell", _powershell_hosts())
+def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(
+    tmp_path: Path, powershell: str
+) -> None:
     source_repository = tmp_path / "release-source"
     (source_repository / "tools").mkdir(parents=True)
     shutil.copy2(
@@ -147,7 +185,7 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path:
     checksum_texts: list[str] = []
     archives: list[Path] = []
     for index in range(2):
-        repository = tmp_path / f"release-build-{index}"
+        repository = tmp_path / f"release-build-{Path(powershell).stem}-{index}"
         subprocess.run(
             ["git", "clone", "--quiet", str(source_repository), str(repository)],
             check=True,
@@ -205,7 +243,9 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path:
         assert manifest is not None
         tracked_content = tracked.read()
         assert tracked_content == tracked_from_tree, tracked_content
-        assert json.loads(manifest.read()) == {
+        manifest_bytes = manifest.read()
+        assert not manifest_bytes.startswith(b"\xef\xbb\xbf")
+        assert json.loads(manifest_bytes) == {
             "version": "0.5.0-rc.1",
             "commit": commit,
         }

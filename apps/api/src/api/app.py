@@ -1,3 +1,4 @@
+import inspect
 import logging
 from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager
@@ -74,16 +75,22 @@ def _register_services(app: FastAPI) -> None:
     app.state.rate_limiter = RedisRateLimiter(app.state.settings)
 
 
-def _shutdown(app: FastAPI) -> None:
+async def _shutdown(app: FastAPI) -> None:
     app.state.ready = False
+    agent_service = getattr(app.state, "agent_service", None)
+    agent_closer = getattr(agent_service, "aclose", None)
+    if not callable(agent_closer):
+        agent_closer = getattr(agent_service, "close", None)
     for closer in (
         getattr(getattr(app.state, "conversation_service", None), "close", None),
-        getattr(getattr(app.state, "agent_service", None), "close", None),
+        agent_closer,
         close_database,
     ):
         if callable(closer):
             try:
-                closer()
+                result = closer()
+                if inspect.isawaitable(result):
+                    await result
             except Exception:
                 logger.exception("Application shutdown hook failed: %s", closer)
 
@@ -105,7 +112,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        _shutdown(app)
+        await _shutdown(app)
 
 
 def create_app(
