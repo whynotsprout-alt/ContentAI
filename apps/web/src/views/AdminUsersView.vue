@@ -60,6 +60,8 @@ const auditPaginationLoading = ref(false);
 const usage = ref<AdminUsageBucket[]>([]);
 const confirmStatusChange = ref(false);
 const confirmRoleChange = ref(false);
+const statusChangeError = ref('');
+const roleChangeError = ref('');
 const userRequestGuard = createAdminRequestGenerationGuard();
 const sessionRequestGuard = createAdminRequestGenerationGuard();
 const auditPaginationRequestGuard = createAdminRequestGenerationGuard();
@@ -268,22 +270,32 @@ function closeAudit() {
 async function toggleUser() {
   if (!selected.value) return;
   actionLoading.value = true;
-  detailError.value = '';
-  detailErrorKind.value = '';
+  statusChangeError.value = '';
   notice.value = '';
   try {
     selected.value = selected.value.status === 'disabled'
       ? await adminApi.enable(selected.value.id)
       : await adminApi.disable(selected.value.id);
     notice.value = selected.value.status === 'disabled' ? '用户已禁用。' : '用户已启用。';
-    confirmStatusChange.value = false;
+    closeStatusChangeConfirmation();
     await load();
   } catch (value) {
-    detailError.value = parseError(value);
-    detailErrorKind.value = 'action';
+    statusChangeError.value = parseError(value);
   } finally {
     actionLoading.value = false;
   }
+}
+
+function openStatusChangeConfirmation() {
+  detailError.value = '';
+  detailErrorKind.value = '';
+  statusChangeError.value = '';
+  confirmStatusChange.value = true;
+}
+
+function closeStatusChangeConfirmation() {
+  confirmStatusChange.value = false;
+  statusChangeError.value = '';
 }
 
 async function sendReset() {
@@ -451,21 +463,31 @@ function resetPagination() {
 async function changeRole() {
   if (!selected.value || !canChangeRole.value) return;
   actionLoading.value = true;
-  detailError.value = '';
-  detailErrorKind.value = '';
+  roleChangeError.value = '';
   notice.value = '';
   try {
     const nextRole = selected.value.role === 'admin' ? 'user' : 'admin';
     selected.value = await adminApi.updateUser(selected.value.id, nextRole);
     notice.value = nextRole === 'admin' ? '用户已设为管理员。' : '管理员已降级为普通用户。';
-    confirmRoleChange.value = false;
+    closeRoleChangeConfirmation();
     await load();
   } catch (value) {
-    detailError.value = parseError(value);
-    detailErrorKind.value = 'action';
+    roleChangeError.value = parseError(value);
   } finally {
     actionLoading.value = false;
   }
+}
+
+function openRoleChangeConfirmation() {
+  detailError.value = '';
+  detailErrorKind.value = '';
+  roleChangeError.value = '';
+  confirmRoleChange.value = true;
+}
+
+function closeRoleChangeConfirmation() {
+  confirmRoleChange.value = false;
+  roleChangeError.value = '';
 }
 
 function statusText(value: string) {
@@ -523,18 +545,18 @@ onMounted(() => void load());
             <p v-if="notice" class="form-feedback success" role="status"><CheckCircle2 :size="16" /> {{ notice }}</p>
             <div class="admin-actions">
               <button ref="resetPasswordButton" type="button" :disabled="actionLoading || !canResetPassword" :title="canResetPassword ? '生成一次性临时密码' : selected.id === auth.user?.id ? '不能为当前管理员生成临时密码' : '已禁用用户不可重置密码'" @click="sendReset"><LoaderCircle v-if="actionLoading" :size="16" class="spin" /><KeyRound v-else :size="16" />生成临时密码</button>
-              <button type="button" :disabled="actionLoading || !canChangeRole" :title="canChangeRole ? '修改用户角色' : '不能降级当前登录的管理员'" @click="confirmRoleChange = true"><ShieldCheck :size="16" />{{ selected.role === 'admin' ? '降级为普通用户' : '提升为管理员' }}</button>
-              <button class="danger-button" type="button" :disabled="actionLoading || selected.id === auth.user?.id" @click="confirmStatusChange = true"><Ban v-if="selected.status !== 'disabled'" :size="16" /><UserCheck v-else :size="16" />{{ selected.status === 'disabled' ? '启用用户' : '禁用用户' }}</button>
+              <button type="button" :disabled="actionLoading || !canChangeRole" :title="canChangeRole ? '修改用户角色' : '不能降级当前登录的管理员'" @click="openRoleChangeConfirmation"><ShieldCheck :size="16" />{{ selected.role === 'admin' ? '降级为普通用户' : '提升为管理员' }}</button>
+              <button class="danger-button" type="button" :disabled="actionLoading || selected.id === auth.user?.id" @click="openStatusChangeConfirmation"><Ban v-if="selected.status !== 'disabled'" :size="16" /><UserCheck v-else :size="16" />{{ selected.status === 'disabled' ? '启用用户' : '禁用用户' }}</button>
             </div>
           </template>
         </aside>
       </div>
-    <AccessibleDialog v-if="confirmStatusChange && selected" title-id="status-confirm-title" :busy="actionLoading" @close="confirmStatusChange = false">
-      <div class="confirmation-dialog"><button class="dialog-close" type="button" aria-label="关闭" @click="confirmStatusChange = false"><X :size="18" /></button><span class="dialog-symbol danger"><Ban :size="21" /></span><h2 id="status-confirm-title">{{ selected.status === 'disabled' ? '启用这个用户？' : '禁用这个用户？' }}</h2><p>{{ selected.status === 'disabled' ? '启用后，用户可以重新登录和使用工作台。' : '禁用后，用户会失去访问权限，正在使用的身份也会失效。' }}</p><div class="dialog-actions"><button type="button" @click="confirmStatusChange = false">取消</button><button class="danger-button" type="button" :disabled="actionLoading" @click="toggleUser"><LoaderCircle v-if="actionLoading" :size="16" class="spin" />确认{{ selected.status === 'disabled' ? '启用' : '禁用' }}</button></div></div>
+    <AccessibleDialog v-if="confirmStatusChange && selected" title-id="status-confirm-title" :busy="actionLoading" @close="closeStatusChangeConfirmation">
+      <div class="confirmation-dialog"><button class="dialog-close" type="button" aria-label="关闭" :disabled="actionLoading" @click="closeStatusChangeConfirmation"><X :size="18" /></button><span class="dialog-symbol danger"><Ban :size="21" /></span><h2 id="status-confirm-title">{{ selected.status === 'disabled' ? '启用这个用户？' : '禁用这个用户？' }}</h2><p>{{ selected.status === 'disabled' ? '启用后，用户可以重新登录和使用工作台。' : '禁用后，用户会失去访问权限，正在使用的身份也会失效。' }}</p><p v-if="statusChangeError" class="form-feedback error" role="alert">{{ statusChangeError }}</p><div class="dialog-actions"><button type="button" :disabled="actionLoading" @click="closeStatusChangeConfirmation">取消</button><button class="danger-button" type="button" :disabled="actionLoading" @click="toggleUser"><LoaderCircle v-if="actionLoading" :size="16" class="spin" />确认{{ selected.status === 'disabled' ? '启用' : '禁用' }}</button></div></div>
     </AccessibleDialog>
 
-    <AccessibleDialog v-if="confirmRoleChange && selected" title-id="role-confirm-title" :busy="actionLoading" @close="confirmRoleChange = false">
-      <div class="confirmation-dialog"><button class="dialog-close" type="button" aria-label="关闭" @click="confirmRoleChange = false"><X :size="18" /></button><span class="dialog-symbol"><ShieldCheck :size="21" /></span><h2 id="role-confirm-title">{{ selected.role === 'admin' ? '降级这个管理员？' : '提升这个用户为管理员？' }}</h2><p>{{ selected.role === 'admin' ? '降级后将失去管理后台权限；系统禁止降级最后一个可用管理员。' : '管理员可以查看用户、会话审计和模型用量，并管理其他用户角色。' }}</p><div class="dialog-actions"><button type="button" @click="confirmRoleChange = false">取消</button><button type="button" :disabled="actionLoading" @click="changeRole"><LoaderCircle v-if="actionLoading" :size="16" class="spin" />确认修改角色</button></div></div>
+    <AccessibleDialog v-if="confirmRoleChange && selected" title-id="role-confirm-title" :busy="actionLoading" @close="closeRoleChangeConfirmation">
+      <div class="confirmation-dialog"><button class="dialog-close" type="button" aria-label="关闭" :disabled="actionLoading" @click="closeRoleChangeConfirmation"><X :size="18" /></button><span class="dialog-symbol"><ShieldCheck :size="21" /></span><h2 id="role-confirm-title">{{ selected.role === 'admin' ? '降级这个管理员？' : '提升这个用户为管理员？' }}</h2><p>{{ selected.role === 'admin' ? '降级后将失去管理后台权限；系统禁止降级最后一个可用管理员。' : '管理员可以查看用户、会话审计和模型用量，并管理其他用户角色。' }}</p><p v-if="roleChangeError" class="form-feedback error" role="alert">{{ roleChangeError }}</p><div class="dialog-actions"><button type="button" :disabled="actionLoading" @click="closeRoleChangeConfirmation">取消</button><button type="button" :disabled="actionLoading" @click="changeRole"><LoaderCircle v-if="actionLoading" :size="16" class="spin" />确认修改角色</button></div></div>
     </AccessibleDialog>
 
     <AccessibleDialog v-if="temporaryPassword" title-id="temporary-password-title" @close="closeTemporaryPassword">

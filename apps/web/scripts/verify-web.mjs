@@ -434,6 +434,16 @@ async function installApiMocks(page, state) {
     if (path === '/api/admin/usage' && method === 'GET') {
       return fulfillJson(route, { items: usageBuckets });
     }
+    const adminStatusChangeMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/(disable|enable)$/);
+    if (adminStatusChangeMatch && method === 'POST') {
+      const [, userId, action] = adminStatusChangeMatch;
+      const user = [targetUser, reviewerUser].find((item) => item.id === userId);
+      if (!user) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'user not found' } }, 404);
+      if (state.adminStatusFailureUserId === userId) {
+        return fulfillJson(route, { detail: { code: 'USER_STATUS_UNAVAILABLE', message: '用户状态服务暂不可用' } }, 503);
+      }
+      return fulfillJson(route, { ...user, status: action === 'disable' ? 'disabled' : 'active' });
+    }
     const temporaryPasswordMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/temporary-password$/);
     if (temporaryPasswordMatch && method === 'POST') {
       const userId = temporaryPasswordMatch[1];
@@ -451,6 +461,16 @@ async function installApiMocks(page, state) {
       });
     }
     const adminUserMatch = path.match(/^\/api\/admin\/users\/([^/]+)$/);
+    if (adminUserMatch && method === 'PATCH') {
+      const userId = adminUserMatch[1];
+      const user = [targetUser, reviewerUser].find((item) => item.id === userId);
+      if (!user) return fulfillJson(route, { detail: { code: 'NOT_FOUND', message: 'user not found' } }, 404);
+      if (state.adminRoleFailureUserId === userId) {
+        return fulfillJson(route, { detail: { code: 'USER_ROLE_UNAVAILABLE', message: '用户角色服务暂不可用' } }, 503);
+      }
+      const payload = request.postDataJSON();
+      return fulfillJson(route, { ...user, role: payload.role });
+    }
     if (adminUserMatch && method === 'GET') {
       const userId = adminUserMatch[1];
       const user = [targetUser, reviewerUser].find((item) => item.id === userId);
@@ -1175,6 +1195,8 @@ async function runResponsiveAdminAcceptance(browser) {
     temporaryPasswordFailureUserId: null,
     adminUserDetailDelays: {},
     adminUserDetailFailureUserId: null,
+    adminStatusFailureUserId: null,
+    adminRoleFailureUserId: null,
     adminSessionDelays: {},
     adminSessionFailureId: null
   };
@@ -1440,6 +1462,32 @@ async function runResponsiveAdminAcceptance(browser) {
     assert.equal((await page.locator('body').innerText()).includes('stale-secret-for-creator'), false, '用户 A 的过期密码响应不得显示或保留');
     await expectVisible(page.getByText('上一位用户的临时密码请求已取消，未显示任何密码。', { exact: true }), '过期密码响应的非敏感提示');
     await capture(page, '04h-admin-users-1280x800-stale-password.png', screenshots);
+
+    state.adminStatusFailureUserId = reviewerUser.id;
+    state.expectedConsoleResourceErrors += 1;
+    state.expectedFailedResponses.push(`503 POST /api/admin/users/${reviewerUser.id}/disable`);
+    await page.getByRole('button', { name: '禁用用户', exact: true }).click();
+    const statusDialog = page.locator('.accessible-dialog-default').filter({ hasText: '禁用这个用户？' });
+    await statusDialog.getByRole('button', { name: '确认禁用', exact: true }).click();
+    const statusFailureAlert = statusDialog.getByRole('alert');
+    await expectVisible(statusFailureAlert, '用户启停确认弹窗 5xx 错误');
+    assert.match(await statusFailureAlert.innerText(), /用户状态服务暂不可用/, '用户启停错误必须显示在当前确认弹窗');
+    state.adminStatusFailureUserId = null;
+    await statusDialog.getByRole('button', { name: '确认禁用', exact: true }).click();
+    await expectHidden(statusDialog, '用户启停重试成功后关闭确认弹窗');
+
+    state.adminRoleFailureUserId = reviewerUser.id;
+    state.expectedConsoleResourceErrors += 1;
+    state.expectedFailedResponses.push(`503 PATCH /api/admin/users/${reviewerUser.id}`);
+    await page.getByRole('button', { name: '降级为普通用户', exact: true }).click();
+    const roleDialog = page.locator('.accessible-dialog-default').filter({ hasText: '降级这个管理员？' });
+    await roleDialog.getByRole('button', { name: '确认修改角色', exact: true }).click();
+    const roleFailureAlert = roleDialog.getByRole('alert');
+    await expectVisible(roleFailureAlert, '用户角色确认弹窗 5xx 错误');
+    assert.match(await roleFailureAlert.innerText(), /用户角色服务暂不可用/, '用户角色错误必须显示在当前确认弹窗');
+    state.adminRoleFailureUserId = null;
+    await roleDialog.getByRole('button', { name: '确认修改角色', exact: true }).click();
+    await expectHidden(roleDialog, '用户角色重试成功后关闭确认弹窗');
 
     await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
     await expectResponsiveShell(1280, '1280px 模型页');
