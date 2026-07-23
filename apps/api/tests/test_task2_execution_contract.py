@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect as python_inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -1066,11 +1067,22 @@ def test_real_postgres_checkpoint_namespace_hides_old_interrupt_from_new_executi
         persistence.close()
 
 
-def test_final_assistant_materialization_insert_or_reads_one_execution_message() -> None:
-    class _Writer:
-        def emit(self, _event: str, _payload: dict[str, Any]) -> None:
-            raise AssertionError("message events must be emitted only after the terminal commit")
+def test_message_persister_has_no_precommit_event_arguments() -> None:
+    graph_parameters = python_inspect.signature(
+        MessagePersister.persist_graph_messages
+    ).parameters
+    text_parameters = python_inspect.signature(
+        MessagePersister.persist_assistant_text
+    ).parameters
 
+    assert "event_writer" not in graph_parameters
+    assert "streamed_assistant_text" not in graph_parameters
+    assert "event_writer" not in text_parameters
+    assert "emit_delta" not in text_parameters
+    assert "pending_events" not in text_parameters
+
+
+def test_final_assistant_materialization_insert_or_reads_one_execution_message() -> None:
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix="assistant-once")
         invocation = AgentInvocation(
@@ -1096,7 +1108,6 @@ def test_final_assistant_materialization_insert_or_reads_one_execution_message()
             invocation_id=invocation.id,
             execution_id=execution.id,
             content="checkpoint final",
-            event_writer=_Writer(),
         )
         second = persister.persist_assistant_text(
             session,
@@ -1104,7 +1115,6 @@ def test_final_assistant_materialization_insert_or_reads_one_execution_message()
             invocation_id=invocation.id,
             execution_id=execution.id,
             content="must not replace checkpoint final",
-            event_writer=_Writer(),
         )
         session.commit()
 

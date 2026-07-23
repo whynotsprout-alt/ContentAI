@@ -467,8 +467,6 @@ class AgentExecutionEngine:
             invocation_id=invocation.id,
             execution_id=execution.id,
             messages=new_messages,
-            event_writer=event_writer,
-            streamed_assistant_text=streamed_assistant_text,
         )
         event_service.emit_marker(
             event_writer=event_writer,
@@ -496,8 +494,6 @@ class AgentExecutionEngine:
                 invocation_id=invocation.id,
                 execution_id=execution.id,
                 content=assistant_text,
-                event_writer=event_writer,
-                emit_delta=not streamed_assistant_text,
             )
             event_service.emit_marker(
                 event_writer=event_writer,

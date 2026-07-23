@@ -3480,7 +3480,6 @@ def test_generic_failure_after_assistant_flush_rolls_back_message(
                 invocation_id=kwargs["invocation"].id,
                 execution_id=kwargs["execution"].id,
                 content="must not survive generic failure",
-                event_writer=kwargs["event_writer"],
             )
             raise RuntimeError("generic failure after flush")
 
@@ -3545,7 +3544,6 @@ def test_postcommit_projection_failure_does_not_rewrite_completed_execution(
                 invocation_id=kwargs["invocation"].id,
                 execution_id=kwargs["execution"].id,
                 content="completed before projection",
-                event_writer=kwargs["event_writer"],
             )
             return SimpleNamespace(
                 interrupt_payload=None,
@@ -3824,7 +3822,6 @@ def test_cancel_after_assistant_flush_rolls_back_final_message(
                     invocation_id=kwargs["invocation"].id,
                     execution_id=kwargs["execution"].id,
                     content="must roll back",
-                    event_writer=kwargs["event_writer"],
                 )
                 with Session(get_engine()) as cancelling_session:
                     execution = cancelling_session.get(AgentExecution, execution_id)
@@ -3928,7 +3925,6 @@ def test_completed_execution_persists_postprocess_outbox_before_dispatch(
                     invocation_id=kwargs["invocation"].id,
                     execution_id=kwargs["execution"].id,
                     content="atomic final answer",
-                    event_writer=kwargs["event_writer"],
                 )
                 return SimpleNamespace(
                     interrupt_payload=None,
