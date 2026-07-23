@@ -60,7 +60,7 @@ const visible = computed(() => Boolean(label.value) && props.lifecycle !== 'comp
 <template>
   <div
     v-if="visible"
-    class="run-activity liquid-glass"
+    class="run-activity"
     :class="`state-${lifecycle}`"
     role="status"
     aria-live="polite"

@@ -19,11 +19,9 @@ async function changed() {
 </script>
 
 <template>
-  <main class="auth-shell">
-    <section class="auth-access">
-      <div class="auth-form-card liquid-glass-strong">
-        <ChangePasswordForm forced :on-changed="changed" />
-      </div>
+  <main class="product-shell password-page">
+    <section class="password-panel" aria-label="账号安全">
+      <ChangePasswordForm forced :on-changed="changed" />
     </section>
   </main>
 </template>

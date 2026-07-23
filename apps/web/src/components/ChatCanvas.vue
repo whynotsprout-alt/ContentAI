@@ -5,6 +5,7 @@ import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
 import type { PublicInterrupt, ResumeDecision } from '../services/api';
 import type { RunLifecycle, WorkbenchMessage } from '../stores/workbench';
+import InterruptApproval from './InterruptApproval.vue';
 
 const props = defineProps<{
   messages: WorkbenchMessage[];
@@ -22,6 +23,7 @@ const props = defineProps<{
 const emit = defineEmits<{ createAgent: [template: 'finance' | 'ai'] }>();
 const prompt = ref('');
 const promptError = ref('');
+const compositionActive = ref(false);
 const resumeSubmitting = ref(false);
 const copiedIndex = ref(-1);
 const expanded = ref(new Set<number>());
@@ -95,6 +97,14 @@ async function send() {
   promptInput.value?.focus();
 }
 
+function onPromptKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.shiftKey) return;
+  if (event.isComposing || compositionActive.value || event.keyCode === 229) return;
+  if (window.matchMedia('(max-width: 767px)').matches) return;
+  event.preventDefault();
+  void send();
+}
+
 async function resume(decision: ResumeDecision) {
   if (resumeSubmitting.value) return;
   resumeSubmitting.value = true;
@@ -124,7 +134,7 @@ watch(() => props.lifecycle, (next, previous) => {
 </script>
 
 <template>
-  <section id="main-content" class="chat-canvas liquid-glass-strong" aria-label="对话工作区">
+  <section id="main-content" class="chat-canvas" aria-label="对话工作区">
     <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
     <div ref="chatStream" class="chat-stream" role="log" aria-live="polite" aria-relevant="additions">
       <section v-if="!messages.length && !hasAgent" class="onboarding-empty">
@@ -155,7 +165,7 @@ watch(() => props.lifecycle, (next, previous) => {
 
       <article
         v-for="(message, index) in messages"
-        :key="index"
+        :key="message.id ?? index"
         class="message"
         :class="[message.role, { 'is-collapsed': isLong(message) && !expanded.has(index) }]"
       >
@@ -197,27 +207,18 @@ watch(() => props.lifecycle, (next, previous) => {
       </article>
     </div>
 
-    <div v-if="canResume && pendingInterrupt" class="resume-card liquid-glass" role="region" aria-label="等待确认">
-      <div>
-        <strong>需要你的确认</strong>
-        <ul>
-          <li v-for="action in pendingInterrupt.actions" :key="`${action.tool_name}-${action.purpose}`">
-            {{ action.purpose }}<span v-if="action.memory">：{{ action.memory.content }}</span>
-          </li>
-        </ul>
-      </div>
-      <div class="resume-controls">
-        <button type="button" :disabled="resumeSubmitting" @click="resume('reject')">拒绝</button>
-        <button type="button" :disabled="resumeSubmitting" @click="resume('approve')">
-          <LoaderCircle v-if="resumeSubmitting" :size="16" class="spin" /><Play v-else :size="16" />
-          {{ resumeSubmitting ? '提交中' : '批准并继续' }}
-        </button>
-      </div>
-    </div>
+    <InterruptApproval
+      v-if="canResume && pendingInterrupt"
+      :pending-interrupt="pendingInterrupt"
+      :busy="resumeSubmitting"
+      :cancelling="lifecycle === 'cancelling'"
+      @decide="resume"
+      @cancel="cancelRun"
+    />
 
     <footer class="composer-wrap">
       <p v-if="promptError" class="field-error" role="alert">{{ promptError }}</p>
-      <div class="composer liquid-glass">
+      <div class="composer">
         <textarea
           ref="promptInput"
           v-model="prompt"
@@ -226,9 +227,9 @@ watch(() => props.lifecycle, (next, previous) => {
           placeholder="描述你想讨论、研究或创作的内容"
           :disabled="switchingAgent"
           @input="promptError = ''"
-          @keydown.enter.prevent.exact="send"
-          @keydown.ctrl.enter.prevent="send"
-          @keydown.meta.enter.prevent="send"
+          @compositionstart="compositionActive = true"
+          @compositionend="compositionActive = false"
+          @keydown="onPromptKeydown"
         />
         <button v-if="isActive" class="send-button stop" type="button" :disabled="lifecycle === 'cancelling'" @click="cancelRun">
           <LoaderCircle v-if="lifecycle === 'cancelling'" :size="17" class="spin" />
@@ -240,7 +241,8 @@ watch(() => props.lifecycle, (next, previous) => {
           <span>发送</span>
         </button>
       </div>
-      <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+      <span class="composer-hint composer-hint-desktop">Enter 发送 · Shift + Enter 换行</span>
+      <span class="composer-hint composer-hint-mobile">Enter 换行 · 使用发送按钮提交</span>
     </footer>
   </section>
 </template>

@@ -342,7 +342,10 @@ async function installApiMocks(page, state) {
     if (path === '/api/agents' && method === 'GET') return fulfillJson(route, [agent]);
     if (path === `/api/agents/${agent.id}` && method === 'GET') return fulfillJson(route, agent);
     if (path === '/api/chat/sessions' && method === 'GET') {
-      return fulfillJson(route, [workbenchSessionSummary, secondSessionSummary]);
+      return fulfillJson(route, {
+        items: [workbenchSessionSummary, secondSessionSummary],
+        next_cursor: null
+      });
     }
     if (path === `/api/chat/sessions/${workbenchSessionSummary.session_id}` && method === 'GET') {
       return fulfillJson(route, workbenchSession);
@@ -354,7 +357,30 @@ async function installApiMocks(page, state) {
           { id: 'ai-1', role: 'user', message_type: 'text', content: 'AI 搜索最近有什么变化？', created_at: secondSessionSummary.created_at },
           { id: 'ai-2', role: 'assistant', message_type: 'text', content: '产品正在从答案生成转向可验证的任务完成。', created_at: secondSessionSummary.updated_at }
         ],
-        latest_execution: null
+        latest_execution: {
+          id: 'run-interrupt',
+          session_id: secondSessionSummary.session_id,
+          status: 'waiting_input',
+          error: null,
+          interrupt: {
+            interrupt_id: 'interrupt-verify-web',
+            actions: [
+              {
+                tool_name: 'prepare_topic_research',
+                purpose: '检索并整理 AI 搜索产品的近期变化',
+                memory: null
+              },
+              {
+                tool_name: 'remember',
+                purpose: '保存本账号对可验证来源的偏好',
+                memory: {
+                  type: 'preference',
+                  content: '优先呈现可追溯到原始链接的研究结论'
+                }
+              }
+            ]
+          }
+        }
       });
     }
     if (path === '/api/admin/users' && method === 'GET') {
@@ -419,6 +445,26 @@ async function expectHidden(locator, label) {
   assert.equal(await locator.isHidden(), true, `${label} 应隐藏`);
 }
 
+async function expectElementWidth(locator, expected, label) {
+  await locator.waitFor({ state: 'attached' });
+  await locator.evaluate((element, target) => new Promise((resolvePromise) => {
+    const deadline = performance.now() + 1200;
+    const check = () => {
+      if (Math.round(element.getBoundingClientRect().width) === target || performance.now() >= deadline) {
+        resolvePromise();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    check();
+  }), expected);
+  assert.equal(
+    Math.round(await locator.evaluate((element) => element.getBoundingClientRect().width)),
+    expected,
+    label
+  );
+}
+
 async function settleVisuals(page) {
   await page.evaluate(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
@@ -454,6 +500,7 @@ async function runDesktopAcceptance(browser) {
     consoleErrors: [],
     failedResponses: [],
     failedRequests: [],
+    mediaRequests: [],
     modelVersion: 7,
     modelLoadFailure: false,
     modelPutPayloads: []
@@ -474,6 +521,9 @@ async function runDesktopAcceptance(browser) {
   page.on('requestfailed', (request) => {
     state.failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'unknown'}`);
   });
+  page.on('request', (request) => {
+    if (/\.mp4(?:$|\?)/i.test(request.url())) state.mediaRequests.push(request.url());
+  });
   await installApiMocks(page, state);
 
   try {
@@ -486,6 +536,13 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-material'), 'web-background');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-video-state'), 'poster');
     await capture(page, '01-auth-login-1440x900.png', screenshots);
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await expectVisible(page.getByRole('heading', { name: '欢迎回到 ContentAI', exact: true }), '768px 登录标题');
+    await capture(page, '01b-auth-login-768x1024.png', screenshots);
+    await page.setViewportSize({ width: 360, height: 800 });
+    await expectVisible(page.getByRole('button', { name: '登录', exact: true }), '360px 登录按钮');
+    await capture(page, '01c-auth-login-360x800.png', screenshots);
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     await page.getByRole('textbox', { name: '邮箱', exact: true }).fill(authUser.email);
     await page.locator('input[type="password"]').first().fill('verify-web-password');
@@ -498,16 +555,75 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByText('你以为平台又在撒钱，其实它们真正争夺的，是你下一次消费时第一个打开谁。', { exact: true }), '对话消息');
     await capture(page, '02-workbench-1440x900.png', screenshots);
 
-    for (const viewport of [
-      { width: 1280, height: 720, file: '02b-workbench-1280x720.png' },
-      { width: 1920, height: 1080, file: '02c-workbench-1920x1080.png' },
-      { width: 2560, height: 1440, file: '02d-workbench-2560x1440.png' }
-    ]) {
-      await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      await expectHidden(page.locator('.desktop-gate'), `${viewport.width}px 桌面门槛`);
-      await capture(page, viewport.file, screenshots);
-    }
+    const sessionRail = page.locator('#session-navigation');
+    await expectElementWidth(sessionRail, 280, '1440px 侧栏应为 280px');
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expectElementWidth(sessionRail, 264, '1280px 侧栏应为 264px');
+    await capture(page, '02b-workbench-1280x800.png', screenshots);
+
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expectElementWidth(sessionRail, 248, '1024px 侧栏应为 248px');
+    await expectVisible(page.getByText('平台补贴与消费趋势', { exact: true }), '1024px 会话条目');
+    await capture(page, '02c-workbench-1024x768.png', screenshots);
+
+    await page.setViewportSize({ width: 768, height: 1024 });
+    const sessionToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
+    await expectVisible(sessionToggle, '平板会话导航开关');
+    await expectElementWidth(sessionRail, 72, '768px 默认侧栏应为 72px');
+    await capture(page, '02d-workbench-768x1024-collapsed.png', screenshots);
+    await sessionToggle.click();
+    await expectElementWidth(sessionRail, 280, '768px 展开侧栏应为 280px');
+    await capture(page, '02e-workbench-768x1024-expanded.png', screenshots);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.workbench-shell'), '平板刷新后的工作台');
+    await expectElementWidth(sessionRail, 280, '平板展开状态应跨刷新持久化');
+
+    await page.setViewportSize({ width: 360, height: 800 });
+    await expectHidden(sessionRail, '手机默认隐藏的会话抽屉');
+    const mobileToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
+    await mobileToggle.click();
+    await expectVisible(sessionRail, '手机会话抽屉');
+    await expectElementWidth(sessionRail, 360, '360px 手机抽屉应全屏');
+    assert.equal(await sessionRail.evaluate((element) => element.contains(document.activeElement)), true, '打开抽屉后焦点应进入抽屉');
+    await capture(page, '02f-workbench-360x800-drawer.png', screenshots);
+    await page.keyboard.press('Escape');
+    await expectHidden(sessionRail, 'Escape 关闭手机会话抽屉');
+    assert.equal(await mobileToggle.evaluate((element) => element === document.activeElement), true, '关闭抽屉后焦点应归还开关');
+    await mobileToggle.click();
+    await page.locator('.session-select').filter({ hasText: '平台补贴与消费趋势' }).click();
+    await expectHidden(sessionRail, '选择会话后关闭手机抽屉');
+    const mobilePrompt = page.getByRole('textbox', { name: '对话输入', exact: true });
+    await mobilePrompt.fill('移动端 Enter 应换行');
+    await mobilePrompt.press('Enter');
+    assert.equal((await mobilePrompt.inputValue()).endsWith('\n'), true, '手机 Enter 应插入换行');
+    await mobilePrompt.fill('');
+    await capture(page, '02g-workbench-360x800.png', screenshots);
+    await page.locator('.user-menu-button').click();
+    await expectVisible(page.getByRole('menuitem', { name: '内容账号', exact: true }), '手机内容账号入口');
+    await expectVisible(page.getByRole('menuitem', { name: '管理后台', exact: true }), '手机管理后台入口');
+    await expectVisible(page.getByRole('menuitem', { name: '修改密码', exact: true }), '手机改密入口');
+    await expectVisible(page.getByRole('menuitem', { name: '退出登录', exact: true }), '手机退出入口');
+    await page.keyboard.press('Escape');
+
+    await page.setViewportSize({ width: 600, height: 800 });
+    await page.getByRole('button', { name: '打开会话导航', exact: true }).click();
+    await page.locator('.session-rail-scrim').click({ position: { x: 540, y: 400 } });
+    await expectHidden(sessionRail, '遮罩关闭手机会话抽屉');
+
     await page.setViewportSize({ width: 1440, height: 900 });
+    assert.equal(state.mediaRequests.length, 0, 'reduced-motion 登录及工作台不应请求 MP4');
+
+    await page.locator('.session-select').filter({ hasText: 'AI 搜索产品观察' }).click();
+    await expectVisible(page.getByRole('heading', { name: '需要你的确认', exact: true }), '结构化确认标题');
+    await expectVisible(page.getByText('prepare_topic_research', { exact: true }), '确认操作工具名');
+    await expectVisible(page.getByText('保存本账号对可验证来源的偏好', { exact: true }), '确认操作目的');
+    await expectVisible(page.getByText('优先呈现可追溯到原始链接的研究结论', { exact: true }), '确认记忆内容');
+    await expectVisible(page.getByRole('button', { name: '拒绝全部', exact: true }), '批次拒绝按钮');
+    await expectVisible(page.getByRole('button', { name: '批准全部并继续', exact: true }), '批次批准按钮');
+    await expectVisible(page.getByRole('button', { name: '取消本次运行', exact: true }), '取消运行按钮');
+    await capture(page, '02h-workbench-interrupt-1440x900.png', screenshots);
+    await page.locator('.session-select').filter({ hasText: '平台补贴与消费趋势' }).click();
 
     await page.getByRole('button', { name: '内容账号', exact: true }).click();
     await expectVisible(page.getByRole('heading', { name: '配置你的 ContentAI', exact: true }), '内容账号配置');
@@ -586,12 +702,6 @@ async function runDesktopAcceptance(browser) {
     await page.getByRole('button', { name: '重新加载', exact: true }).click();
     await expectVisible(page.getByRole('button', { name: '保存并启用', exact: true }), '重新加载后的保存入口');
 
-    await page.setViewportSize({ width: 1024, height: 768 });
-    await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
-    await expectVisible(page.getByRole('heading', { name: '请在桌面浏览器中打开', exact: true }), '1024px 桌面门槛');
-    await expectHidden(page.locator('.desktop-application'), '1024px 应用界面');
-    await capture(page, '07-desktop-gate-1024x768.png', screenshots);
-
     assert.deepEqual(state.unexpectedApiCalls, [], `存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `页面脚本错误：${state.pageErrors.join(' | ')}`);
     assert.deepEqual(state.failedResponses, [], `存在失败响应：${state.failedResponses.join(' | ')}`);
@@ -641,10 +751,130 @@ async function runMotionBackdropAcceptance(browser) {
   ));
   try {
     await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' });
-    assert.equal(await page.locator('.ambient-backdrop__poster').isVisible(), true, '动态背景的静态后备应保持可见');
+    await expectVisible(page.locator('.ambient-backdrop__poster'), '动态背景的静态后备');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-material'), 'web-background');
+    await page.locator('.ambient-backdrop__video').waitFor({ state: 'attached' });
     assert.equal(await page.locator('.ambient-backdrop__video').count(), 1, '未减少动画模式应加载本地视频节点');
     return 'web-background-local';
+  } finally {
+    await context.close();
+  }
+}
+
+async function runConstrainedBackdropAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    colorScheme: 'light',
+    reducedMotion: 'no-preference',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  const mp4Requests = [];
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'connection', {
+      configurable: true,
+      value: {
+        saveData: true,
+        effectiveType: '4g',
+        addEventListener() {},
+        removeEventListener() {}
+      }
+    });
+  });
+  page.on('request', (request) => {
+    if (/\.mp4(?:$|\?)/i.test(request.url())) mp4Requests.push(request.url());
+  });
+  await page.route('**/api/auth/me', (route) => fulfillJson(
+    route,
+    { detail: { code: 'UNAUTHENTICATED', message: '请先登录', retryable: false } },
+    401
+  ));
+  try {
+    await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.ambient-backdrop__poster'), 'Save-Data 静态海报');
+    assert.equal(await page.locator('.ambient-backdrop__video').count(), 0, 'Save-Data 不应创建视频节点');
+    assert.deepEqual(mp4Requests, [], 'Save-Data 不应请求 MP4');
+    return 'poster-only-on-save-data';
+  } finally {
+    await context.close();
+  }
+}
+
+async function runDirectProductIsolationAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1024, height: 768 },
+    colorScheme: 'light',
+    reducedMotion: 'no-preference',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  const state = {
+    authenticated: true,
+    apiCalls: [],
+    unexpectedApiCalls: [],
+    pageErrors: [],
+    consoleErrors: [],
+    failedResponses: [],
+    failedRequests: [],
+    mediaRequests: [],
+    modelVersion: 7,
+    modelLoadFailure: false,
+    modelPutPayloads: []
+  };
+  page.on('request', (request) => {
+    if (/\.mp4(?:$|\?)/i.test(request.url())) state.mediaRequests.push(request.url());
+  });
+  page.on('pageerror', (error) => state.pageErrors.push(error.message));
+  await installApiMocks(page, state);
+  try {
+    await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.workbench-shell'), '直接进入工作台');
+    assert.equal(await page.locator('.ambient-backdrop').count(), 0, '工作台不应挂载认证背景');
+    assert.deepEqual(state.mediaRequests, [], '直接进入工作台不应请求 MP4');
+    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '直接进入管理后台');
+    assert.equal(await page.locator('.ambient-backdrop').count(), 0, '管理后台不应挂载认证背景');
+    assert.deepEqual(state.mediaRequests, [], '直接进入管理后台不应请求 MP4');
+    assert.deepEqual(state.pageErrors, [], `直接进入工作台脚本错误：${state.pageErrors.join(' | ')}`);
+    return 'product-and-admin-routes-no-backdrop';
+  } finally {
+    await context.close();
+  }
+}
+
+async function runChangePasswordSurfaceAcceptance(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1024, height: 768 },
+    colorScheme: 'light',
+    reducedMotion: 'no-preference',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  const mp4Requests = [];
+  page.on('request', (request) => {
+    if (/\.mp4(?:$|\?)/i.test(request.url())) mp4Requests.push(request.url());
+  });
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/auth/me' && request.method() === 'GET') {
+      return fulfillJson(route, { ...authUser, must_change_password: true });
+    }
+    return fulfillJson(route, {
+      detail: { code: 'VERIFY_WEB_UNMOCKED', message: `验收脚本未模拟 ${request.method()} ${path}`, retryable: false }
+    }, 501);
+  });
+  try {
+    await page.goto(`${baseUrl}/change-password`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '修改密码', exact: true }), '强制修改密码标题');
+    await expectVisible(page.locator('.password-page'), '中性修改密码页面');
+    assert.equal(await page.locator('.auth-shell').count(), 0, '修改密码不应复用认证 hero');
+    assert.equal(await page.locator('.ambient-backdrop').count(), 0, '修改密码不应挂载认证背景');
+    assert.deepEqual(mp4Requests, [], '直接进入修改密码不应请求 MP4');
+    const screenshot = resolve(outputDir, '07-change-password-1024x768.png');
+    await page.screenshot({ path: screenshot, animations: 'disabled' });
+    assert.ok(statSync(screenshot).size > 1000, `截图为空：${screenshot}`);
+    return { status: 'change-password-neutral-product-surface', screenshot };
   } finally {
     await context.close();
   }
@@ -680,10 +910,16 @@ try {
   });
   const result = await runDesktopAcceptance(browser);
   const backdropMaterial = await runMotionBackdropAcceptance(browser);
+  const constrainedBackdrop = await runConstrainedBackdropAcceptance(browser);
+  const productIsolation = await runDirectProductIsolationAcceptance(browser);
+  const changePasswordSurface = await runChangePasswordSurfaceAcceptance(browser);
   console.log(JSON.stringify({
     ok: true,
     baseUrl,
     backdropMaterial,
+    constrainedBackdrop,
+    productIsolation,
+    changePasswordSurface,
     screenshotCount: result.screenshots.length,
     screenshots: result.screenshots,
     apiCalls: result.apiCalls

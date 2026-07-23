@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, defineAsyncComponent, ref } from 'vue';
 import { ArrowRight, Eye, EyeOff, LoaderCircle } from '@lucide/vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { ApiError, authApi } from '../services/api';
@@ -8,6 +8,7 @@ import { useAuthStore } from '../stores/auth';
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+const AuthBackdrop = defineAsyncComponent(() => import('../components/AmbientBackdrop.vue'));
 
 const email = ref('');
 const password = ref('');
@@ -67,6 +68,7 @@ async function submit() {
 
 <template>
   <main class="auth-shell">
+    <AuthBackdrop mode="hero" />
     <section class="auth-hero" aria-labelledby="auth-hero-title">
       <div class="auth-hero__copy">
         <span class="section-kicker">CONTENT INTELLIGENCE</span>

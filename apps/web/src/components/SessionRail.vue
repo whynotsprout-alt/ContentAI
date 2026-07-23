@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { History, MessageCirclePlus, Search, Trash2 } from '@lucide/vue';
+import { History, MessageCircle, MessageCirclePlus, Search, Trash2, X } from '@lucide/vue';
 import type { ChatSessionSummary } from '../services/api';
 
 const props = withDefaults(defineProps<{
@@ -10,14 +10,19 @@ const props = withDefaults(defineProps<{
   canCreate?: boolean;
   hasMore?: boolean;
   loadingMore?: boolean;
+  compact?: boolean;
+  drawer?: boolean;
 }>(), {
   busy: false,
   canCreate: true,
   hasMore: false,
-  loadingMore: false
+  loadingMore: false,
+  compact: false,
+  drawer: false
 });
 
 const emit = defineEmits<{
+  close: [];
   create: [];
   loadMore: [];
   select: [sessionId: string];
@@ -50,11 +55,11 @@ function relativeDate(value: string) {
 </script>
 
 <template>
-  <aside class="session-rail liquid-glass" aria-label="会话记录">
+  <aside class="session-rail" aria-label="会话记录">
     <header class="session-rail-header">
-      <span class="section-kicker"><History :size="15" /> 会话</span>
+      <h2><History :size="18" /><span v-if="!compact">会话</span></h2>
       <div class="session-rail-actions">
-        <span class="session-count">{{ sessions.length }}</span>
+        <span v-if="!compact" class="session-count">{{ sessions.length }}</span>
         <button
           class="icon-action"
           type="button"
@@ -64,10 +69,20 @@ function relativeDate(value: string) {
         >
           <MessageCirclePlus :size="17" />
         </button>
+        <button
+          v-if="drawer"
+          class="icon-action"
+          data-session-drawer-close
+          type="button"
+          aria-label="关闭会话导航"
+          @click="emit('close')"
+        >
+          <X :size="18" />
+        </button>
       </div>
     </header>
 
-    <div class="session-tools">
+    <div v-if="!compact" class="session-tools">
       <label class="compact-search">
         <Search :size="15" aria-hidden="true" />
         <input v-model="search" type="search" autocomplete="off" placeholder="搜索会话" aria-label="搜索会话" />
@@ -81,13 +96,20 @@ function relativeDate(value: string) {
         class="session-card"
         :class="{ active: session.session_id === activeSessionId }"
       >
-        <button class="session-select" type="button" @click="emit('select', session.session_id)">
-          <span class="session-title">{{ displayTitle(session) }}</span>
-          <span class="session-meta">
+        <button
+          class="session-select"
+          type="button"
+          :aria-label="compact ? displayTitle(session) : undefined"
+          @click="emit('select', session.session_id)"
+        >
+          <MessageCircle v-if="compact" :size="18" aria-hidden="true" />
+          <span v-if="!compact" class="session-title">{{ displayTitle(session) }}</span>
+          <span v-if="!compact" class="session-meta">
             {{ session.message_count }} 条消息 · {{ relativeDate(session.updated_at) }}
           </span>
         </button>
         <button
+          v-if="!compact"
           class="session-delete"
           type="button"
           :aria-label="`删除会话：${displayTitle(session)}`"
@@ -97,7 +119,7 @@ function relativeDate(value: string) {
         </button>
       </article>
 
-      <div v-if="!visibleSessions.length" class="session-empty">
+      <div v-if="!visibleSessions.length && !compact" class="session-empty">
         <strong>{{ sessions.length ? '没有匹配的会话' : '还没有会话' }}</strong>
         <span>{{ sessions.length ? '尝试修改搜索词或筛选条件。' : '发送第一条消息后，会话会保存在这里。' }}</span>
       </div>

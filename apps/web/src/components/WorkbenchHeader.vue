@@ -6,6 +6,7 @@ import {
   ChevronDown,
   KeyRound,
   LogOut,
+  Menu,
   Settings,
   ShieldCheck,
   Sparkles
@@ -18,9 +19,12 @@ const props = defineProps<{
   userEmail: string;
   isAdmin: boolean;
   switching: boolean;
+  showSessionNavigationToggle: boolean;
+  sessionNavigationExpanded: boolean;
 }>();
 
 const emit = defineEmits<{
+  toggleSessionNavigation: [];
   chooseAgent: [agentId: string];
   openAgents: [];
   openAdmin: [];
@@ -67,7 +71,19 @@ function onAgentKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <header class="workbench-header liquid-glass">
+  <header class="workbench-header">
+    <button
+      v-if="showSessionNavigationToggle"
+      class="session-nav-toggle"
+      type="button"
+      aria-controls="session-navigation"
+      :aria-expanded="sessionNavigationExpanded"
+      :aria-label="sessionNavigationExpanded ? '收起会话导航' : '打开会话导航'"
+      @click="emit('toggleSessionNavigation')"
+    >
+      <Menu :size="20" />
+    </button>
+
     <a class="brand-lockup" href="#main-content" aria-label="ContentAI，跳到对话区">
       <span class="brand-symbol"><Sparkles :size="18" /></span>
       <span>ContentAI</span>
@@ -119,11 +135,21 @@ function onAgentKeydown(event: KeyboardEvent) {
       </div>
 
       <div class="header-popover" @keydown.esc="userMenuOpen = false">
-        <button class="user-menu-button" type="button" :aria-expanded="userMenuOpen" aria-haspopup="menu" @click="userMenuOpen = !userMenuOpen; agentMenuOpen = false">
+        <button
+          class="user-menu-button"
+          type="button"
+          :aria-label="`账号菜单：${userEmail}`"
+          :aria-expanded="userMenuOpen"
+          aria-controls="user-account-menu"
+          aria-haspopup="menu"
+          @click="userMenuOpen = !userMenuOpen; agentMenuOpen = false"
+        >
           {{ userEmail.slice(0, 1).toUpperCase() }}
         </button>
-        <div v-if="userMenuOpen" class="popover-menu user-menu" role="menu">
+        <div v-if="userMenuOpen" id="user-account-menu" class="popover-menu user-menu" role="menu">
           <span class="user-email">{{ userEmail }}</span>
+          <button class="user-menu-mobile-action" data-agent-manager-trigger type="button" role="menuitem" @click="userMenuOpen = false; emit('openAgents')"><Settings :size="15" /> 内容账号</button>
+          <button v-if="isAdmin" class="user-menu-mobile-action" type="button" role="menuitem" @click="userMenuOpen = false; emit('openAdmin')"><ShieldCheck :size="15" /> 管理后台</button>
           <button type="button" role="menuitem" @click="userMenuOpen = false; emit('changePassword')"><KeyRound :size="15" /> 修改密码</button>
           <button type="button" role="menuitem" @click="userMenuOpen = false; emit('logout')"><LogOut :size="15" /> 退出登录</button>
         </div>

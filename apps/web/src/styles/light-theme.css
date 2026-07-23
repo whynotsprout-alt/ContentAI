@@ -1,5 +1,5 @@
 /* Light, high-transparency finish shared by every desktop surface. */
-.workbench-shell {
+.legacy-workbench-shell {
   --wb-bg: var(--bg);
   --wb-text: var(--text);
   --wb-accent: var(--accent);
@@ -14,133 +14,133 @@
   --wb-danger-surface: var(--danger-soft);
 }
 
-.workbench-shell::before {
+.legacy-workbench-shell::before {
   background: transparent;
 }
 
-.workbench-header.liquid-glass,
+.legacy-workbench-header.liquid-glass,
 .admin-topbar {
   background: rgb(255 255 252 / 0.42);
   border-color: rgb(255 255 255 / 0.72);
   box-shadow: 0 12px 34px rgb(43 59 47 / 0.1), inset 0 1px rgb(255 255 255 / 0.82);
 }
 
-.workbench-header.liquid-glass::before {
+.legacy-workbench-header.liquid-glass::before {
   background: linear-gradient(100deg, rgb(255 255 255 / 0.72), transparent 30%, rgb(164 193 165 / 0.11));
 }
 
-.workbench-shell .brand-symbol,
-.workbench-shell .nav-button,
-.workbench-shell .agent-picker-button,
-.workbench-shell .user-menu-button,
-.workbench-shell .icon-action,
-.workbench-shell .compact-search,
-.workbench-shell .template-card,
-.workbench-shell .suggestion-row button,
-.workbench-shell .resume-controls input,
-.workbench-shell .composer,
-.workbench-shell .composer textarea {
+.legacy-workbench-shell .brand-symbol,
+.legacy-workbench-shell .nav-button,
+.legacy-workbench-shell .agent-picker-button,
+.legacy-workbench-shell .user-menu-button,
+.legacy-workbench-shell .icon-action,
+.legacy-workbench-shell .compact-search,
+.legacy-workbench-shell .template-card,
+.legacy-workbench-shell .suggestion-row button,
+.legacy-workbench-shell .resume-controls input,
+.legacy-workbench-shell .composer,
+.legacy-workbench-shell .composer textarea {
   color: var(--wb-text);
   background: rgb(255 255 252 / 0.32);
   border-color: var(--wb-line);
 }
 
-.workbench-shell .brand-symbol,
-.workbench-shell .agent-picker-icon {
+.legacy-workbench-shell .brand-symbol,
+.legacy-workbench-shell .agent-picker-icon {
   background: rgb(219 235 219 / 0.54);
   border-color: rgb(61 85 69 / 0.16);
 }
 
-.workbench-shell :is(.nav-button:hover, .agent-picker-button:hover:not(:disabled), .agent-picker-button[aria-expanded='true'], .user-menu-button:hover, .user-menu-button[aria-expanded='true'], .icon-action:hover:not(:disabled), .template-card:hover, .suggestion-row button:hover, .resume-controls input:focus, .composer:focus-within) {
+.legacy-workbench-shell :is(.nav-button:hover, .agent-picker-button:hover:not(:disabled), .agent-picker-button[aria-expanded='true'], .user-menu-button:hover, .user-menu-button[aria-expanded='true'], .icon-action:hover:not(:disabled), .template-card:hover, .suggestion-row button:hover, .resume-controls input:focus, .composer:focus-within) {
   background: rgb(255 255 252 / 0.58);
   border-color: rgb(38 53 43 / 0.26);
   box-shadow: 0 8px 20px rgb(43 59 47 / 0.1), inset 0 1px rgb(255 255 255 / 0.88);
 }
 
-.workbench-shell :is(.popover-menu, .run-activity, .workspace-alert, .session-rail, .chat-canvas, .resume-card, .composer) {
+.legacy-workbench-shell :is(.popover-menu, .run-activity, .workspace-alert, .session-rail, .chat-canvas, .resume-card, .composer) {
   background: rgb(255 255 252 / 0.4);
   border-color: var(--wb-line);
   box-shadow: 0 16px 38px rgb(43 59 47 / 0.1), inset 0 1px rgb(255 255 255 / 0.78);
 }
 
-.workbench-shell .chat-canvas {
+.legacy-workbench-shell .chat-canvas {
   background: transparent;
   border-color: rgb(255 255 255 / 0.48);
   box-shadow: none;
 }
 
-.workbench-shell .chat-canvas::before {
+.legacy-workbench-shell .chat-canvas::before {
   background: transparent;
 }
 
-.workbench-shell :is(.session-rail.liquid-glass::before, .chat-canvas.liquid-glass-strong::before, .resume-card.liquid-glass::before, .composer.liquid-glass::before, .run-activity.liquid-glass::before) {
+.legacy-workbench-shell :is(.session-rail.liquid-glass::before, .chat-canvas.liquid-glass-strong::before, .resume-card.liquid-glass::before, .composer.liquid-glass::before, .run-activity.liquid-glass::before) {
   background: linear-gradient(140deg, rgb(255 255 255 / 0.62), transparent 42%, rgb(198 220 197 / 0.1));
 }
 
-.workbench-shell .popover-menu,
-.workbench-shell .run-activity,
-.workbench-shell .workspace-alert {
+.legacy-workbench-shell .popover-menu,
+.legacy-workbench-shell .run-activity,
+.legacy-workbench-shell .workspace-alert {
   background: rgb(255 255 252 / 0.74);
 }
 
-.workbench-shell .session-card,
-.workbench-shell .message-bubble,
-.workbench-shell .message-renderer code,
-.workbench-shell .message-renderer pre,
-.workbench-shell .typing-placeholder,
-.workbench-shell .resume-controls button {
+.legacy-workbench-shell .session-card,
+.legacy-workbench-shell .message-bubble,
+.legacy-workbench-shell .message-renderer code,
+.legacy-workbench-shell .message-renderer pre,
+.legacy-workbench-shell .typing-placeholder,
+.legacy-workbench-shell .resume-controls button {
   color: var(--wb-text);
   background: rgb(255 255 252 / 0.3);
   border-color: var(--wb-line);
 }
 
-.workbench-shell .session-card:hover,
-.workbench-shell .session-card.active,
-.workbench-shell .message.user .message-bubble,
-.workbench-shell .message-copy:hover,
-.workbench-shell .typing-placeholder,
-.workbench-shell .resume-controls button:hover:not(:disabled) {
+.legacy-workbench-shell .session-card:hover,
+.legacy-workbench-shell .session-card.active,
+.legacy-workbench-shell .message.user .message-bubble,
+.legacy-workbench-shell .message-copy:hover,
+.legacy-workbench-shell .typing-placeholder,
+.legacy-workbench-shell .resume-controls button:hover:not(:disabled) {
   color: var(--wb-text);
   background: rgb(219 235 219 / 0.5);
   border-color: rgb(62 89 70 / 0.2);
   box-shadow: inset 2px 0 var(--wb-accent);
 }
 
-.workbench-shell .message-renderer pre,
-.workbench-shell .message-renderer table,
-.workbench-shell .message-renderer th,
-.workbench-shell .message-renderer td {
+.legacy-workbench-shell .message-renderer pre,
+.legacy-workbench-shell .message-renderer table,
+.legacy-workbench-shell .message-renderer th,
+.legacy-workbench-shell .message-renderer td {
   color: var(--wb-text);
   background: rgb(250 252 247 / 0.72);
   border-color: var(--wb-line);
 }
 
-.workbench-shell .message-renderer a,
-.workbench-shell .message-renderer a:hover {
+.legacy-workbench-shell .message-renderer a,
+.legacy-workbench-shell .message-renderer a:hover {
   color: #365c44;
   text-decoration-color: rgb(54 92 68 / 0.48);
 }
 
-.workbench-shell .empty-orbit {
+.legacy-workbench-shell .empty-orbit {
   color: var(--wb-text);
   background: radial-gradient(circle at 38% 28%, rgb(255 255 255 / 0.82), rgb(201 225 202 / 0.48) 62%);
   border-color: rgb(62 89 70 / 0.17);
   box-shadow: 0 20px 60px rgb(72 104 78 / 0.16), inset 0 1px rgb(255 255 255 / 0.88);
 }
 
-.workbench-shell :is(.send-button, .resume-controls button.primary, .composer .primary-action) {
+.legacy-workbench-shell :is(.send-button, .resume-controls button.primary, .composer .primary-action) {
   color: #fff;
   background: var(--wb-accent);
   border-color: rgb(255 255 255 / 0.26);
   box-shadow: 0 8px 20px rgb(38 53 43 / 0.16), inset 0 1px rgb(255 255 255 / 0.16);
 }
 
-.workbench-shell :is(.send-button:hover:not(:disabled), .resume-controls button.primary:hover:not(:disabled), .composer .primary-action:hover) {
+.legacy-workbench-shell :is(.send-button:hover:not(:disabled), .resume-controls button.primary:hover:not(:disabled), .composer .primary-action:hover) {
   color: #fff;
   background: var(--accent-strong);
 }
 
-.workbench-shell :is(.run-activity.state-failed, .run-activity.state-cancelled, .workspace-alert, .send-button.stop) {
+.legacy-workbench-shell :is(.run-activity.state-failed, .run-activity.state-cancelled, .workspace-alert, .send-button.stop) {
   color: var(--wb-danger);
   background: rgb(255 246 246 / 0.7);
   border-color: rgb(156 79 89 / 0.22);
@@ -148,31 +148,31 @@
 }
 
 /* The composer is one uninterrupted glass surface, never a glass frame around another input. */
-.workbench-shell .composer.liquid-glass {
+.legacy-workbench-shell .composer.liquid-glass {
   background: rgb(248 252 247 / 0.24);
   border-color: rgb(255 255 255 / 0.46);
   box-shadow: inset 0 1px rgb(255 255 255 / 0.62);
 }
 
-.workbench-shell .composer.liquid-glass::before,
-.workbench-shell .composer textarea {
+.legacy-workbench-shell .composer.liquid-glass::before,
+.legacy-workbench-shell .composer textarea {
   background: transparent;
 }
 
-.workbench-shell .composer textarea {
+.legacy-workbench-shell .composer textarea {
   border: 0;
   box-shadow: none;
 }
 
-.workbench-shell .composer textarea:focus,
-.workbench-shell .composer textarea:focus-visible {
+.legacy-workbench-shell .composer textarea:focus,
+.legacy-workbench-shell .composer textarea:focus-visible {
   outline: 0;
   border: 0;
   box-shadow: none;
   background: transparent;
 }
 
-.workbench-shell .composer:focus-within {
+.legacy-workbench-shell .composer:focus-within {
   background: rgb(248 252 247 / 0.32);
   border-color: rgb(61 85 69 / 0.34);
   box-shadow: inset 0 1px rgb(255 255 255 / 0.72), 0 0 0 3px rgb(61 85 69 / 0.08);

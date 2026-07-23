@@ -1,19 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue';
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue';
 import { RouterView, useRoute, useRouter } from 'vue-router';
-import AmbientBackdrop from './components/AmbientBackdrop.vue';
 import { useAuthStore } from './stores/auth';
-
-type AmbientBackdropMode = 'hero' | 'workspace' | 'admin';
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 
-const visualMode = computed<AmbientBackdropMode>(() => {
-  const mode = route.meta.visualMode;
-  return mode === 'hero' || mode === 'admin' ? mode : 'workspace';
-});
+const surface = computed(() => route.meta.visualMode === 'hero' ? 'auth' : 'product');
+
+watch(surface, (value) => {
+  document.body.dataset.surface = value;
+}, { immediate: true });
 
 function handleAuthExpired() {
   const redirect = route.fullPath.startsWith('/') && !route.fullPath.startsWith('//') ? route.fullPath : '/app';
@@ -22,22 +20,14 @@ function handleAuthExpired() {
 }
 
 onMounted(() => window.addEventListener('contentai:auth-expired', handleAuthExpired));
-onBeforeUnmount(() => window.removeEventListener('contentai:auth-expired', handleAuthExpired));
+onBeforeUnmount(() => {
+  window.removeEventListener('contentai:auth-expired', handleAuthExpired);
+  delete document.body.dataset.surface;
+});
 </script>
 
 <template>
-  <div class="root-shell" :data-visual-mode="visualMode">
-    <AmbientBackdrop :mode="visualMode" />
-
-    <section class="desktop-gate" aria-labelledby="desktop-gate-title">
-      <div class="desktop-gate__mark" aria-hidden="true">C</div>
-      <p class="desktop-gate__brand">ContentAI</p>
-      <h1 id="desktop-gate-title">请在桌面浏览器中打开</h1>
-      <p>当前工作台针对宽度 1280px 及以上的桌面屏幕设计。</p>
-    </section>
-
-    <div class="desktop-application">
-      <RouterView />
-    </div>
+  <div class="root-shell" :data-surface="surface">
+    <RouterView />
   </div>
 </template>

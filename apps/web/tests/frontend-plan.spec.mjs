@@ -2,6 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
+const readOptional = async (path) => {
+  try {
+    return await read(path);
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ENOENT') return '';
+    throw error;
+  }
+};
 
 describe('frontend plan contracts', () => {
   it('never submits a placeholder for empty chat input', async () => {
@@ -66,20 +74,20 @@ describe('frontend plan contracts', () => {
     expect(dialog).toContain('previousFocus?.focus()');
   });
 
-  it('makes the collapsed reply action prominent and removes session status badges', async () => {
-    const [chat, sessions, workbenchCss, lightTheme] = await Promise.all([
+  it('keeps the reply expansion action accessible and removes session status badges', async () => {
+    const [chat, sessions, productCss, lightTheme] = await Promise.all([
       read('../src/components/ChatCanvas.vue'),
       read('../src/components/SessionRail.vue'),
-      read('../src/styles/workbench.css'),
+      readOptional('../src/styles/product.css'),
       read('../src/styles/light-theme.css')
     ]);
 
     expect(chat).toContain('class="message-expand"');
     expect(chat).toContain(':aria-expanded="expanded.has(index)"');
-    expect(workbenchCss).toMatch(/\.message-expand\s*\{[\s\S]*min-height:\s*40px;[\s\S]*color:\s*#fff;[\s\S]*background:\s*var\(--wb-accent\);/);
-    expect(workbenchCss).toContain(".message-expand[aria-expanded='true']");
-    expect(workbenchCss).toContain('.message-expand:hover:not(:disabled)');
-    expect(workbenchCss).toContain('.message-expand:active:not(:disabled)');
+    expect(productCss).toMatch(/\.message-expand\s*\{[\s\S]*min-height:\s*44px;/);
+    expect(productCss).toContain(".message-expand[aria-expanded='true']");
+    expect(productCss).toContain('.message-expand:hover:not(:disabled)');
+    expect(productCss).toContain('.message-expand:active:not(:disabled)');
     expect(sessions).not.toContain('session-state');
     expect(sessions).not.toContain('function statusLabel');
     expect(lightTheme).not.toContain('.session-state');
