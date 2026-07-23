@@ -465,6 +465,68 @@ async function expectElementWidth(locator, expected, label) {
   );
 }
 
+async function expectInsideViewport(locator, page, label) {
+  await expectVisible(locator, label);
+  const [box, viewport] = await Promise.all([
+    locator.boundingBox(),
+    page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+  ]);
+  assert.ok(box, `${label} 应具有可测量边界`);
+  assert.ok(box.x >= 0, `${label} 左侧越出视口：${JSON.stringify(box)}`);
+  assert.ok(box.y >= 0, `${label} 顶部越出视口：${JSON.stringify(box)}`);
+  assert.ok(box.x + box.width <= viewport.width + 0.5, `${label} 右侧越出视口：${JSON.stringify({ box, viewport })}`);
+  assert.ok(box.y + box.height <= viewport.height + 0.5, `${label} 底部越出视口：${JSON.stringify({ box, viewport })}`);
+}
+
+async function expectNoHorizontalOverflow(locator, label) {
+  await locator.waitFor({ state: 'visible' });
+  const dimensions = await locator.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth
+  }));
+  assert.ok(
+    dimensions.scrollWidth <= dimensions.clientWidth + 1,
+    `${label} 不应水平溢出：${JSON.stringify(dimensions)}`
+  );
+}
+
+async function expectSolidProductDialog(locator, label) {
+  await locator.waitFor({ state: 'visible' });
+  const style = await locator.evaluate((element) => {
+    const computed = getComputedStyle(element);
+    return {
+      backdropFilter: computed.backdropFilter,
+      webkitBackdropFilter: computed.webkitBackdropFilter,
+      backgroundColor: computed.backgroundColor,
+      backgroundImage: computed.backgroundImage
+    };
+  });
+  assert.equal(style.backdropFilter, 'none', `${label} 不应使用 backdrop-filter`);
+  assert.ok(
+    !style.webkitBackdropFilter || style.webkitBackdropFilter === 'none',
+    `${label} 不应使用 -webkit-backdrop-filter`
+  );
+  assert.equal(style.backgroundImage, 'none', `${label} 不应使用渐变/背景图`);
+  assert.equal(style.backgroundColor, 'rgb(255, 255, 255)', `${label} 应使用实色产品 surface`);
+}
+
+async function expectNoHoverLift(locator, page, label) {
+  await locator.hover();
+  await page.waitForTimeout(240);
+  const transform = await locator.evaluate((element) => getComputedStyle(element).transform);
+  const matrix = transform === 'none'
+    ? { a: 1, d: 1, e: 0, f: 0 }
+    : await page.evaluate((value) => {
+        const parsed = new DOMMatrixReadOnly(value);
+        return { a: parsed.a, d: parsed.d, e: parsed.e, f: parsed.f };
+      }, transform);
+  assert.deepEqual(
+    matrix,
+    { a: 1, d: 1, e: 0, f: 0 },
+    `${label} hover 不应产生位移、缩放或抬升：${transform}`
+  );
+}
+
 async function settleVisuals(page) {
   await page.evaluate(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
@@ -571,9 +633,25 @@ async function runDesktopAcceptance(browser) {
     const sessionToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
     await expectVisible(sessionToggle, '平板会话导航开关');
     await expectElementWidth(sessionRail, 72, '768px 默认侧栏应为 72px');
+    assert.equal(await sessionRail.getAttribute('role'), 'navigation', '非 drawer 会话栏应使用 navigation 语义');
+    assert.equal(await sessionRail.getAttribute('aria-modal'), null, '非 drawer 会话栏不应声明 aria-modal');
     await capture(page, '02d-workbench-768x1024-collapsed.png', screenshots);
     await sessionToggle.click();
     await expectElementWidth(sessionRail, 280, '768px 展开侧栏应为 280px');
+    const expandedTabletElements = [
+      ['768px 品牌入口', page.getByRole('link', { name: 'ContentAI，跳到对话区', exact: true })],
+      ['768px 内容账号入口', page.getByRole('button', { name: '内容账号', exact: true })],
+      ['768px 管理后台入口', page.getByRole('button', { name: '管理后台', exact: true })],
+      ['768px 内容账号选择器', page.locator('.agent-picker-button')],
+      ['768px 账号菜单', page.locator('.user-menu-button')],
+      ['768px composer', page.locator('.composer')],
+      ['768px composer 提示', page.locator('.composer-hint-desktop')]
+    ];
+    for (const [label, locator] of expandedTabletElements) {
+      await expectInsideViewport(locator, page, label);
+    }
+    await expectNoHorizontalOverflow(page.locator('.conversation-column'), '768px 展开态对话列');
+    await expectNoHorizontalOverflow(page.locator('.composer-wrap'), '768px 展开态 composer 区');
     await capture(page, '02e-workbench-768x1024-expanded.png', screenshots);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expectVisible(page.locator('.workbench-shell'), '平板刷新后的工作台');
@@ -606,6 +684,17 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('menuitem', { name: '退出登录', exact: true }), '手机退出入口');
     await page.keyboard.press('Escape');
 
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mediumPhoneToggle = page.getByRole('button', { name: '打开会话导航', exact: true });
+    await mediumPhoneToggle.click();
+    await expectVisible(sessionRail, '390px 手机会话抽屉');
+    await expectElementWidth(sessionRail, 360, '390px 手机抽屉应严格限制为 360px');
+    assert.equal(await sessionRail.getAttribute('role'), 'dialog', '手机会话抽屉应使用 dialog 语义');
+    assert.equal(await sessionRail.getAttribute('aria-modal'), 'true', '手机会话抽屉应声明 aria-modal');
+    await expectInsideViewport(sessionRail, page, '390px 手机会话抽屉');
+    await capture(page, '02h-workbench-390x844-drawer.png', screenshots);
+    await page.keyboard.press('Escape');
+
     await page.setViewportSize({ width: 600, height: 800 });
     await page.getByRole('button', { name: '打开会话导航', exact: true }).click();
     await page.locator('.session-rail-scrim').click({ position: { x: 540, y: 400 } });
@@ -613,6 +702,22 @@ async function runDesktopAcceptance(browser) {
 
     await page.setViewportSize({ width: 1440, height: 900 });
     assert.equal(state.mediaRequests.length, 0, 'reduced-motion 登录及工作台不应请求 MP4');
+
+    await page.locator('.user-menu-button').click();
+    await page.getByRole('menuitem', { name: '修改密码', exact: true }).click();
+    await expectVisible(page.getByRole('heading', { name: '修改密码', exact: true }), '工作台改密弹层');
+    const passwordDialog = page.locator('.accessible-dialog-default');
+    await expectSolidProductDialog(passwordDialog, '工作台改密弹层');
+    await expectNoHoverLift(page.getByRole('button', { name: '保存新密码', exact: true }), page, '改密主按钮');
+    await capture(page, '02i-workbench-change-password-dialog-1440x900.png', screenshots);
+    await page.getByRole('button', { name: '关闭', exact: true }).click();
+
+    await page.getByRole('button', { name: '删除会话：平台补贴与消费趋势', exact: true }).click();
+    await expectVisible(page.getByRole('heading', { name: '删除这个会话？', exact: true }), '删除会话弹层');
+    const deleteDialog = page.locator('.accessible-dialog-default');
+    await expectSolidProductDialog(deleteDialog, '删除会话弹层');
+    await capture(page, '02j-workbench-delete-dialog-1440x900.png', screenshots);
+    await page.getByRole('button', { name: '取消', exact: true }).click();
 
     await page.locator('.session-select').filter({ hasText: 'AI 搜索产品观察' }).click();
     await expectVisible(page.getByRole('heading', { name: '需要你的确认', exact: true }), '结构化确认标题');
@@ -622,7 +727,7 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('button', { name: '拒绝全部', exact: true }), '批次拒绝按钮');
     await expectVisible(page.getByRole('button', { name: '批准全部并继续', exact: true }), '批次批准按钮');
     await expectVisible(page.getByRole('button', { name: '取消本次运行', exact: true }), '取消运行按钮');
-    await capture(page, '02h-workbench-interrupt-1440x900.png', screenshots);
+    await capture(page, '02k-workbench-interrupt-1440x900.png', screenshots);
     await page.locator('.session-select').filter({ hasText: '平台补贴与消费趋势' }).click();
 
     await page.getByRole('button', { name: '内容账号', exact: true }).click();
@@ -632,6 +737,9 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await page.getByRole('textbox', { name: '账号名称', exact: true }).inputValue(), agent.name);
     const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(managerColumns, /^280px 184px /, `账号配置列宽不正确：${managerColumns}`);
+    await expectSolidProductDialog(page.locator('.accessible-dialog-fullscreen'), '内容账号弹层');
+    await expectSolidProductDialog(page.locator('.agent-manager'), '内容账号弹层主体');
+    await expectNoHoverLift(page.getByRole('button', { name: '保存内容账号', exact: true }), page, '内容账号保存按钮');
     await capture(page, '03-agent-manager-1440x900.png', screenshots);
     const managerDialog = page.locator('.accessible-dialog-fullscreen');
     assert.equal(await managerDialog.evaluate((element) => element.contains(document.activeElement)), true, '打开弹窗后焦点应进入弹窗');

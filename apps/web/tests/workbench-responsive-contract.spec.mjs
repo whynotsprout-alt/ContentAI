@@ -49,7 +49,7 @@ describe('quiet product workbench contract', () => {
     expect(productCss).toContain('--product-radius-panel: 12px');
     expect(productCss).toContain('--product-radius-overlay: 16px');
     expect(productCss).toContain('--conversation-measure: 960px');
-    expect(productCss).not.toMatch(/backdrop-filter|linear-gradient|radial-gradient|repeating-linear-gradient/);
+    expect(productCss).not.toMatch(/linear-gradient|radial-gradient|repeating-linear-gradient/);
   });
 
   it('implements one A1 session rail across mobile, tablet, and desktop breakpoints', async () => {
@@ -85,6 +85,45 @@ describe('quiet product workbench contract', () => {
     expect(app).toContain('sessionNavigationReturnFocus');
     expect(app).toContain('target.focus()');
     expect(app).toMatch(/async function loadSession[\s\S]*closeSessionNavigation/);
+  });
+
+  it('caps the phone drawer at 360px above the narrow-phone breakpoint', async () => {
+    const productCss = await readOptional('../src/styles/product.css');
+    const narrowPhoneBlock = productCss.match(/@media \(max-width: 360px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    const legacy420Block = productCss.match(/@media \(max-width: 420px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+
+    expect(productCss).toContain('width: min(360px, 100vw)');
+    expect(productCss).toContain('max-width: 360px');
+    expect(narrowPhoneBlock).toContain('width: 100vw');
+    expect(legacy420Block).not.toMatch(/\.session-rail[\s\S]*max-width:\s*none/);
+  });
+
+  it('gives icon-only tablet header actions explicit accessible names', async () => {
+    const header = await read('../src/components/WorkbenchHeader.vue');
+
+    expect(header).toMatch(/class="nav-button"[^>]*aria-label="内容账号"/);
+    expect(header).toMatch(/class="nav-button"[^>]*aria-label="管理后台"/);
+  });
+
+  it('exposes the phone rail as a modal dialog and keeps non-drawer navigation semantics', async () => {
+    const rail = await read('../src/components/SessionRail.vue');
+
+    expect(rail).toContain(":role=\"drawer ? 'dialog' : 'navigation'\"");
+    expect(rail).toContain(":aria-modal=\"drawer ? 'true' : undefined\"");
+  });
+
+  it('seals authenticated dialogs to solid product surfaces without lift or glass', async () => {
+    const productCss = await readOptional('../src/styles/product.css');
+
+    expect(productCss).toMatch(
+      /body\[data-surface='product'\] \.accessible-dialog-default[\s\S]*backdrop-filter:\s*none/
+    );
+    expect(productCss).toMatch(
+      /body\[data-surface='product'\] \.agent-manager[\s\S]*background-image:\s*none/
+    );
+    expect(productCss).toMatch(
+      /body\[data-surface='product'\] \.accessible-dialog button:not\(:disabled\):(?:hover|active)[\s\S]*transform:\s*none/
+    );
   });
 
   it('uses responsive Enter behavior and suppresses sends during IME composition', async () => {

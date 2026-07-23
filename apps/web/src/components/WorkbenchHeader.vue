@@ -90,10 +90,10 @@ function onAgentKeydown(event: KeyboardEvent) {
     </a>
 
     <nav class="workbench-nav" aria-label="工作台导航">
-      <button class="nav-button" data-agent-manager-trigger type="button" @click="emit('openAgents')">
+      <button class="nav-button" data-agent-manager-trigger type="button" aria-label="内容账号" @click="emit('openAgents')">
         <Settings :size="16" /><span>内容账号</span>
       </button>
-      <button v-if="isAdmin" class="nav-button" type="button" @click="emit('openAdmin')">
+      <button v-if="isAdmin" class="nav-button" type="button" aria-label="管理后台" @click="emit('openAdmin')">
         <ShieldCheck :size="16" /><span>管理后台</span>
       </button>
     </nav>

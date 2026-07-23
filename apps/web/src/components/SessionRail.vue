@@ -55,7 +55,12 @@ function relativeDate(value: string) {
 </script>
 
 <template>
-  <aside class="session-rail" aria-label="会话记录">
+  <aside
+    class="session-rail"
+    aria-label="会话记录"
+    :role="drawer ? 'dialog' : 'navigation'"
+    :aria-modal="drawer ? 'true' : undefined"
+  >
     <header class="session-rail-header">
       <h2><History :size="18" /><span v-if="!compact">会话</span></h2>
       <div class="session-rail-actions">

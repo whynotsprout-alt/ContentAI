@@ -1316,8 +1316,55 @@ body[data-surface='product'] .accessible-dialog-fullscreen {
   box-shadow: 0 6px 8px var(--product-shadow-strong);
 }
 
+body[data-surface='product'] .accessible-dialog-default {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body[data-surface='product'] .agent-manager {
+  background: var(--product-surface);
+  background-image: none;
+}
+
+body[data-surface='product'] .agent-manager :is(
+  .manager-header,
+  .agent-editor,
+  .editor-footer
+) {
+  background: var(--product-surface);
+  background-image: none;
+}
+
+body[data-surface='product'] .agent-manager :is(
+  .agent-directory,
+  .manager-sections
+) {
+  background: var(--product-surface-subtle);
+  background-image: none;
+}
+
+body[data-surface='product'] .agent-manager :is(
+  .compact-search,
+  .agent-directory-row,
+  .new-agent-button,
+  .dirty-indicator,
+  .manager-sections button,
+  .source-grid button,
+  .form-badge
+),
+body[data-surface='product'] .accessible-dialog .field-block :is(input, textarea) {
+  background: var(--product-surface);
+  background-image: none;
+}
+
 body[data-surface='product'] .accessible-dialog :is(.confirmation-dialog, .password-dialog) {
   background: var(--product-surface);
+  background-image: none;
+}
+
+body[data-surface='product'] .accessible-dialog button:not(:disabled):hover,
+body[data-surface='product'] .accessible-dialog button:not(:disabled):active {
+  transform: none;
 }
 
 body[data-surface='product'] .accessible-dialog .dialog-close,
@@ -1349,14 +1396,16 @@ body[data-surface='product'] .accessible-dialog .danger-button {
   border-color: var(--product-danger);
 }
 
-@media (max-width: 420px) {
+@media (max-width: 360px) {
   .session-rail {
     width: 100vw;
     max-width: none;
     border-right: 0;
     border-radius: 0;
   }
+}
 
+@media (max-width: 420px) {
   .brand-lockup > span:last-child {
     display: none;
   }
