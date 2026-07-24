@@ -36,6 +36,8 @@ class ContextAssembler:
     def assemble(
         self,
         *,
+        context_window_tokens: int,
+        chat_max_tokens: int,
         agent_profile: AgentProfile,
         agent_version: AgentVersion,
         messages: list[BaseMessage],
@@ -72,7 +74,7 @@ class ContextAssembler:
         )
         context_message_budget = max(
             1,
-            settings.llm.context_window_tokens - settings.llm.chat_max_tokens,
+            context_window_tokens - chat_max_tokens,
         )
         window = trim_context_window(
             messages,

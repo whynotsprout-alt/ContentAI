@@ -495,6 +495,8 @@ def test_generation_context_exposes_only_supported_claims_and_sources():
         version = session.get(AgentVersion, "default-agent-v1")
         assert profile is not None and version is not None
         context = ContextAssembler().assemble(
+            context_window_tokens=32_000,
+            chat_max_tokens=8_000,
             agent_profile=profile,
             agent_version=version,
             messages=[HumanMessage(content="write from supported evidence")],
@@ -543,6 +545,8 @@ def test_generation_context_rejects_zero_supported_claims():
         assert profile is not None and version is not None
         with pytest.raises(ContentEvidenceInvalidError):
             ContextAssembler().assemble(
+                context_window_tokens=32_000,
+                chat_max_tokens=8_000,
                 agent_profile=profile,
                 agent_version=version,
                 messages=[HumanMessage(content="write")],

@@ -72,7 +72,10 @@ from services.execution_lineage import ExecutionLineage
 from services.execution_resume import interrupt_identity, public_interrupt
 from services.execution_scope import ExecutionScopeGuard
 from services.execution_settlement import settle_execution_cancellation
-from services.model_configuration_service import ModelConfigurationService
+from services.model_configuration_service import (
+    ModelConfigurationService,
+    RuntimeModelConfiguration,
+)
 from services.pagination import (
     MAX_RESPONSE_BYTES,
     CursorSigner,
@@ -341,7 +344,7 @@ class ConversationService:
             invocation_id=invocation_id,
             execution_id=execution_id,
             auth=auth,
-            model_config_id=model_configuration.id,
+            model_configuration=model_configuration,
         )
 
         message, invocation, execution = self._create_user_message_invocation_execution(
@@ -388,10 +391,9 @@ class ConversationService:
         invocation_id: str,
         execution_id: str,
         auth: AuthContext,
-        model_config_id: str,
+        model_configuration: RuntimeModelConfiguration,
     ) -> dict[str, Any]:
         settings = getattr(self.agent_service, "settings", None)
-        llm = getattr(settings, "llm", None)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         runtime = getattr(self.agent_service, "runtime", None)
@@ -402,7 +404,7 @@ class ConversationService:
             input_tokens = self._input_token_counter.count_messages([HumanMessage(content=content)])
         else:
             tools = runtime.get_tools(auth.tool_permissions)
-            model_gateway = runtime.gateway_for_model_config(model_config_id)
+            model_gateway = runtime.gateway_for_model_config(model_configuration.id)
             build_counter = getattr(model_gateway, "build_token_counter", None)
             token_counter = (
                 build_counter(tools=tools)
@@ -422,6 +424,8 @@ class ConversationService:
             tool_names = [str(getattr(tool, "name", "")) for tool in tools]
             context = assemble_turn_context(
                 context_assembler=ContextAssembler(settings=settings),
+                context_window_tokens=model_configuration.context_window_tokens,
+                chat_max_tokens=model_configuration.chat_max_tokens,
                 agent_profile=profile,
                 agent_version=version,
                 prompt_inputs=prompt_inputs,
@@ -437,9 +441,9 @@ class ConversationService:
                 [SystemMessage(content=context.system_prompt), *context.messages]
             )
         input_budget = (
-            int(llm.context_window_tokens) - int(llm.chat_max_tokens) if llm is not None else None
+            model_configuration.context_window_tokens - model_configuration.chat_max_tokens
         )
-        if input_budget is not None and (input_budget <= 0 or input_tokens > input_budget):
+        if input_budget <= 0 or input_tokens > input_budget:
             raise CurrentInputTooLargeError(
                 "Current input exceeds the model context budget."
             )

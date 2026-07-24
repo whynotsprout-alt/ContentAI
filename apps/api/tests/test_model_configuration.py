@@ -177,6 +177,20 @@ def test_only_declared_model_config_environment_key_controls_startup(
     assert settings.model_config_encryption_key.get_secret_value() == _fernet_key(6)
 
 
+def test_undeclared_llm_environment_keys_do_not_create_a_runtime_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTENTAI_LLM__TEMPERATURE", "1.9")
+    monkeypatch.setenv("CONTENTAI_LLM__CONTEXT_WINDOW_TOKENS", "999999")
+    monkeypatch.setenv("CONTENTAI_LLM__CHAT_MAX_TOKENS", "99999")
+    monkeypatch.setenv("CONTENTAI_LLM__STRUCTURED_MAX_TOKENS", "99998")
+
+    settings = _development_settings()
+
+    assert not hasattr(settings, "llm")
+    assert "llm" not in settings.model_dump()
+
+
 def test_default_active_model_configuration_fixture_uses_consistent_secret_material() -> None:
     crypto = _crypto_module()
     with Session(get_engine()) as session:

@@ -17,27 +17,21 @@ from agent.runtime.errors import (
     MODEL_STREAM_INTERRUPTED_MESSAGE,
     classify_runtime_error,
 )
-from core.config import Settings
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import SecretStr
 
 
-def _settings() -> Settings:
-    return Settings(
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        }
-    )
-
-
 def _gateway(*, client: Any | None = None) -> ModelGateway:
     return ModelGateway(
-        settings=_settings(),
         model_config_id="model-config-v7",
         base_url="https://models.example.test/custom-root",
         api_key=SecretStr("runtime-secret-key"),
         model_name="selected-model-v7",
+        temperature=0.7,
+        context_window_tokens=200_000,
+        chat_max_tokens=12_000,
+        structured_max_tokens=6_000,
         client=client,
     )
 
@@ -341,9 +335,12 @@ def test_every_gateway_scenario_uses_execution_selected_model_and_tuning():
 
     assert len(observed) == 5
     assert {call["model"] for call in observed} == {"selected-model-v7"}
-    assert observed[0]["temperature"] == _settings().llm.temperature
-    assert observed[0]["max_tokens"] == _settings().llm.chat_max_tokens
-    assert all(call["max_tokens"] > 0 for call in observed)
+    assert observed[0]["temperature"] == 0.7
+    assert observed[0]["max_tokens"] == 12_000
+    assert all(call["temperature"] == 0 for call in observed[1:4])
+    assert all(call["max_tokens"] == 6_000 for call in observed[1:4])
+    assert observed[4]["temperature"] == 0
+    assert observed[4]["max_tokens"] == 1
 
 
 def test_research_final_gateway_builds_selection_schema_with_streaming_disabled():
@@ -410,21 +407,6 @@ def test_gateway_fallback_token_counter_includes_bound_tool_schemas():
     with_tools = _gateway(client=Client()).build_token_counter(tools=[tool_schema])
 
     assert with_tools.count_messages(message) > without_tools.count_messages(message)
-
-
-def test_legacy_model_environment_names_are_not_runtime_configuration_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CONTENTAI_LLM__CHAT_MODEL", "legacy-chat")
-    monkeypatch.setenv("CONTENTAI_LLM__PLANNING_MODEL", "legacy-planning")
-    monkeypatch.setenv("CONTENTAI_LLM__SUMMARY_MODEL", "legacy-summary")
-
-    settings = _settings()
-
-    assert "chat_model" not in settings.llm.model_dump()
-    assert "planning_model" not in settings.llm.model_dump()
-    assert "summary_model" not in settings.llm.model_dump()
-    assert "embedding_model" not in settings.llm.model_dump()
 
 
 def test_remote_model_error_body_and_secrets_are_not_public() -> None:

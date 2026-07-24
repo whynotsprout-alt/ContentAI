@@ -1,7 +1,6 @@
 from core.config.agent import AgentSettings
 from core.config.auth import AuthSettings
 from core.config.database import DatabaseSettings
-from core.config.llm import LLMSettings
 from core.config.logging import LoggingSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
@@ -13,7 +12,6 @@ __all__ = [
     "AuthSettings",
     "DatabaseSettings",
     "Env",
-    "LLMSettings",
     "LoggingSettings",
     "SearchSettings",
     "ServerSettings",

@@ -237,11 +237,14 @@ class RuntimeContainer:
                     model_config_id,
                 )
             gateway = ModelGateway(
-                settings=self.settings,
                 model_config_id=configuration.id,
                 base_url=configuration.base_url,
                 api_key=configuration.api_key,
                 model_name=configuration.model_name,
+                temperature=configuration.temperature,
+                context_window_tokens=configuration.context_window_tokens,
+                chat_max_tokens=configuration.chat_max_tokens,
+                structured_max_tokens=configuration.structured_max_tokens,
             )
             close_when_retired = True
         owner = _GatewayOwner(gateway, close_when_retired=close_when_retired)

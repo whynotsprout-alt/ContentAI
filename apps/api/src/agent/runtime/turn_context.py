@@ -345,6 +345,8 @@ def load_turn_prompt_inputs(
 def assemble_turn_context(
     *,
     context_assembler: ContextAssembler,
+    context_window_tokens: int,
+    chat_max_tokens: int,
     agent_profile: Any,
     agent_version: Any,
     prompt_inputs: TurnPromptInputs,
@@ -358,6 +360,8 @@ def assemble_turn_context(
 ) -> AgentContext:
     """Use one assembly path for preflight and the worker's real model input."""
     return context_assembler.assemble(
+        context_window_tokens=context_window_tokens,
+        chat_max_tokens=chat_max_tokens,
         agent_profile=agent_profile,
         agent_version=agent_version,
         messages=prompt_inputs.messages,

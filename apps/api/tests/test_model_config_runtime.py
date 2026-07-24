@@ -155,7 +155,12 @@ def test_runtime_resolves_inactive_execution_snapshot_after_active_switch() -> N
                 api_key_hint=protector.hint("active-v2-key"),
                 is_active=True,
                 created_by_user_id="local-user",
-                **model_runtime_parameters(),
+                **model_runtime_parameters(
+                    temperature=0.7,
+                    context_window_tokens=200_000,
+                    chat_max_tokens=12_000,
+                    structured_max_tokens=6_000,
+                ),
             )
         )
         session.commit()
@@ -167,9 +172,17 @@ def test_runtime_resolves_inactive_execution_snapshot_after_active_switch() -> N
     assert old_gateway.model_config_id == DEFAULT_MODEL_CONFIG_ID
     assert old_gateway.model_name == "test-model"
     assert old_gateway.base_url == "https://models.test.invalid/v1"
+    assert old_gateway.temperature == 0.2
+    assert old_gateway.context_window_tokens == 32_000
+    assert old_gateway.chat_max_tokens == 8_000
+    assert old_gateway.structured_max_tokens == 8_000
     assert new_gateway.model_config_id == "model-config-active-v2"
     assert new_gateway.model_name == "active-v2-model"
     assert new_gateway.base_url == "https://active-v2.test.invalid/root"
+    assert new_gateway.temperature == 0.7
+    assert new_gateway.context_window_tokens == 200_000
+    assert new_gateway.chat_max_tokens == 12_000
+    assert new_gateway.structured_max_tokens == 6_000
     assert old_gateway is container.gateway_for_model_config(DEFAULT_MODEL_CONFIG_ID)
     assert old_gateway is not new_gateway
     assert "active-v2-key" not in repr(new_gateway)

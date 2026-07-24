@@ -50,6 +50,24 @@ class _UsageTrackingGateway(_ClosableGateway):
         return _UsageTrackingModel(self)
 
 
+def _runtime_configuration(
+    model_config_id: str,
+    **overrides: Any,
+) -> SimpleNamespace:
+    values = {
+        "id": model_config_id,
+        "base_url": "https://models.example.test/v1",
+        "api_key": SecretStr("test-secret"),
+        "model_name": "test-model",
+        "temperature": 0.2,
+        "context_window_tokens": 32_000,
+        "chat_max_tokens": 8_000,
+        "structured_max_tokens": 8_000,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
     gateway = _Gateway()
     compiled_graph = object()
@@ -213,12 +231,7 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
         time.sleep(0.03)
         with calls_lock:
             calls += 1
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     monkeypatch.setattr(
         "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
@@ -238,18 +251,46 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
     assert calls == 1
 
 
+def test_gateway_receives_the_complete_execution_configuration(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(
+            model_config_id,
+            temperature=0.7,
+            context_window_tokens=200_000,
+            chat_max_tokens=12_000,
+            structured_max_tokens=6_000,
+        ),
+    )
+
+    def build_gateway(**kwargs: Any) -> _ClosableGateway:
+        observed.update(kwargs)
+        return _ClosableGateway(**kwargs)
+
+    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+
+    RuntimeContainer(
+        settings=get_settings(),
+        checkpointer=object(),
+    ).gateway_for_model_config("model-config-v2")
+
+    assert observed["model_config_id"] == "model-config-v2"
+    assert observed["temperature"] == 0.7
+    assert observed["context_window_tokens"] == 200_000
+    assert observed["chat_max_tokens"] == 12_000
+    assert observed["structured_max_tokens"] == 6_000
+    assert "settings" not in observed
+
+
 def test_gateway_cache_closes_retired_gateways_after_last_handle_once(monkeypatch) -> None:
     settings = get_settings().model_copy(deep=True)
     settings.agent.runtime_cache_capacity = 1
     created: dict[str, _ClosableGateway] = {}
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> _ClosableGateway:
         gateway = _ClosableGateway(**kwargs)
@@ -292,12 +333,7 @@ def test_runtime_reference_keeps_gateway_alive_after_capacity_eviction(monkeypat
     created: dict[str, _UsageTrackingGateway] = {}
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> _UsageTrackingGateway:
         gateway = _UsageTrackingGateway(**kwargs)
@@ -355,12 +391,7 @@ def test_in_flight_graph_keeps_gateway_alive_during_capacity_eviction(monkeypatc
             return BlockingModel(self)
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> BlockingGateway:
         gateway = BlockingGateway(**kwargs)

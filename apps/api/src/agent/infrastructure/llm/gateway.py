@@ -5,7 +5,6 @@ from typing import Any
 
 from agent.context.window import TokenCounter
 from agent.infrastructure.llm.client import LangChainChatClient
-from core.config import Settings
 from pydantic import SecretStr
 
 
@@ -15,17 +14,23 @@ class ModelGateway:
     def __init__(
         self,
         *,
-        settings: Settings,
         model_config_id: str,
         base_url: str,
         api_key: SecretStr,
         model_name: str,
+        temperature: float,
+        context_window_tokens: int,
+        chat_max_tokens: int,
+        structured_max_tokens: int,
         client: LangChainChatClient | None = None,
     ) -> None:
-        self.settings = settings
         self.model_config_id = model_config_id
         self.base_url = base_url
         self.model_name = model_name
+        self.temperature = temperature
+        self.context_window_tokens = context_window_tokens
+        self.chat_max_tokens = chat_max_tokens
+        self.structured_max_tokens = structured_max_tokens
         self.client = client or LangChainChatClient(
             base_url=base_url,
             api_key=api_key,
@@ -58,8 +63,8 @@ class ModelGateway:
     def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
         return self.client.build_chat_model(
             model=self.model_name,
-            temperature=self.settings.llm.temperature,
-            max_tokens=self.settings.llm.chat_max_tokens,
+            temperature=self.temperature,
+            max_tokens=self.chat_max_tokens,
             tools=tools or [],
         )
 
@@ -69,7 +74,7 @@ class ModelGateway:
         return self.client.build_structured_output_model(
             model=self.model_name,
             temperature=0,
-            max_tokens=self.settings.llm.structured_max_tokens,
+            max_tokens=self.structured_max_tokens,
             schema=HotspotFilterResult,
         )
 
@@ -79,7 +84,7 @@ class ModelGateway:
         return self.client.build_structured_output_model(
             model=self.model_name,
             temperature=0,
-            max_tokens=self.settings.llm.structured_max_tokens,
+            max_tokens=self.structured_max_tokens,
             schema=ResearchFinalSelection,
             disable_streaming=True,
         )
@@ -111,7 +116,7 @@ class ModelGateway:
         return self.client.build_structured_output_model(
             model=self.model_name,
             temperature=0,
-            max_tokens=self.settings.llm.structured_max_tokens,
+            max_tokens=self.structured_max_tokens,
             schema=schema,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

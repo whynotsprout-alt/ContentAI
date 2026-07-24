@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 from core.config.agent import AgentSettings
 from core.config.auth import AuthSettings
 from core.config.database import DatabaseSettings, validate_connection_budget
-from core.config.llm import LLMSettings
 from core.config.logging import LoggingSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
@@ -43,7 +42,6 @@ class Settings(BaseSettings):
     env: Env = Env.development
     server: ServerSettings = Field(default_factory=ServerSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
-    llm: LLMSettings = Field(default_factory=LLMSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
@@ -95,7 +93,6 @@ class Settings(BaseSettings):
             raise ValueError("CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS must be at least 1.")
 
         self._validate_database_pool()
-        self._validate_llm()
         self._validate_logging()
         self._validate_agent()
         self._validate_redis()
@@ -154,14 +151,6 @@ class Settings(BaseSettings):
                 "CONTENTAI_AGENT__WORKER_CONCURRENCY."
             )
         validate_connection_budget(self.database)
-
-    def _validate_llm(self) -> None:
-        if self.llm.context_window_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__CONTEXT_WINDOW_TOKENS must be greater than 0.")
-        if self.llm.chat_max_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__CHAT_MAX_TOKENS must be greater than 0.")
-        if self.llm.structured_max_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__STRUCTURED_MAX_TOKENS must be greater than 0.")
 
     def _validate_logging(self) -> None:
         import logging
