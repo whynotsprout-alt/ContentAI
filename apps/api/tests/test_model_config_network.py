@@ -97,11 +97,14 @@ def test_invalid_idna_endpoint_error_has_no_exception_chain() -> None:
     "address",
     [
         "0.0.0.0",
+        "127.0.0.1",
         "169.254.169.254",
+        "192.0.2.1",
         "224.0.0.1",
         "240.0.0.1",
         "100.64.0.1",
         "::",
+        "::1",
         "fe80::1",
         "ff02::1",
         "fec0::1",
@@ -160,9 +163,9 @@ def test_rfc2544_fake_ip_http_remains_forbidden() -> None:
 
 @pytest.mark.parametrize(
     "address",
-    ["127.0.0.1", "::1", "::ffff:10.20.30.40"],
+    ["10.20.30.40", "::ffff:10.20.30.40"],
 )
-def test_loopback_and_mapped_rfc1918_http_endpoints_are_accepted(address: str) -> None:
+def test_rfc1918_http_endpoints_are_accepted(address: str) -> None:
     network = _network_module()
 
     assert network.normalize_model_base_url(

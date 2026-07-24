@@ -357,6 +357,7 @@ def _resolve_and_validate(
 def _is_allowed_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if (
         address in _METADATA_ADDRESSES
+        or address.is_loopback
         or address.is_multicast
         or address.is_unspecified
         or address.is_link_local
@@ -383,8 +384,6 @@ def _embedded_ipv4_addresses(address: ipaddress.IPv6Address) -> tuple[ipaddress.
 
 
 def _is_enterprise_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if address.is_loopback:
-        return True
     if isinstance(address, ipaddress.IPv4Address):
         return any(address in network for network in _IPV4_ENTERPRISE_NETWORKS)
     return address in _IPV6_ENTERPRISE_NETWORK
