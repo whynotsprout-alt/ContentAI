@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier, local
 from uuid import uuid4
 
 import pytest
@@ -15,18 +17,24 @@ from models.chat import ChatMessage, ChatSession
 from models.enums import MessageRole
 from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
 from pydantic import ValidationError
-from services.auth_service import AuthService
+from services.auth_service import AuthService, AuthServiceError
 from services.usage_service import ModelUsageCallback, UsageContext
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+
+DEV_DATABASE = {
+    "url": "postgresql+psycopg://postgres:postgres@db/contentai",
+}
+TEST_DATABASE = {
+    "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
+}
 
 
 def auth_app():
     return create_app(
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database=TEST_DATABASE,
             auth={
                 "bootstrap_admin_email": "admin@example.com",
                 "bootstrap_admin_password": "admin password 123",
@@ -120,9 +128,7 @@ def test_production_ignores_retired_email_settings():
 def test_startup_bootstraps_an_active_admin_once():
     settings = Settings(
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database=TEST_DATABASE,
         auth={
             "bootstrap_admin_email": "bootstrap-admin@example.com",
             "bootstrap_admin_password": "bootstrap password 123",
@@ -140,18 +146,32 @@ def test_startup_bootstraps_an_active_admin_once():
         ).all()
         assert len(users) == 1
         assert users[0].status == "active"
+        assert users[0].role == "admin"
         assert users[0].email_verified_at is not None
+        assert users[0].must_change_password is False
 
 
-def test_bootstrap_does_not_change_an_existing_user():
+@pytest.mark.parametrize(
+    ("role", "status", "is_verified"),
+    [
+        ("user", "active", True),
+        ("admin", "disabled", True),
+        ("admin", "active", False),
+    ],
+)
+def test_bootstrap_conflict_fails_without_changing_existing_account(
+    role: str,
+    status: str,
+    is_verified: bool,
+    caplog: pytest.LogCaptureFixture,
+):
+    bootstrap_password = "new bootstrap password"
     settings = Settings(
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database=TEST_DATABASE,
         auth={
             "bootstrap_admin_email": "existing@example.com",
-            "bootstrap_admin_password": "new bootstrap password",
+            "bootstrap_admin_password": bootstrap_password,
         },
     )
     auth_service = AuthService(settings)
@@ -162,22 +182,219 @@ def test_bootstrap_does_not_change_an_existing_user():
                 email="existing@example.com",
                 email_normalized="existing@example.com",
                 password_hash=password_hash,
-                role="user",
-                status="disabled",
+                role=role,
+                status=status,
+                email_verified_at=datetime.now(UTC) if is_verified else None,
+                must_change_password=True,
             )
         )
         session.commit()
 
-    with TestClient(create_app(settings)):
-        pass
+    with pytest.raises(
+        AuthServiceError,
+        match=r"^Bootstrap administrator conflicts with an existing account\.$",
+    ) as caught:
+        with TestClient(create_app(settings)):
+            pass
+
+    assert type(caught.value).__name__ == "BootstrapAdminConflictError"
+    assert bootstrap_password not in str(caught.value)
+    assert bootstrap_password not in caplog.text
 
     with Session(get_engine(settings)) as session:
         user = session.exec(
             select(AppUser).where(AppUser.email_normalized == "existing@example.com")
         ).one()
-        assert user.role == "user"
-        assert user.status == "disabled"
+        assert user.role == role
+        assert user.status == status
+        assert (user.email_verified_at is not None) is is_verified
+        assert user.must_change_password is True
         assert auth_service.password_hash.verify("existing password", user.password_hash)
+
+
+def test_bootstrap_keeps_an_existing_valid_administrator_unchanged():
+    settings = Settings(
+        env="test",
+        database=TEST_DATABASE,
+        auth={
+            "bootstrap_admin_email": "existing-admin@example.com",
+            "bootstrap_admin_password": "new bootstrap password",
+        },
+    )
+    auth_service = AuthService(settings)
+    password_hash = auth_service.password_hash.hash("existing password")
+    verified_at = datetime.now(UTC)
+    with Session(get_engine(settings)) as session:
+        session.add(
+            AppUser(
+                email="existing-admin@example.com",
+                email_normalized="existing-admin@example.com",
+                password_hash=password_hash,
+                role="admin",
+                status="active",
+                email_verified_at=verified_at,
+                must_change_password=True,
+            )
+        )
+        session.commit()
+
+        assert auth_service.bootstrap_default_admin(session) is None
+
+    with Session(get_engine(settings)) as session:
+        user = session.exec(
+            select(AppUser).where(AppUser.email_normalized == "existing-admin@example.com")
+        ).one()
+        assert user.role == "admin"
+        assert user.status == "active"
+        assert user.email_verified_at == verified_at
+        assert user.must_change_password is True
+        assert auth_service.password_hash.verify("existing password", user.password_hash)
+
+
+def test_concurrent_bootstrap_admin_calls_converge_without_secret_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    bootstrap_password = "concurrent bootstrap password"
+    settings = Settings(
+        env="test",
+        database=TEST_DATABASE,
+        auth={
+            "bootstrap_admin_email": "concurrent-admin@example.com",
+            "bootstrap_admin_password": bootstrap_password,
+        },
+    )
+    initial_read_barrier = Barrier(2)
+    lookup_state = local()
+    original_lookup = AuthService.get_user_by_email
+
+    def synchronized_lookup(
+        service: AuthService,
+        session: Session,
+        email: str,
+        *,
+        for_update: bool = False,
+    ) -> AppUser | None:
+        result = original_lookup(service, session, email, for_update=for_update)
+        lookup_count = getattr(lookup_state, "count", 0)
+        lookup_state.count = lookup_count + 1
+        if lookup_count == 0:
+            initial_read_barrier.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(AuthService, "get_user_by_email", synchronized_lookup)
+
+    def bootstrap() -> AppUser | None | BaseException:
+        try:
+            with Session(get_engine(settings)) as session:
+                return AuthService(settings).bootstrap_default_admin(session)
+        except BaseException as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(bootstrap) for _ in range(2)]
+        outcomes = [future.result(timeout=30) for future in futures]
+
+    assert not any(isinstance(outcome, IntegrityError) for outcome in outcomes)
+    assert not any(isinstance(outcome, BaseException) for outcome in outcomes)
+    assert all(bootstrap_password not in repr(outcome) for outcome in outcomes)
+    assert bootstrap_password not in caplog.text
+
+    with Session(get_engine(settings)) as session:
+        users = session.exec(
+            select(AppUser).where(
+                AppUser.email_normalized == "concurrent-admin@example.com"
+            )
+        ).all()
+        assert len(users) == 1
+        user = users[0]
+        assert user.role == "admin"
+        assert user.status == "active"
+        assert user.email_verified_at is not None
+        assert user.must_change_password is False
+
+
+@pytest.mark.parametrize("env", ["development", "production"])
+def test_runtime_requires_bootstrap_admin_credentials(env: str):
+    settings_kwargs: dict[str, object] = {
+        "_env_file": None,
+        "env": env,
+        "database": DEV_DATABASE,
+        "auth": {},
+    }
+    if env == "production":
+        settings_kwargs["server"] = {"frontend_origins": "https://content.example.com"}
+        settings_kwargs["search"] = {"traffic_relay_api_key": "test-relay-key"}
+
+    with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN"):
+        Settings(**settings_kwargs)
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {
+            "bootstrap_admin_email": "not-an-email",
+            "bootstrap_admin_password": "valid password 123",
+        },
+        {
+            "bootstrap_admin_email": "admin@example.com",
+            "bootstrap_admin_password": "short",
+        },
+        {
+            "bootstrap_admin_email": "admin@example.com",
+            "bootstrap_admin_password": "x" * 129,
+        },
+        {
+            "bootstrap_admin_email": "admin@example.com",
+            "bootstrap_admin_password": " " * 10,
+        },
+    ],
+)
+def test_runtime_rejects_invalid_bootstrap_admin_credentials(auth: dict[str, object]):
+    bootstrap_password = str(auth["bootstrap_admin_password"])
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            _env_file=None,
+            env="development",
+            database=DEV_DATABASE,
+            auth=auth,
+        )
+
+    assert bootstrap_password not in str(caught.value)
+
+
+def test_runtime_normalizes_bootstrap_email_without_trimming_password():
+    bootstrap_password = "  valid password 123  "
+
+    settings = Settings(
+        _env_file=None,
+        env="development",
+        database=DEV_DATABASE,
+        auth={
+            "bootstrap_admin_email": "  Bootstrap.Admin@EXAMPLE.COM  ",
+            "bootstrap_admin_password": bootstrap_password,
+        },
+    )
+
+    assert settings.auth.bootstrap_admin_email == "bootstrap.admin@example.com"
+    assert (
+        settings.auth.bootstrap_admin_password.get_secret_value()
+        == bootstrap_password
+    )
+
+
+def test_test_environment_allows_omitting_bootstrap_admin_credentials():
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        database=TEST_DATABASE,
+        auth={},
+    )
+
+    assert settings.auth.bootstrap_admin_email == ""
+    assert settings.auth.bootstrap_admin_password.get_secret_value() == ""
 
 
 def test_bootstrap_admin_requires_email_and_password_together():
@@ -185,9 +402,7 @@ def test_bootstrap_admin_requires_email_and_password_together():
         Settings(
             _env_file=None,
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database=TEST_DATABASE,
             auth={"bootstrap_admin_email": "bootstrap-admin@example.com"},
         )
 

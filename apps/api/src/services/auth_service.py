@@ -10,13 +10,23 @@ from models.base import utcnow
 from models.schemas.auth import CurrentUserResponse
 from models.user import AppUser, AuthSession
 from pwdlib import PasswordHash
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+
+BOOTSTRAP_ADMIN_CONFLICT_MESSAGE = (
+    "Bootstrap administrator conflicts with an existing account."
+)
 
 
 class AuthServiceError(RuntimeError):
     def __init__(self, message: str, *, status_code: int = 400) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class BootstrapAdminConflictError(AuthServiceError):
+    def __init__(self) -> None:
+        super().__init__(BOOTSTRAP_ADMIN_CONFLICT_MESSAGE, status_code=409)
 
 
 @dataclass(frozen=True)
@@ -63,7 +73,11 @@ class AuthService:
 
     def bootstrap_default_admin(self, session: Session) -> AppUser | None:
         email = self.normalize_email(self.settings.auth.bootstrap_admin_email)
-        if not email or self.get_user_by_email(session, email) is not None:
+        if not email:
+            return None
+        existing = self.get_user_by_email(session, email)
+        if existing is not None:
+            self._ensure_valid_bootstrap_admin(existing)
             return None
 
         now = utcnow()
@@ -76,11 +90,29 @@ class AuthService:
             role="admin",
             status="active",
             email_verified_at=now,
+            must_change_password=False,
         )
         session.add(user)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            existing = self.get_user_by_email(session, email)
+            if existing is None:
+                raise BootstrapAdminConflictError() from None
+            self._ensure_valid_bootstrap_admin(existing)
+            return None
         session.refresh(user)
         return user
+
+    @staticmethod
+    def _ensure_valid_bootstrap_admin(user: AppUser) -> None:
+        if (
+            user.role != "admin"
+            or user.status != "active"
+            or user.email_verified_at is None
+        ):
+            raise BootstrapAdminConflictError()
 
     def login(
         self,

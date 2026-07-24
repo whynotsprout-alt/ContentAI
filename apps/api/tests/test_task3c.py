@@ -33,11 +33,20 @@ class FakeRedis:
 def _settings(**kwargs) -> Settings:
     env = kwargs.pop("env", "development")
     database = "contentai_test" if env == "test" else "contentai"
+    auth = kwargs.pop("auth", {})
+    if env != "test":
+        auth = {
+            "bootstrap_admin_email": "rate-limit-admin@example.com",
+            "bootstrap_admin_password": "rate limit settings password",
+            **auth,
+        }
     return Settings(
+        _env_file=None,
         env=env,
         database={
             "url": f"postgresql+psycopg://postgres:postgres@127.0.0.1:5432/{database}"
         },
+        auth=auth,
         **kwargs,
     )
 

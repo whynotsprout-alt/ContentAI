@@ -14,11 +14,12 @@ from core.config.logging import LoggingSettings
 from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
 from core.config.server import ServerSettings
-from pydantic import Field, SecretStr, model_validator
+from pydantic import EmailStr, Field, SecretStr, TypeAdapter, ValidationError, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 LOCAL_FRONTEND_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 POSTGRES_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+psycopg2"}
+BOOTSTRAP_ADMIN_EMAIL_ADAPTER = TypeAdapter(EmailStr)
 _settings_env_file = Path(".env")
 
 
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
         env_prefix="CONTENTAI_",
         env_nested_delimiter="__",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     def __init__(self, **values) -> None:
@@ -245,20 +247,39 @@ class Settings(BaseSettings):
             raise ValueError("CONTENTAI_AUTH__SESSION_DAYS must be at least 1.")
         if self.auth.login_max_failures < 1 or self.auth.login_lock_minutes < 1:
             raise ValueError("Auth login lock settings must be positive.")
-        self.auth.bootstrap_admin_email = self.auth.bootstrap_admin_email.strip().lower()
-        bootstrap_password = self.auth.bootstrap_admin_password.get_secret_value().strip()
-        if bool(self.auth.bootstrap_admin_email) != bool(bootstrap_password):
+        bootstrap_email = self.auth.bootstrap_admin_email.strip()
+        bootstrap_password = self.auth.bootstrap_admin_password.get_secret_value()
+        if bool(bootstrap_email) != bool(bootstrap_password):
             missing = (
                 "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD"
-                if self.auth.bootstrap_admin_email
+                if bootstrap_email
                 else "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL"
             )
             raise ValueError(f"{missing} is required when configuring a bootstrap administrator.")
-        if self.env == Env.production:
-            if not self.auth.bootstrap_admin_email:
+        if not bootstrap_email:
+            if self.env in {Env.development, Env.production}:
                 raise ValueError(
-                    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL is required in production."
+                    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL and "
+                    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD are required in "
+                    "development and production."
                 )
+            return
+        try:
+            normalized_email = BOOTSTRAP_ADMIN_EMAIL_ADAPTER.validate_python(bootstrap_email)
+        except ValidationError as exc:
+            raise ValueError(
+                "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL must be a valid email address."
+            ) from exc
+        if (
+            len(bootstrap_password) < 10
+            or len(bootstrap_password) > 128
+            or not bootstrap_password.strip()
+        ):
+            raise ValueError(
+                "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD must contain 10 to 128 "
+                "characters and cannot be blank."
+            )
+        self.auth.bootstrap_admin_email = str(normalized_email).lower()
 
     def _validate_model_configuration(self) -> None:
         from core.model_config_crypto import (

@@ -153,6 +153,7 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
 def test_settings_reject_sqlite_database_url():
     with pytest.raises(ValidationError):
         Settings(
+            _env_file=None,
             env="development",
             database={"url": "sqlite:///./data/test.db"},
         )
@@ -164,6 +165,8 @@ def test_settings_reads_dotenv_file(tmp_path, monkeypatch):
         "CONTENTAI_DATABASE__URL",
         "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL",
         "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY",
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -174,6 +177,8 @@ def test_settings_reads_dotenv_file(tmp_path, monkeypatch):
                 "CONTENTAI_DATABASE__URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai",
                 "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL=https://dotenv.example/v1",
                 "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=dotenv-key",
+                "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL=dotenv-admin@example.com",
+                "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD=dotenv bootstrap password",
             ]
         ),
         encoding="utf-8",
@@ -192,6 +197,14 @@ def test_settings_reads_process_environment(monkeypatch):
     )
     monkeypatch.setenv("CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL", "https://env.example/v1")
     monkeypatch.setenv("CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY", "env-key")
+    monkeypatch.setenv(
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
+        "environment-admin@example.com",
+    )
+    monkeypatch.setenv(
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",
+        "environment bootstrap password",
+    )
 
     settings = Settings(_env_file=None)
 
@@ -209,6 +222,7 @@ def test_settings_requires_database_url(monkeypatch):
 def test_non_test_env_rejects_test_database():
     with pytest.raises(ValidationError):
         Settings(
+            _env_file=None,
             env="development",
             database={
                 "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
@@ -239,8 +253,13 @@ def test_production_requires_auth_frontend_origins_and_traffic_relay_key():
 
 def test_development_frontend_origins_validate_final_list():
     settings = Settings(
+        _env_file=None,
         env="development",
         database={"url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai"},
+        auth={
+            "bootstrap_admin_email": "frontend-settings-admin@example.com",
+            "bootstrap_admin_password": "frontend settings password",
+        },
     )
 
     assert "http://localhost:5173" in settings.server.frontend_origins

@@ -51,12 +51,18 @@ def test_model_configuration_contains_required_runtime_snapshot() -> None:
 
 
 def _development_settings(**values: object) -> Settings:
+    auth = {
+        "bootstrap_admin_email": "settings-admin@example.com",
+        "bootstrap_admin_password": "settings bootstrap password",
+        **dict(values.pop("auth", {})),
+    }
     return Settings(
         _env_file=None,
         env="development",
         database={
             "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai"
         },
+        auth=auth,
         **values,
     )
 
