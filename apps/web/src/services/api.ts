@@ -443,12 +443,7 @@ export interface AdminUsageBucket {
   average_latency_ms: number | null;
 }
 
-export interface AdminModelConfiguration {
-  configured: boolean;
-  temperature: number;
-  context_window_tokens: number;
-  chat_max_tokens: number;
-  structured_max_tokens: number;
+interface AdminModelConfigurationMetadata {
   id?: string | null;
   version?: number | null;
   provider?: string | null;
@@ -460,6 +455,23 @@ export interface AdminModelConfiguration {
   created_by_user_id?: string | null;
   created_by_email?: string | null;
 }
+
+export type AdminModelConfiguration = AdminModelConfigurationMetadata & (
+  | {
+    configured: true;
+    temperature: number;
+    context_window_tokens: number;
+    chat_max_tokens: number;
+    structured_max_tokens: number;
+  }
+  | {
+    configured: false;
+    temperature?: null;
+    context_window_tokens?: null;
+    chat_max_tokens?: null;
+    structured_max_tokens?: null;
+  }
+);
 
 export interface AdminModelProbeResult {
   base_url: string;

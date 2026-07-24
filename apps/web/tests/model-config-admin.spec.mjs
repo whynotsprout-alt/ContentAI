@@ -123,7 +123,7 @@ describe('admin model configuration', () => {
       read('../src/views/modelConfigRequestGuard.ts')
     ]);
     const configuration = api.slice(
-      api.indexOf('export interface AdminModelConfiguration'),
+      api.indexOf('export type AdminModelConfiguration'),
       api.indexOf('export interface AdminModelProbeResult')
     );
     const updatePayload = api.slice(
@@ -135,6 +135,9 @@ describe('admin model configuration', () => {
       api.indexOf('export interface AdminModelUpdatePayload')
     );
 
+    expect(configuration).toContain('configured: true;');
+    expect(configuration).toContain('configured: false;');
+
     for (const field of [
       'temperature',
       'context_window_tokens',
@@ -142,6 +145,7 @@ describe('admin model configuration', () => {
       'structured_max_tokens'
     ]) {
       expect(configuration).toMatch(new RegExp(`\\n\\s*${field}: number;`));
+      expect(configuration).toMatch(new RegExp(`\\n\\s*${field}\\?: null;`));
       expect(updatePayload).toMatch(new RegExp(`\\n\\s*${field}: number;`));
       expect(probePayload).not.toContain(field);
     }
