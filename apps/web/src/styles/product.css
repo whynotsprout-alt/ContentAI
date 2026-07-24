@@ -32,7 +32,8 @@ body[data-surface='product'],
   --product-radius-control: 8px;
   --product-radius-panel: 12px;
   --product-radius-overlay: 16px;
-  --conversation-measure: 960px;
+  --conversation-measure: 840px;
+  --conversation-inline-shift: 0px;
   --product-transition: 180ms cubic-bezier(0.22, 1, 0.36, 1);
   --bg: var(--product-bg);
   --text: var(--product-text);
@@ -680,6 +681,17 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   flex-direction: column;
   overflow: hidden;
   background: var(--product-bg);
+}
+
+.run-activity,
+.workspace-alert,
+.onboarding-empty,
+.message,
+.interrupt-approval,
+.composer-wrap > .field-error,
+.composer,
+.composer-hint {
+  translate: var(--conversation-inline-shift) 0;
 }
 
 .run-activity,
@@ -1732,6 +1744,7 @@ body[data-surface='product'] .accessible-dialog button:not(:disabled):hover,
 @media (min-width: 1440px) {
   .workbench-shell {
     --session-rail-width: 280px;
+    --conversation-inline-shift: calc(var(--session-rail-width) * -0.5);
   }
 
   .session-nav-toggle {
