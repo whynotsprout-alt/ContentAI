@@ -406,6 +406,7 @@ def test_runtime_validation_error_redacts_bootstrap_password_from_all_representa
     assert secret_marker not in str(caught.value)
     assert secret_marker not in repr(errors)
     assert secret_marker not in caught.value.json()
+    assert caught.value.__context__ is None
 
 
 def test_runtime_normalizes_bootstrap_email_without_trimming_password():

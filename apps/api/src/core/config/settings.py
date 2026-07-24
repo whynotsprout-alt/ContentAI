@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     )
 
     def __init__(self, **values) -> None:
+        sanitized_error: ValidationError | None = None
         try:
             super().__init__(**values)
         except ValidationError as exc:
@@ -58,11 +59,13 @@ class Settings(BaseSettings):
                     include_input=False,
                 )
             ]
-            raise ValidationError.from_exception_data(
+            sanitized_error = ValidationError.from_exception_data(
                 exc.title,
                 line_errors,
                 hide_input=True,
-            ) from None
+            )
+        if sanitized_error is not None:
+            raise sanitized_error
 
     env: Env = Env.development
     server: ServerSettings = Field(default_factory=ServerSettings)
