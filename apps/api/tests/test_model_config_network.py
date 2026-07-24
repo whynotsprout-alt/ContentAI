@@ -138,6 +138,26 @@ def test_public_http_is_rejected_but_private_http_is_accepted() -> None:
     )
 
 
+@pytest.mark.parametrize("address", ["198.18.0.0", "198.18.0.201", "198.19.255.255"])
+def test_https_accepts_rfc2544_fake_ip_range(address: str) -> None:
+    network = _network_module()
+
+    assert network.normalize_model_base_url(
+        f"https://{address}/v1",
+        resolver=lambda *_: [address],
+    ) == f"https://{address}/v1"
+
+
+def test_rfc2544_fake_ip_http_remains_forbidden() -> None:
+    network = _network_module()
+
+    with pytest.raises(network.ModelEndpointForbidden):
+        network.normalize_model_base_url(
+            "http://fake-ip.example/v1",
+            resolver=lambda *_: ["198.18.0.201"],
+        )
+
+
 @pytest.mark.parametrize(
     "address",
     ["127.0.0.1", "::1", "::ffff:10.20.30.40"],
@@ -258,7 +278,7 @@ def test_probe_rejects_redirects_and_never_follows_them() -> None:
 
 def test_runtime_sync_transport_revalidates_and_pins_every_outbound_request() -> None:
     network = _network_module()
-    resolver = Resolver(["93.184.216.34"], ["169.254.169.254"])
+    resolver = Resolver(["198.18.0.201"], ["169.254.169.254"])
     requests: list[httpx.Request] = []
 
     transport = network.PinnedModelTransport(
@@ -275,14 +295,14 @@ def test_runtime_sync_transport_revalidates_and_pins_every_outbound_request() ->
 
     assert response.status_code == 200
     assert len(requests) == 1
-    assert requests[0].url.host == "93.184.216.34"
+    assert requests[0].url.host == "198.18.0.201"
     assert requests[0].headers["Host"] == "api.example.test"
     assert requests[0].extensions["sni_hostname"] == "api.example.test"
 
 
 def test_runtime_async_transport_revalidates_and_pins_every_outbound_request() -> None:
     network = _network_module()
-    resolver = Resolver(["93.184.216.34"], ["169.254.169.254"])
+    resolver = Resolver(["198.18.0.201"], ["169.254.169.254"])
     requests: list[httpx.Request] = []
 
     async def exercise() -> None:
@@ -309,7 +329,7 @@ def test_runtime_async_transport_revalidates_and_pins_every_outbound_request() -
     asyncio.run(exercise())
 
     assert len(requests) == 1
-    assert requests[0].url.host == "93.184.216.34"
+    assert requests[0].url.host == "198.18.0.201"
     assert requests[0].headers["Host"] == "api.example.test"
     assert requests[0].extensions["sni_hostname"] == "api.example.test"
 

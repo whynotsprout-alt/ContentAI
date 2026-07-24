@@ -30,6 +30,7 @@ _Result = TypeVar("_Result")
 _IPV4_ENTERPRISE_NETWORKS = tuple(
     ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
+_IPV4_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _IPV6_ENTERPRISE_NETWORK = ipaddress.ip_network("fc00::/7")
 _NAT64_NETWORKS = (
     ipaddress.ip_network("64:ff9b::/96"),
@@ -362,6 +363,8 @@ def _is_allowed_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) 
         or (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
     ):
         return False
+    if isinstance(address, ipaddress.IPv4Address) and address in _IPV4_FAKE_IP_NETWORK:
+        return True
     if _is_enterprise_local(address):
         return True
     return address.is_global and not address.is_reserved
