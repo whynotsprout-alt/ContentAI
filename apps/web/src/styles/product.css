@@ -20,6 +20,7 @@ body[data-surface='product'],
   --product-danger-border: #F2C9C5;
   --product-overlay: rgb(23 26 24 / 0.42);
   --product-focus-ring: rgb(46 125 96 / 0.16);
+  --product-user-message: rgb(31 91 69 / 0.08);
   --product-shadow: rgb(23 26 24 / 0.1);
   --product-shadow-strong: rgb(23 26 24 / 0.12);
   --product-structure-fallback: rgb(255 255 255 / 0.96);
@@ -845,12 +846,20 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
 
 .message {
   width: min(var(--conversation-measure), 100%);
-  margin: 0 auto var(--product-space-8);
+  margin: 0 auto var(--product-space-12);
 }
 
 .message.user {
   width: min(720px, 88%);
   margin-right: 0;
+}
+
+.message.user:has(+ .message.assistant) {
+  margin-bottom: var(--product-space-6);
+}
+
+.message:last-child {
+  margin-bottom: var(--product-space-8);
 }
 
 .message-header {
@@ -863,7 +872,9 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
 }
 
 .message.user .message-header {
+  min-height: 0;
   justify-content: flex-end;
+  margin-bottom: var(--product-space-2);
 }
 
 .message-role {
@@ -891,8 +902,8 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
 
 .message.user .message-bubble {
   padding: var(--product-space-3) var(--product-space-4);
-  background: var(--product-surface-subtle);
-  border: 1px solid var(--product-border);
+  background: var(--product-user-message);
+  border: 1px solid color-mix(in srgb, var(--product-accent) 16%, transparent);
   border-radius: var(--product-radius-panel);
 }
 
@@ -1577,7 +1588,11 @@ body[data-surface='product'] .accessible-dialog button:not(:disabled):hover,
   }
 
   .message {
-    margin-bottom: var(--product-space-6);
+    margin-bottom: var(--product-space-8);
+  }
+
+  .message.user:has(+ .message.assistant) {
+    margin-bottom: var(--product-space-4);
   }
 
   .message.user {

@@ -213,4 +213,25 @@ describe('quiet product workbench contract', () => {
     expect(styles).toContain("@import './styles/product.css';");
     expect(styles).not.toContain("@import './styles/workbench.css';");
   });
+
+  it('keeps assistant prose plain while grouping each user and assistant turn', async () => {
+    const productCss = await readOptional('../src/styles/product.css');
+
+    expect(productCss).toContain('--product-user-message: rgb(31 91 69 / 0.08)');
+    expect(productCss).toMatch(
+      /\.message\s*\{[\s\S]*margin:\s*0 auto var\(--product-space-12\)/
+    );
+    expect(productCss).toMatch(
+      /\.message\.user:has\(\+ \.message\.assistant\)\s*\{[\s\S]*margin-bottom:\s*var\(--product-space-6\)/
+    );
+    expect(productCss).toMatch(
+      /\.message\.user \.message-header\s*\{[\s\S]*min-height:\s*0;[\s\S]*margin-bottom:\s*var\(--product-space-2\)/
+    );
+    expect(productCss).toMatch(
+      /\.message\.user \.message-bubble\s*\{[\s\S]*background:\s*var\(--product-user-message\);[\s\S]*border-radius:\s*var\(--product-radius-panel\)/
+    );
+    expect(productCss).toMatch(
+      /@media \(max-width: 767px\)[\s\S]*\.message\s*\{[\s\S]*margin-bottom:\s*var\(--product-space-8\)[\s\S]*\.message\.user:has\(\+ \.message\.assistant\)[\s\S]*margin-bottom:\s*var\(--product-space-4\)/
+    );
+  });
 });
