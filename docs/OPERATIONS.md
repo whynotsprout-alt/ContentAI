@@ -33,7 +33,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 模型切换只影响新 execution；queued、running、resume 和 retry 按其固化的历史配置继续执行。没有 active 模型时，消息提交会在写入业务记录前返回 `503 MODEL_NOT_CONFIGURED`。
 
-模型 endpoint 默认必须解析到公网地址。为兼容 Fake-IP DNS，仅允许 HTTPS endpoint 解析到保留网段 `198.18.0.0/15`；HTTP、回环、私有、链路本地及其他保留地址仍会返回 `MODEL_ENDPOINT_FORBIDDEN`。
+模型 endpoint 允许公网 HTTPS、企业内网 HTTP/HTTPS，以及为兼容 Fake-IP DNS 而显式放行的 HTTPS `198.18.0.0/15`。公网与该 Fake-IP 网段的 HTTP 地址，以及回环、链路本地、元数据、组播和其他保留地址仍会返回 `MODEL_ENDPOINT_FORBIDDEN`。
 
 ## 健康检查
 

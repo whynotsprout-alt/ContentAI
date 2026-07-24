@@ -105,5 +105,5 @@ flowchart LR
 - `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 是部署级 Fernet 主密钥。migration、API、dispatcher、各 worker 与 beat 都从 Compose 共享应用环境取得同一值；缺失或不是有效 Fernet key 时，开发和生产均拒绝启动。
 - 模型运行时只消费 execution 固化的数据库配置版本，不从 `.env` 读取 Base URL、API Key、模型名或 token/temperature 覆盖项。普通对话使用版本中的 Temperature 与对话输出上限；结构化调用固定 Temperature `0` 并使用结构化输出上限。
 - 更新采用 `expected_version` 乐观并发控制，并在持久化前重新 probe；并发写冲突返回 `MODEL_CONFIG_CHANGED`。每个 execution/outbox 关联其创建时的 `model_config_id`，从而把切换隔离到新 execution。
-- 模型 endpoint 默认拒绝私有、回环、链路本地、保留和其他非公网地址。为兼容 Fake-IP DNS，唯一的保留网段例外是 HTTPS 的 `198.18.0.0/15`；同网段的 HTTP 地址仍拒绝。
+- 模型 endpoint 允许公网 HTTPS、企业内网 HTTP/HTTPS，以及为兼容 Fake-IP DNS 而显式放行的 HTTPS `198.18.0.0/15`。公网与该 Fake-IP 网段的 HTTP 地址，以及回环、链路本地、元数据、组播和其他保留地址仍拒绝。
 - 失败路径使用稳定错误码，不透传远端错误正文；模型配置路径的响应禁止缓存，输入验证也会脱敏。
