@@ -191,6 +191,12 @@ def test_undeclared_llm_environment_keys_do_not_create_a_runtime_fallback(
     assert "llm" not in settings.model_dump()
 
 
+def test_retired_auth_modes_are_ignored() -> None:
+    settings = _development_settings(auth={"mode": "disabled"})
+
+    assert not hasattr(settings.auth, "mode")
+
+
 def test_default_active_model_configuration_fixture_uses_consistent_secret_material() -> None:
     crypto = _crypto_module()
     with Session(get_engine()) as session:

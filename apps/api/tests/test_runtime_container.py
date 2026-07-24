@@ -277,6 +277,9 @@ def test_gateway_receives_the_complete_execution_configuration(monkeypatch) -> N
     ).gateway_for_model_config("model-config-v2")
 
     assert observed["model_config_id"] == "model-config-v2"
+    assert observed["base_url"] == "https://models.example.test/v1"
+    assert observed["api_key"].get_secret_value() == "test-secret"
+    assert observed["model_name"] == "test-model"
     assert observed["temperature"] == 0.7
     assert observed["context_window_tokens"] == 200_000
     assert observed["chat_max_tokens"] == 12_000
