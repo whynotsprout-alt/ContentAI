@@ -196,6 +196,10 @@ const modelConfiguration = {
   base_url: 'https://gateway.example.test/v1',
   model_name: 'gpt-4.1-mini',
   api_key_hint: 'sk-…9X2Q',
+  temperature: 0.2,
+  context_window_tokens: 32_000,
+  chat_max_tokens: 8_000,
+  structured_max_tokens: 8_000,
   validated_at: fixedNow,
   created_at: fixedNow,
   created_by_user_id: authUser.id,
@@ -535,9 +539,19 @@ async function installApiMocks(page, state) {
       return fulfillJson(route, { ...modelConfiguration, version: state.modelVersion });
     }
     if (path === '/api/admin/model-config' && method === 'PUT') {
-      state.modelPutPayloads.push(request.postDataJSON());
-      state.modelVersion = 8;
-      return fulfillJson(route, { detail: { code: 'MODEL_CONFIG_CHANGED', message: 'configuration changed' } }, 409);
+      const payload = request.postDataJSON();
+      state.modelPutPayloads.push(payload);
+      state.modelVersion += 1;
+      if (state.modelPutShouldConflict) {
+        return fulfillJson(route, { detail: { code: 'MODEL_CONFIG_CHANGED', message: 'configuration changed' } }, 409);
+      }
+      return fulfillJson(route, {
+        ...modelConfiguration,
+        ...payload,
+        id: `model-config-${state.modelVersion}`,
+        version: state.modelVersion,
+        validated_at: fixedNow
+      });
     }
     if (path === '/api/admin/model-config/probe' && method === 'POST') {
       return fulfillJson(route, {
@@ -853,6 +867,7 @@ async function runDesktopAcceptance(browser) {
     modelVersion: 7,
     modelLoadFailure: false,
     modelPutPayloads: [],
+    modelPutShouldConflict: false,
     agentDeleted: false,
     agentDetailResponses: [],
     agentDeleteResponses: [],
@@ -1393,20 +1408,62 @@ async function runDesktopAcceptance(browser) {
 
     const modelBaseUrl = page.getByRole('textbox', { name: /Base URL/ });
     const modelName = page.getByRole('combobox', { name: '模型 ID' });
+    const modelTemperature = page.getByRole('spinbutton', { name: 'Temperature', exact: true });
+    const modelContextWindow = page.getByRole('spinbutton', { name: '上下文窗口（tokens）', exact: true });
+    const modelChatMax = page.getByRole('spinbutton', { name: '对话最大输出（tokens）', exact: true });
+    const modelStructuredMax = page.getByRole('spinbutton', { name: '结构化输出（tokens）', exact: true });
     await modelBaseUrl.fill('https://draft.example.test/v1');
     await modelName.fill('custom-model-draft');
+    await modelTemperature.fill('0.7');
+    await modelContextWindow.fill('200000');
+    await modelChatMax.fill('12000');
+    await modelStructuredMax.fill('6000');
     await page.getByRole('button', { name: '测试连接', exact: true }).click();
     await expectVisible(page.getByText(/当前模型尚未完成推理验证/), '未验证模型反馈');
     await page.getByRole('button', { name: '保存并启用', exact: true }).click();
+    await expectVisible(page.getByText(/版本 v8 已验证并启用/), '完整模型配置保存反馈');
+    assert.match(
+      await page.locator('.model-status-panel').innerText(),
+      /Temperature\s*0\.7[\s\S]*上下文窗口\s*200,000 tokens[\s\S]*对话输出\s*12,000 tokens[\s\S]*结构化输出\s*6,000 tokens/,
+      '桌面生效状态应显示完整运行参数'
+    );
+
+    await modelBaseUrl.fill('https://conflict-draft.example.test/v1');
+    await modelName.fill('conflict-model-draft');
+    await modelTemperature.fill('0.8');
+    await modelContextWindow.fill('100000');
+    await modelChatMax.fill('10000');
+    await modelStructuredMax.fill('5000');
+    state.modelPutShouldConflict = true;
+    await page.getByRole('button', { name: '保存并启用', exact: true }).click();
     await expectVisible(page.getByText(/配置已被其他管理员更新/), '并发冲突反馈');
-    assert.equal(await modelBaseUrl.inputValue(), 'https://draft.example.test/v1', '冲突后应保留 Base URL 草稿');
-    assert.equal(await modelName.inputValue(), 'custom-model-draft', '冲突后应保留模型草稿');
-    await expectVisible(page.getByText('v8', { exact: true }).first(), '冲突后同步的配置版本');
-    assert.deepEqual(state.modelPutPayloads, [{
-      base_url: 'https://draft.example.test/v1',
-      model_name: 'custom-model-draft',
-      expected_version: 7
-    }], '更新已有配置时空 Key 不应进入请求');
+    assert.equal(await modelBaseUrl.inputValue(), 'https://conflict-draft.example.test/v1', '冲突后应保留 Base URL 草稿');
+    assert.equal(await modelName.inputValue(), 'conflict-model-draft', '冲突后应保留模型草稿');
+    assert.equal(await modelTemperature.inputValue(), '0.8', '冲突后应保留 Temperature 草稿');
+    assert.equal(await modelContextWindow.inputValue(), '100000', '冲突后应保留上下文窗口草稿');
+    assert.equal(await modelChatMax.inputValue(), '10000', '冲突后应保留对话输出草稿');
+    assert.equal(await modelStructuredMax.inputValue(), '5000', '冲突后应保留结构化输出草稿');
+    await expectVisible(page.getByText('v9', { exact: true }).first(), '冲突后同步的配置版本');
+    assert.deepEqual(state.modelPutPayloads, [
+      {
+        base_url: 'https://draft.example.test/v1',
+        model_name: 'custom-model-draft',
+        expected_version: 7,
+        temperature: 0.7,
+        context_window_tokens: 200000,
+        chat_max_tokens: 12000,
+        structured_max_tokens: 6000
+      },
+      {
+        base_url: 'https://conflict-draft.example.test/v1',
+        model_name: 'conflict-model-draft',
+        expected_version: 8,
+        temperature: 0.8,
+        context_window_tokens: 100000,
+        chat_max_tokens: 10000,
+        structured_max_tokens: 5000
+      }
+    ], '完整 PUT 应提交四项运行参数，更新已有配置时空 Key 不应进入请求');
 
     state.modelLoadFailure = true;
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -1474,6 +1531,7 @@ async function runResponsiveAdminAcceptance(browser) {
     modelVersion: 7,
     modelLoadFailure: false,
     modelPutPayloads: [],
+    modelPutShouldConflict: false,
     agentDeleted: false,
     temporaryPasswordCount: 0,
     expectedFailedResponses: [],
@@ -1675,6 +1733,7 @@ async function runResponsiveAdminAcceptance(browser) {
     await compact.back.click();
 
     for (const viewport of [
+      { width: 320, height: 800 },
       { width: 360, height: 800 },
       { width: 768, height: 1024 },
       { width: 1024, height: 768 }
@@ -1690,8 +1749,13 @@ async function runResponsiveAdminAcceptance(browser) {
       await expectVisible(form, `${viewport.width}px 模型配置表单`);
       await expectVisible(details, `${viewport.width}px 完整状态 details`);
       await expectHidden(page.locator('.model-status-panel'), `${viewport.width}px 桌面状态栏`);
-      if (viewport.width === 360) {
-        await expectMinimumTouchTargets(page.locator('.model-admin-workspace'), '360x800 模型配置');
+      assert.match(
+        await summary.innerText(),
+        /Temperature\s*0\.2[\s\S]*上下文窗口\s*32,000[\s\S]*对话输出\s*8,000[\s\S]*结构化输出\s*8,000/,
+        `${viewport.width}px 紧凑摘要应显示四项生效运行参数`
+      );
+      if (viewport.width <= 360) {
+        await expectMinimumTouchTargets(page.locator('.model-admin-workspace'), `${viewport.width}x800 模型配置`);
       }
       const positions = await Promise.all([summary, form, details].map((locator) => locator.evaluate((element) => element.getBoundingClientRect().top)));
       assert.ok(positions[0] < positions[1] && positions[1] < positions[2], `${viewport.width}px 模型窄屏顺序错误：${positions.join(' < ')}`);
@@ -1700,6 +1764,11 @@ async function runResponsiveAdminAcceptance(browser) {
       await capture(page, `06a-admin-models-${viewport.width}x${viewport.height}.png`, screenshots);
       await details.locator('summary').click();
       await expectVisible(details.locator('.model-status-content'), `${viewport.width}px 展开的完整状态`);
+      assert.match(
+        await details.locator('.model-status-content').innerText(),
+        /Temperature\s*0\.2[\s\S]*上下文窗口\s*32,000 tokens[\s\S]*对话输出\s*8,000 tokens[\s\S]*结构化输出\s*8,000 tokens/,
+        `${viewport.width}px 完整状态应显示四项生效运行参数`
+      );
       await expectNoHorizontalOverflow(page.locator('html'), `${viewport.width}px 模型管理整页`);
       if (viewport.width === 768) {
         await details.scrollIntoViewIfNeeded();
@@ -1795,6 +1864,11 @@ async function runResponsiveAdminAcceptance(browser) {
     await expectHidden(page.locator('.model-status-details'), '1280px 窄屏完整状态');
     await expectVisible(page.locator('.model-config-panel'), '1280px 模型配置表单');
     await expectVisible(page.locator('.model-status-panel'), '1280px 桌面状态栏');
+    assert.match(
+      await page.locator('.model-status-panel').innerText(),
+      /Temperature\s*0\.2[\s\S]*上下文窗口\s*32,000 tokens[\s\S]*对话输出\s*8,000 tokens[\s\S]*结构化输出\s*8,000 tokens/,
+      '1280px 桌面状态栏应显示四项生效运行参数'
+    );
     const modelColumns = await page.locator('.model-admin-workspace').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(modelColumns, /\d+px \d+px/, `1280px 模型页应为双栏：${modelColumns}`);
     await expectNoHorizontalOverflow(page.locator('html'), '1280px 模型管理整页');
@@ -1897,7 +1971,8 @@ async function runDirectProductIsolationAcceptance(browser) {
     mediaRequests: [],
     modelVersion: 7,
     modelLoadFailure: false,
-    modelPutPayloads: []
+    modelPutPayloads: [],
+    modelPutShouldConflict: false
   };
   page.on('request', (request) => {
     if (/\.mp4(?:$|\?)/i.test(request.url())) state.mediaRequests.push(request.url());
@@ -2013,6 +2088,7 @@ async function runPageScaleAcceptance(browser) {
     modelVersion: 7,
     modelLoadFailure: false,
     modelPutPayloads: [],
+    modelPutShouldConflict: false,
     agentDeleted: false,
     agentDetailResponses: []
   };

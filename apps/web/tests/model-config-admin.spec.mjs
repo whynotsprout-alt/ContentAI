@@ -83,6 +83,25 @@ const flushComponent = async () => {
   await nextTick();
 };
 
+const configuredModel = (overrides = {}) => ({
+  configured: true,
+  id: 'model-config-v1',
+  version: 1,
+  provider: 'openai_compatible',
+  base_url: 'https://models.example.test/v1',
+  model_name: 'model-v1',
+  api_key_hint: 'key-…v1',
+  temperature: 0.2,
+  context_window_tokens: 32_000,
+  chat_max_tokens: 8_000,
+  structured_max_tokens: 8_000,
+  validated_at: '2026-07-22T00:00:00Z',
+  created_at: '2026-07-22T00:00:00Z',
+  created_by_user_id: 'admin-v1',
+  created_by_email: 'admin@example.test',
+  ...overrides
+});
+
 async function mountAdminModels() {
   const { default: AdminModelsView } = await import('../src/views/AdminModelsView.vue');
   const container = hostNode('root');
@@ -98,6 +117,245 @@ afterEach(() => {
 });
 
 describe('admin model configuration', () => {
+  it('declares complete required runtime fields while keeping probe payload connection-only', async () => {
+    const [api, guard] = await Promise.all([
+      read('../src/services/api.ts'),
+      read('../src/views/modelConfigRequestGuard.ts')
+    ]);
+    const configuration = api.slice(
+      api.indexOf('export interface AdminModelConfiguration'),
+      api.indexOf('export interface AdminModelProbeResult')
+    );
+    const updatePayload = api.slice(
+      api.indexOf('export interface AdminModelUpdatePayload'),
+      api.indexOf('export const authApi')
+    );
+    const probePayload = api.slice(
+      api.indexOf('export interface AdminModelProbePayload'),
+      api.indexOf('export interface AdminModelUpdatePayload')
+    );
+
+    for (const field of [
+      'temperature',
+      'context_window_tokens',
+      'chat_max_tokens',
+      'structured_max_tokens'
+    ]) {
+      expect(configuration).toMatch(new RegExp(`\\n\\s*${field}: number;`));
+      expect(updatePayload).toMatch(new RegExp(`\\n\\s*${field}: number;`));
+      expect(probePayload).not.toContain(field);
+    }
+    for (const field of [
+      'temperature',
+      'contextWindowTokens',
+      'chatMaxTokens',
+      'structuredMaxTokens'
+    ]) {
+      expect(guard).toMatch(new RegExp(`${field}\\?: number \\| null;`));
+    }
+  });
+
+  it('keeps runtime values in save signatures but outside connection-only probe signatures', async () => {
+    const { createModelConfigRequestGuard } = await import('../src/views/modelConfigRequestGuard.ts');
+    let draft = {
+      baseUrl: 'https://models.example.test/v1',
+      apiKey: '',
+      modelName: 'model-v1',
+      temperature: 0.2,
+      contextWindowTokens: 32_000,
+      chatMaxTokens: 8_000,
+      structuredMaxTokens: 8_000
+    };
+    const probeGuard = createModelConfigRequestGuard(() => ({
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKey,
+      modelName: draft.modelName
+    }));
+    const saveGuard = createModelConfigRequestGuard(() => draft);
+    const probeTicket = probeGuard.begin();
+    const saveTicket = saveGuard.begin();
+
+    draft = { ...draft, temperature: 0.7 };
+
+    expect(probeGuard.isCurrent(probeTicket)).toBe(true);
+    expect(saveGuard.isCurrent(saveTicket)).toBe(false);
+  });
+
+  it('uses suggested runtime defaults for an unconfigured installation', async () => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue({
+      configured: false,
+      temperature: null,
+      context_window_tokens: null,
+      chat_max_tokens: null,
+      structured_max_tokens: null
+    });
+    const { app, state } = await mountAdminModels();
+
+    try {
+      expect(state.temperature).toBe(0.2);
+      expect(state.contextWindowTokens).toBe(32_000);
+      expect(state.chatMaxTokens).toBe(8_000);
+      expect(state.structuredMaxTokens).toBe(8_000);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it.each([
+    ['temperature below zero', 'temperature', -0.01],
+    ['temperature above two', 'temperature', 2.01],
+    ['temperature NaN', 'temperature', Number.NaN],
+    ['temperature infinity', 'temperature', Number.POSITIVE_INFINITY],
+    ['context zero', 'contextWindowTokens', 0],
+    ['context negative', 'contextWindowTokens', -1],
+    ['context fractional', 'contextWindowTokens', 32_000.5],
+    ['context infinity', 'contextWindowTokens', Number.POSITIVE_INFINITY],
+    ['chat zero', 'chatMaxTokens', 0],
+    ['chat negative', 'chatMaxTokens', -1],
+    ['chat fractional', 'chatMaxTokens', 8_000.5],
+    ['chat equal to context', 'chatMaxTokens', 32_000],
+    ['chat above context', 'chatMaxTokens', 32_001],
+    ['structured zero', 'structuredMaxTokens', 0],
+    ['structured negative', 'structuredMaxTokens', -1],
+    ['structured fractional', 'structuredMaxTokens', 8_000.5],
+    ['structured equal to context', 'structuredMaxTokens', 32_000],
+    ['structured above context', 'structuredMaxTokens', 32_001]
+  ])('disables save for invalid runtime boundary: %s', async (_label, field, value) => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel());
+    const { app, state } = await mountAdminModels();
+
+    try {
+      state[field] = value;
+      await nextTick();
+      expect(state.canSave).toBe(false);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it.each([0, 2])('accepts inclusive temperature boundary %s', async (value) => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel());
+    const { app, state } = await mountAdminModels();
+
+    try {
+      state.temperature = value;
+      await nextTick();
+      expect(state.canSave).toBe(true);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it('submits the complete runtime snapshot in the PUT body', async () => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel());
+    const update = vi.spyOn(adminApi, 'updateModelConfig').mockResolvedValue(configuredModel({
+      version: 2,
+      temperature: 0.65,
+      context_window_tokens: 200_000,
+      chat_max_tokens: 12_000,
+      structured_max_tokens: 6_000
+    }));
+    const { app, state } = await mountAdminModels();
+
+    try {
+      state.temperature = 0.65;
+      state.contextWindowTokens = 200_000;
+      state.chatMaxTokens = 12_000;
+      state.structuredMaxTokens = 6_000;
+      await nextTick();
+      await state.saveConfiguration();
+
+      expect(update).toHaveBeenCalledWith({
+        base_url: 'https://models.example.test/v1',
+        model_name: 'model-v1',
+        expected_version: 1,
+        temperature: 0.65,
+        context_window_tokens: 200_000,
+        chat_max_tokens: 12_000,
+        structured_max_tokens: 6_000
+      });
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it.each([
+    ['temperature', 'temperature', 0.9],
+    ['context window', 'contextWindowTokens', 64_000],
+    ['chat output', 'chatMaxTokens', 9_000],
+    ['structured output', 'structuredMaxTokens', 7_000]
+  ])('does not let a stale save response overwrite active state or a newer %s draft', async (_label, field, value) => {
+    const { adminApi } = await import('../src/services/api.ts');
+    const saveRequest = deferred();
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel());
+    vi.spyOn(adminApi, 'updateModelConfig').mockReturnValue(saveRequest.promise);
+    const { app, state } = await mountAdminModels();
+
+    try {
+      const pendingSave = state.saveConfiguration();
+      state[field] = value;
+      await nextTick();
+      saveRequest.resolve(configuredModel({
+        id: 'model-config-v2',
+        version: 2,
+        base_url: 'https://stale.example.test/v1',
+        model_name: 'stale-model',
+        temperature: 0.4,
+        context_window_tokens: 64_000,
+        chat_max_tokens: 10_000,
+        structured_max_tokens: 9_000
+      }));
+      await pendingSave;
+      await nextTick();
+
+      expect(state.active.version).toBe(1);
+      expect(state.baseUrl).toBe('https://models.example.test/v1');
+      expect(state.modelName).toBe('model-v1');
+      expect(state[field]).toBe(value);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it.each([
+    ['temperature', 'temperature', 0.7],
+    ['context window', 'contextWindowTokens', 64_000],
+    ['chat output', 'chatMaxTokens', 9_000],
+    ['structured output', 'structuredMaxTokens', 7_000]
+  ])('lets a connection probe finish when only %s changes', async (_label, field, value) => {
+    const { adminApi } = await import('../src/services/api.ts');
+    const probeRequest = deferred();
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel());
+    vi.spyOn(adminApi, 'probeModelConfig').mockReturnValue(probeRequest.promise);
+    const { app, state } = await mountAdminModels();
+
+    try {
+      const pendingProbe = state.runProbe(false);
+      state[field] = value;
+      await nextTick();
+      probeRequest.resolve({
+        base_url: 'https://models.example.test/v1',
+        models: ['model-v1', 'model-v2'],
+        models_truncated: false,
+        model_validated: false,
+        latency_ms: 24
+      });
+      await pendingProbe;
+      await nextTick();
+
+      expect(state.models).toEqual(['model-v1', 'model-v2']);
+      expect(state.latencyMs).toBe(24);
+      expect(state.successMessage).toBe('已刷新 2 个可用模型。');
+      expect(state.probing).toBe(false);
+    } finally {
+      app.unmount();
+    }
+  });
+
   it('accepts only the newest response for the current normalized draft', async () => {
     const { createModelConfigRequestGuard } = await import('../src/views/modelConfigRequestGuard.ts');
     let draft = { baseUrl: ' https://a.example/v1/ ', apiKey: 'key-a', modelName: ' model-a ' };
@@ -190,15 +448,7 @@ describe('admin model configuration', () => {
     'releases save ownership after an edited draft settles with %s',
     async (outcome) => {
       const { adminApi, ApiError } = await import('../src/services/api.ts');
-      const initial = {
-        configured: true,
-        id: 'model-config-v1',
-        version: 1,
-        base_url: 'https://models.example.test/v1',
-        model_name: 'model-v1',
-        api_key_hint: 'key-hint-v1',
-        validated_at: '2026-07-22T00:00:00Z'
-      };
+      const initial = configuredModel();
       const refreshed = {
         ...initial,
         id: 'model-config-v2',
@@ -242,6 +492,8 @@ describe('admin model configuration', () => {
         if (outcome === 'conflict') {
           expect(load).toHaveBeenCalledTimes(2);
           expect(state.active.version).toBe(2);
+        } else {
+          expect(state.active.version).toBe(1);
         }
       } finally {
         app.unmount();

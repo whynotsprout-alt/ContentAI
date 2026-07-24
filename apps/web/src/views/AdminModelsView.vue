@@ -17,13 +17,18 @@ import {
   ApiError,
   adminApi,
   type AdminModelConfiguration,
-  type AdminModelProbePayload
+  type AdminModelProbePayload,
+  type AdminModelUpdatePayload
 } from '../services/api';
 
 const active = ref<AdminModelConfiguration | null>(null);
 const baseUrl = ref('');
 const apiKey = ref('');
 const modelName = ref('');
+const temperature = ref<number | null>(0.2);
+const contextWindowTokens = ref<number | null>(32_000);
+const chatMaxTokens = ref<number | null>(8_000);
+const structuredMaxTokens = ref<number | null>(8_000);
 const models = ref<string[]>([]);
 const modelsTruncated = ref(false);
 const latencyMs = ref<number | null>(null);
@@ -37,18 +42,62 @@ const errorKind = ref<'load' | 'probe' | 'save' | ''>('');
 const successMessage = ref('');
 let applyingServerState = false;
 
-const readDraft = () => ({
+const readConnectionDraft = () => ({
   baseUrl: baseUrl.value,
   apiKey: apiKey.value,
   modelName: modelName.value
 });
-const probeGuard = createModelConfigRequestGuard(readDraft);
-const saveGuard = createModelConfigRequestGuard(readDraft);
+const readSaveDraft = () => ({
+  ...readConnectionDraft(),
+  temperature: temperature.value,
+  contextWindowTokens: contextWindowTokens.value,
+  chatMaxTokens: chatMaxTokens.value,
+  structuredMaxTokens: structuredMaxTokens.value
+});
+const probeGuard = createModelConfigRequestGuard(readConnectionDraft);
+const saveGuard = createModelConfigRequestGuard(readSaveDraft);
 
 const configured = computed(() => Boolean(active.value?.configured));
 const expectedVersion = computed(() => active.value?.version ?? 0);
+const temperatureError = computed(() => {
+  const value = temperature.value;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '请输入 0 到 2 之间的数字。';
+  if (value < 0 || value > 2) return 'Temperature 必须在 0 到 2 之间。';
+  return '';
+});
+const contextWindowError = computed(() => {
+  const value = contextWindowTokens.value;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return '上下文窗口必须是正整数。';
+  return '';
+});
+const chatMaxError = computed(() => {
+  const value = chatMaxTokens.value;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return '对话最大输出必须是正整数。';
+  if (!contextWindowError.value && value >= contextWindowTokens.value!) return '对话最大输出必须小于上下文窗口。';
+  return '';
+});
+const structuredMaxError = computed(() => {
+  const value = structuredMaxTokens.value;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return '结构化输出必须是正整数。';
+  if (!contextWindowError.value && value >= contextWindowTokens.value!) return '结构化输出必须小于上下文窗口。';
+  return '';
+});
+const outputTokenMax = computed(() => (
+  !contextWindowError.value && contextWindowTokens.value !== null
+    ? Math.max(1, contextWindowTokens.value - 1)
+    : undefined
+));
 const canProbe = computed(() => baseUrl.value.trim().length > 0 && !initialLoadFailed.value && !loading.value && !probing.value && !saving.value);
-const canSave = computed(() => canProbe.value && !versionSyncFailed.value && modelName.value.trim().length > 0 && (configured.value || apiKey.value.trim().length > 0));
+const canSave = computed(() => (
+  canProbe.value
+  && !versionSyncFailed.value
+  && modelName.value.trim().length > 0
+  && (configured.value || apiKey.value.trim().length > 0)
+  && !temperatureError.value
+  && !contextWindowError.value
+  && !chatMaxError.value
+  && !structuredMaxError.value
+));
 
 const errorCopy: Record<string, string> = {
   MODEL_CREDENTIALS_REQUIRED: '首次配置必须填写 API Key。',
@@ -71,6 +120,10 @@ function formatDate(value: string | null | undefined) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
+function formatRuntimeNumber(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? new Intl.NumberFormat('zh-CN').format(value) : '—';
+}
+
 function payload(includeModel: boolean): AdminModelProbePayload {
   return {
     base_url: baseUrl.value.trim(),
@@ -91,10 +144,19 @@ async function loadConfiguration(options: { preserveForm?: boolean; background?:
     initialLoadFailed.value = false;
     versionSyncFailed.value = false;
     if (!options.preserveForm) {
-      baseUrl.value = result.base_url ?? '';
-      modelName.value = result.model_name ?? '';
-      apiKey.value = '';
-      models.value = result.model_name ? [result.model_name] : [];
+      applyingServerState = true;
+      try {
+        baseUrl.value = result.base_url ?? '';
+        modelName.value = result.model_name ?? '';
+        apiKey.value = '';
+        temperature.value = result.configured ? result.temperature : 0.2;
+        contextWindowTokens.value = result.configured ? result.context_window_tokens : 32_000;
+        chatMaxTokens.value = result.configured ? result.chat_max_tokens : 8_000;
+        structuredMaxTokens.value = result.configured ? result.structured_max_tokens : 8_000;
+        models.value = result.model_name ? [result.model_name] : [];
+      } finally {
+        applyingServerState = false;
+      }
     }
   } catch (value) {
     if (!options.background) {
@@ -168,10 +230,21 @@ async function runProbe(includeModel: boolean) {
 
 async function saveConfiguration() {
   if (!canSave.value) return;
-  const requestPayload = {
+  const runtimeValues = [
+    temperature.value,
+    contextWindowTokens.value,
+    chatMaxTokens.value,
+    structuredMaxTokens.value
+  ];
+  if (!runtimeValues.every((value) => typeof value === 'number' && Number.isFinite(value))) return;
+  const requestPayload: AdminModelUpdatePayload = {
     ...payload(true),
     model_name: modelName.value.trim(),
-    expected_version: expectedVersion.value
+    expected_version: expectedVersion.value,
+    temperature: temperature.value!,
+    context_window_tokens: contextWindowTokens.value!,
+    chat_max_tokens: chatMaxTokens.value!,
+    structured_max_tokens: structuredMaxTokens.value!
   };
   const request = saveGuard.begin();
   saving.value = true;
@@ -180,13 +253,17 @@ async function saveConfiguration() {
   successMessage.value = '';
   try {
     const result = await adminApi.updateModelConfig(requestPayload);
-    active.value = result;
     if (!saveGuard.isCurrent(request)) return;
     applyingServerState = true;
     try {
+      active.value = result;
       baseUrl.value = result.base_url ?? requestPayload.base_url;
       modelName.value = result.model_name ?? requestPayload.model_name;
       apiKey.value = '';
+      temperature.value = result.temperature ?? requestPayload.temperature;
+      contextWindowTokens.value = result.context_window_tokens ?? requestPayload.context_window_tokens;
+      chatMaxTokens.value = result.chat_max_tokens ?? requestPayload.chat_max_tokens;
+      structuredMaxTokens.value = result.structured_max_tokens ?? requestPayload.structured_max_tokens;
       models.value = Array.from(new Set([...models.value, modelName.value])).sort();
       successMessage.value = `版本 v${result.version} 已验证并启用，仅对新 execution 生效。`;
     } finally {
@@ -244,6 +321,12 @@ watch(modelName, () => {
   }
 }, { flush: 'sync' });
 
+watch([temperature, contextWindowTokens, chatMaxTokens, structuredMaxTokens], () => {
+  if (applyingServerState) return;
+  saveGuard.invalidate();
+  successMessage.value = '';
+}, { flush: 'sync' });
+
 onMounted(() => void loadConfiguration());
 </script>
 
@@ -266,6 +349,12 @@ onMounted(() => void loadConfiguration());
         <p v-else-if="initialLoadFailed">重新加载成功前不会开放保存。</p>
         <p v-else-if="configured">{{ active?.base_url }}</p>
         <p v-else>完成验证并保存后，新对话才能提交。</p>
+        <dl v-if="!loading && !initialLoadFailed && configured" class="model-runtime-summary" aria-label="当前生效运行参数">
+          <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+          <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }}</dd></div>
+          <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }}</dd></div>
+          <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }}</dd></div>
+        </dl>
       </section>
 
       <section class="model-config-panel" aria-labelledby="model-config-form-title">
@@ -313,6 +402,83 @@ onMounted(() => void loadConfiguration());
             <p v-if="modelsTruncated" class="model-inline-note">候选较多，列表已安全截断；可直接输入未显示的模型 ID。</p>
           </div>
 
+          <fieldset class="model-runtime-fieldset">
+            <legend>运行参数</legend>
+            <p class="model-runtime-intro">这些参数会随配置版本固化，只影响保存后新建的 execution。</p>
+            <div class="model-runtime-grid">
+              <div class="model-field">
+                <label for="model-temperature">Temperature</label>
+                <input
+                  id="model-temperature"
+                  v-model.number="temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  inputmode="decimal"
+                  required
+                  :aria-invalid="Boolean(temperatureError)"
+                  :aria-describedby="temperatureError ? 'model-temperature-help model-temperature-error' : 'model-temperature-help'"
+                />
+                <small id="model-temperature-help">采样温度，允许 0 到 2，包含边界。</small>
+                <p v-if="temperatureError" id="model-temperature-error" class="model-field-error">{{ temperatureError }}</p>
+              </div>
+
+              <div class="model-field">
+                <label for="model-context-window">上下文窗口（tokens）</label>
+                <input
+                  id="model-context-window"
+                  v-model.number="contextWindowTokens"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputmode="numeric"
+                  required
+                  :aria-invalid="Boolean(contextWindowError)"
+                  :aria-describedby="contextWindowError ? 'model-context-window-help model-context-window-error' : 'model-context-window-help'"
+                />
+                <small id="model-context-window-help">模型一次调用可使用的总 token 上限。</small>
+                <p v-if="contextWindowError" id="model-context-window-error" class="model-field-error">{{ contextWindowError }}</p>
+              </div>
+
+              <div class="model-field">
+                <label for="model-chat-max">对话最大输出（tokens）</label>
+                <input
+                  id="model-chat-max"
+                  v-model.number="chatMaxTokens"
+                  type="number"
+                  min="1"
+                  :max="outputTokenMax"
+                  step="1"
+                  inputmode="numeric"
+                  required
+                  :aria-invalid="Boolean(chatMaxError)"
+                  :aria-describedby="chatMaxError ? 'model-chat-max-help model-chat-max-error' : 'model-chat-max-help'"
+                />
+                <small id="model-chat-max-help">普通对话的最大输出，必须小于上下文窗口。</small>
+                <p v-if="chatMaxError" id="model-chat-max-error" class="model-field-error">{{ chatMaxError }}</p>
+              </div>
+
+              <div class="model-field">
+                <label for="model-structured-max">结构化输出（tokens）</label>
+                <input
+                  id="model-structured-max"
+                  v-model.number="structuredMaxTokens"
+                  type="number"
+                  min="1"
+                  :max="outputTokenMax"
+                  step="1"
+                  inputmode="numeric"
+                  required
+                  :aria-invalid="Boolean(structuredMaxError)"
+                  :aria-describedby="structuredMaxError ? 'model-structured-max-help model-structured-max-error' : 'model-structured-max-help'"
+                />
+                <small id="model-structured-max-help">结构化调用的最大输出，必须小于上下文窗口。</small>
+                <p v-if="structuredMaxError" id="model-structured-max-error" class="model-field-error">{{ structuredMaxError }}</p>
+              </div>
+            </div>
+          </fieldset>
+
           <div class="model-form-actions">
             <button class="secondary-action" type="button" :disabled="!canProbe || !modelName.trim()" @click="runProbe(true)">
               <LoaderCircle v-if="probing" :size="16" class="spin" /><Activity v-else :size="16" />测试连接
@@ -333,7 +499,7 @@ onMounted(() => void loadConfiguration());
       <details class="model-status-details">
         <summary>
           <span>查看完整生效状态</span>
-          <small>版本、端点、模型、Key 提示与验证信息</small>
+          <small>版本、连接、运行参数与验证信息</small>
         </summary>
         <div class="model-status-content">
           <header><span class="model-panel-icon"><Activity :size="20" /></span><div><h2>当前生效状态</h2><p>不可变版本快照</p></div></header>
@@ -355,6 +521,10 @@ onMounted(() => void loadConfiguration());
               <div><dt>Base URL</dt><dd>{{ active?.base_url }}</dd></div>
               <div><dt>模型</dt><dd>{{ active?.model_name }}</dd></div>
               <div><dt>Key</dt><dd>{{ active?.api_key_hint }}</dd></div>
+              <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+              <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }} tokens</dd></div>
+              <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }} tokens</dd></div>
+              <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }} tokens</dd></div>
               <div><dt>验证时间</dt><dd>{{ formatDate(active?.validated_at) }}</dd></div>
               <div><dt>操作者</dt><dd>{{ active?.created_by_email || active?.created_by_user_id || '—' }}</dd></div>
             </dl>
@@ -363,7 +533,7 @@ onMounted(() => void loadConfiguration());
         </div>
       </details>
 
-      <aside class="model-status-panel" aria-labelledby="model-status-title">
+      <aside class="model-status-panel" aria-labelledby="model-status-title" tabindex="0">
         <header><span class="model-panel-icon"><Activity :size="20" /></span><div><h2 id="model-status-title">当前生效状态</h2><p>不可变版本快照</p></div></header>
         <div v-if="loading" class="model-status-skeleton"><span v-for="index in 5" :key="index"></span></div>
         <div v-else-if="initialLoadFailed" class="model-empty-state">
@@ -383,6 +553,10 @@ onMounted(() => void loadConfiguration());
             <div><dt>Base URL</dt><dd>{{ active?.base_url }}</dd></div>
             <div><dt>模型</dt><dd>{{ active?.model_name }}</dd></div>
             <div><dt>Key</dt><dd>{{ active?.api_key_hint }}</dd></div>
+            <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+            <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }} tokens</dd></div>
+            <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }} tokens</dd></div>
+            <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }} tokens</dd></div>
             <div><dt>验证时间</dt><dd>{{ formatDate(active?.validated_at) }}</dd></div>
             <div><dt>操作者</dt><dd>{{ active?.created_by_email || active?.created_by_user_id || '—' }}</dd></div>
           </dl>

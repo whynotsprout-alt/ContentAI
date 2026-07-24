@@ -445,6 +445,10 @@ export interface AdminUsageBucket {
 
 export interface AdminModelConfiguration {
   configured: boolean;
+  temperature: number;
+  context_window_tokens: number;
+  chat_max_tokens: number;
+  structured_max_tokens: number;
   id?: string | null;
   version?: number | null;
   provider?: string | null;
@@ -474,6 +478,10 @@ export interface AdminModelProbePayload {
 export interface AdminModelUpdatePayload extends AdminModelProbePayload {
   model_name: string;
   expected_version: number;
+  temperature: number;
+  context_window_tokens: number;
+  chat_max_tokens: number;
+  structured_max_tokens: number;
 }
 
 export const authApi = {
