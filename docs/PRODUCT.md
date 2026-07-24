@@ -40,8 +40,9 @@ ContentAI 是面向内容创作者的持续对话助手。产品以一个自然�
 
 ## 全局模型配置
 
-- 首个版本只维护一套全局 active 的 OpenAI-compatible 配置：Base URL、API Key 和模型名。首次安装后，管理员必须登录 `/admin/models` 完成配置；系统不会自动导入旧模型环境变量，也不提供数据库配置回退。
+- 首个版本只维护一套全局 active 的 OpenAI-compatible 配置：Base URL、API Key、模型名、Temperature、上下文窗口、对话输出上限和结构化输出上限。首次安装后，管理员必须登录 `/admin/models` 完成配置；模型运行参数只读取数据库中的 active 版本，不读取模型环境变量，也不提供旧配置迁移或数据库配置回退。
 - 管理员可以先 probe 候选配置；保存时服务端会再次执行完整 probe，只有成功验证的配置才能成为 active。首次保存必须提供 API Key；后续更新把 API Key 留空表示继续使用当前 active 配置的 Key。
+- 对话调用使用 active 版本的 Temperature 和对话输出上限；需要稳定结构的内部调用固定使用 Temperature `0`，并使用结构化输出上限。两个输出上限都必须小于上下文窗口。
 - 新配置只影响新建 execution。已 queued、running、resume 或 retry 的 execution 继续使用创建时固化的历史配置版本；历史版本因此保留用于恢复，首个版本不提供删除、回滚或在线 Fernet 主密钥轮换。
 - 未配置时，消息提交会在创建业务记录之前返回 `503 MODEL_NOT_CONFIGURED`。Traffic Relay 是独立的搜索服务配置，不与模型配置共用 Key。
 - API、日志、审计和异常响应都不得记录 API Key、密文、Authorization 或远端响应正文。

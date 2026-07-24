@@ -64,11 +64,13 @@ Agent 仅属于当前 `user_id`。创建请求包含 `name`、`description`、`t
 | GET | `/api/admin/sessions/{session_id}` | 管理员 | AdminUsersView | 无 / 会话审计摘要 | 查看会话审计摘要 |
 | GET | `/api/admin/sessions/{session_id}/messages` | 管理员 | AdminUsersView | cursor、limit / 审计消息页 | 分页读取会话消息 |
 | GET | `/api/admin/usage` | 管理员 | AdminUsersView | 用户、时间范围、粒度 / 用量桶 | 用量统计 |
-| GET | `/api/admin/model-config` | 管理员 | AdminModelsView | 无 / active 配置元数据或 `configured: false` | 获取唯一全局 OpenAI-compatible 配置；不返回 API Key 或密文，且响应不缓存 |
+| GET | `/api/admin/model-config` | 管理员 | AdminModelsView | 无 / active 配置元数据或 `configured: false` | 获取唯一全局 OpenAI-compatible 配置及四个运行参数；不返回 API Key 或密文，且响应不缓存 |
 | POST | `/api/admin/model-config/probe` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、可选 model_name / 标准化地址、候选模型、验证结果、延迟 | 测试候选；空 Key 只会沿用当前 active Key，首次配置会返回 `MODEL_CREDENTIALS_REQUIRED` |
-| PUT | `/api/admin/model-config` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、model_name、expected_version / 新 active 配置元数据 | 保存前服务端重做完整 probe；首次配置必须提供 Key，空 Key 仅沿用当前 active Key |
+| PUT | `/api/admin/model-config` | 管理员 + CSRF | AdminModelsView | base_url、可选 api_key、model_name、expected_version、temperature、context_window_tokens、chat_max_tokens、structured_max_tokens / 新 active 配置元数据 | 保存完整运行版本前服务端重做 probe；首次配置必须提供 Key，空 Key 仅沿用当前 active Key |
 
 模型配置的稳定错误码为：`MODEL_NOT_CONFIGURED`（503）、`MODEL_CREDENTIALS_REQUIRED`（422）、`MODEL_ENDPOINT_FORBIDDEN`（422）、`MODEL_CONFIG_CHANGED`（409）、`MODEL_CONFIG_PERSISTENCE_FAILED`（503）、`MODEL_AUTH_FAILED`（422）、`MODEL_NOT_FOUND`（422）、`MODEL_PROVIDER_UNREACHABLE`（502）和 `MODEL_PROBE_FAILED`（502）。这些响应、模型配置请求校验错误和成功响应均不会回显 API Key、密文、Authorization 或远端响应正文。
+
+模型运行参数约束为：`temperature` 在 `0..2` 内；三个 token 字段均为正整数；`chat_max_tokens` 与 `structured_max_tokens` 必须分别小于 `context_window_tokens`。结构化调用运行时固定使用 Temperature `0`。
 
 ## 契约约束
 

@@ -9,7 +9,7 @@
 
 `.env` 是本地密钥文件，不应提交。必须为 `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 生成一个新的 Fernet key，例如 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`；将其保存到本地密钥管理中并安全备份。开发和生产环境在该值缺失或格式错误时都会拒绝启动，所有应用进程必须使用同一个值。不要把生成结果粘贴到终端记录、文档或版本库，也不要尝试在线轮换该主密钥。
 
-生产环境还必须配置默认管理员邮箱和初始密码、前端来源及实际启用的搜索服务密钥。Traffic Relay 的 Key 仅服务于搜索，不是模型配置 Key。首次启动后使用管理员账号访问 `/admin/models` 创建唯一的 active OpenAI-compatible Base URL、API Key 和模型名；系统不会读取旧模型环境变量或提供数据库配置回退。服务在启动时仅当该邮箱不存在才创建已激活的管理员；后续重启绝不会覆盖其密码、角色或状态。邮箱验证和邮件密码重置功能当前均已停用，不需要配置邮件服务。
+开发和生产环境必须配置启动管理员邮箱和初始密码、前端来源及实际启用的搜索服务密钥。Traffic Relay 的 Key 仅服务于搜索，不是模型配置 Key。首次启动会在该邮箱不存在时创建已激活管理员；后续重启绝不会覆盖其密码、角色或状态。管理员随后在 `/admin/models` 创建唯一的 active OpenAI-compatible 完整运行版本，包括 Base URL、API Key、模型名、Temperature、上下文窗口、对话输出上限和结构化输出上限。系统不会读取模型环境变量、迁移旧模型配置或提供数据库配置回退。邮箱验证和邮件密码重置功能当前均已停用，不需要配置邮件服务。
 
 ## 初始化
 
