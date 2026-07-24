@@ -54,6 +54,11 @@ expect(productCss).toContain('--conversation-inline-shift: 0px');
 ```js
 it('centers every conversation surface on the viewport only when the desktop has safe space', async () => {
   const productCss = await readOptional('../src/styles/product.css');
+  const desktop1024Start = productCss.indexOf('@media (min-width: 1024px) and (max-width: 1279px)');
+  const desktop1280Start = productCss.indexOf('@media (min-width: 1280px) and (max-width: 1439px)');
+  const desktop1440Start = productCss.indexOf('@media (min-width: 1440px)');
+  const desktop1024Block = productCss.slice(desktop1024Start, desktop1280Start);
+  const desktop1280Block = productCss.slice(desktop1280Start, desktop1440Start);
 
   expect(productCss).toMatch(
     /\.run-activity,[\s\S]*\.workspace-alert,[\s\S]*\.onboarding-empty,[\s\S]*\.message,[\s\S]*\.interrupt-approval,[\s\S]*\.composer-wrap > \.field-error,[\s\S]*\.composer,[\s\S]*\.composer-hint[\s\S]*translate:\s*var\(--conversation-inline-shift\) 0/
@@ -61,12 +66,11 @@ it('centers every conversation surface on the viewport only when the desktop has
   expect(productCss).toMatch(
     /@media \(min-width: 1440px\)[\s\S]*--conversation-inline-shift:\s*calc\(var\(--session-rail-width\) \* -0\.5\)/
   );
-  expect(productCss).not.toMatch(
-    /@media \(min-width: 1024px\) and \(max-width: 1279px\)[\s\S]*--conversation-inline-shift:\s*calc/
-  );
-  expect(productCss).not.toMatch(
-    /@media \(min-width: 1280px\) and \(max-width: 1439px\)[\s\S]*--conversation-inline-shift:\s*calc/
-  );
+  expect(desktop1024Start).toBeGreaterThan(-1);
+  expect(desktop1280Start).toBeGreaterThan(desktop1024Start);
+  expect(desktop1440Start).toBeGreaterThan(desktop1280Start);
+  expect(desktop1024Block).not.toContain('--conversation-inline-shift: calc');
+  expect(desktop1280Block).not.toContain('--conversation-inline-shift: calc');
 });
 ```
 
