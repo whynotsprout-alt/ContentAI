@@ -163,11 +163,11 @@ docker compose --env-file .env ps
 curl --fail https://content.example.com/api/ready
 ~~~
 
-首次 API 启动会自动创建由 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 指定的已激活管理员。该邮箱若已存在，服务不会更改其密码、角色或状态；因此无需、也不应调用注册接口手工创建默认管理员。
+首次 API 启动会自动创建由 `CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL` 指定的已激活管理员。该邮箱若已对应有效的已激活管理员，服务不会更改其密码、角色或状态；若对应普通用户或已禁用管理员，服务会拒绝启动并要求先解决账号冲突。因此无需、也不应调用注册接口手工创建默认管理员。
 
 使用该账号登录后立即修改初始密码。初始密码应保存在受控的密钥管理系统中，不应写入文档、Shell 历史或版本库。
 
-然后访问 `/admin/models` 配置唯一全局 active OpenAI-compatible Base URL、API Key 和模型名。可先 probe；保存时服务端会再次完成完整 probe。首次配置必须输入 API Key，后续更新留空才表示继续使用当前 active Key。模型切换仅影响新 execution；queued、running、resume 与 retry 使用固化的历史版本。首个版本不提供旧环境变量自动导入、数据库回退、配置删除、回滚或在线 Fernet 主密钥轮换。
+然后访问 `/admin/models` 配置唯一全局 active OpenAI-compatible 完整运行版本：Base URL、API Key、模型名、Temperature、上下文窗口、对话输出上限和结构化输出上限。可先 probe；保存时服务端会再次完成完整 probe。首次配置必须输入 API Key，后续更新留空才表示继续使用当前 active Key。模型切换仅影响新 execution；queued、running、resume 与 retry 使用固化的历史版本。首个版本不提供旧环境变量自动导入、数据库回退、配置删除、回滚或在线 Fernet 主密钥轮换。
 
 ## 7. 日志与深度搜索排错
 
