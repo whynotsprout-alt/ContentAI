@@ -2,7 +2,10 @@ import base64
 from pathlib import Path
 
 import pytest
-from model_config_helpers import TEST_MODEL_CONFIG_API_KEY
+from model_config_helpers import (
+    DEFAULT_MODEL_RUNTIME_PARAMETERS,
+    TEST_MODEL_CONFIG_API_KEY,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -139,6 +142,7 @@ def reset_database() -> None:
                 """
                 INSERT INTO modelconfiguration (
                     id, version, provider, base_url, model_name,
+                    temperature, context_window_tokens, chat_max_tokens, structured_max_tokens,
                     api_key_ciphertext, api_key_fingerprint, api_key_hint,
                     is_active, validated_at, created_at, superseded_at,
                     created_by_user_id
@@ -146,6 +150,7 @@ def reset_database() -> None:
                 VALUES (
                     'default-model-config', 1, 'openai_compatible',
                     'https://models.test.invalid/v1', 'test-model',
+                    :temperature, :context_window_tokens, :chat_max_tokens, :structured_max_tokens,
                     :api_key_ciphertext, :api_key_fingerprint, :api_key_hint,
                     true, now(), now(), NULL, 'local-user'
                 )
@@ -155,6 +160,7 @@ def reset_database() -> None:
                 "api_key_ciphertext": api_key_ciphertext,
                 "api_key_fingerprint": api_key_fingerprint,
                 "api_key_hint": api_key_hint,
+                **DEFAULT_MODEL_RUNTIME_PARAMETERS,
             },
         )
         connection.execute(

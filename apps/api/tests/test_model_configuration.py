@@ -8,11 +8,23 @@ from types import SimpleNamespace
 import pytest
 from core.config import Settings, get_settings
 from db.session import build_engine, get_engine
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, TEST_MODEL_CONFIG_API_KEY
+from model_config_helpers import (
+    DEFAULT_MODEL_CONFIG_ID,
+    TEST_MODEL_CONFIG_API_KEY,
+    model_runtime_parameters,
+)
 from pydantic import ValidationError
 from sqlalchemy import func, inspect, text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlmodel import Session, select
+
+
+RUNTIME_COLUMNS = {
+    "temperature",
+    "context_window_tokens",
+    "chat_max_tokens",
+    "structured_max_tokens",
+}
 
 
 def _fernet_key(seed: int) -> str:
@@ -31,6 +43,12 @@ def _model_class():
         return import_module("models.model_configuration").ModelConfiguration
     except ModuleNotFoundError:
         pytest.fail("model configuration ORM model is missing")
+
+
+def test_model_configuration_contains_required_runtime_snapshot() -> None:
+    table = _model_class().__table__
+    assert RUNTIME_COLUMNS <= set(table.columns.keys())
+    assert all(not table.columns[name].nullable for name in RUNTIME_COLUMNS)
 
 
 def _development_settings(**values: object) -> Settings:
@@ -241,6 +259,7 @@ def test_model_configuration_serialization_and_repr_exclude_secret_material() ->
         api_key_fingerprint="a" * 64,
         api_key_hint="...7890",
         created_by_user_id="local-user",
+        **model_runtime_parameters(),
     )
 
     assert "api_key_ciphertext" not in configuration.model_dump()
@@ -258,6 +277,10 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
         "provider",
         "base_url",
         "model_name",
+        "temperature",
+        "context_window_tokens",
+        "chat_max_tokens",
+        "structured_max_tokens",
         "api_key_ciphertext",
         "api_key_fingerprint",
         "api_key_hint",
@@ -268,6 +291,7 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
         "created_by_user_id",
     } == set(columns)
     assert not columns["version"]["nullable"]
+    assert all(not columns[name]["nullable"] for name in RUNTIME_COLUMNS)
     assert not columns["api_key_ciphertext"]["nullable"]
     assert not columns["created_by_user_id"]["nullable"]
 
@@ -306,6 +330,7 @@ def test_execution_outbox_model_configuration_mismatch_is_rejected() -> None:
                     api_key_hint="...one",
                     is_active=False,
                     created_by_user_id="local-user",
+                    **model_runtime_parameters(),
                 ),
                 model_class(
                     id="model-config-two",
@@ -317,6 +342,7 @@ def test_execution_outbox_model_configuration_mismatch_is_rejected() -> None:
                     api_key_hint="...two",
                     is_active=False,
                     created_by_user_id="local-user",
+                    **model_runtime_parameters(),
                 ),
             ]
         )
@@ -382,6 +408,7 @@ def _constraint_test_configuration(**overrides: object):
         "api_key_hint": "...test",
         "is_active": False,
         "created_by_user_id": "local-user",
+        **model_runtime_parameters(),
     }
     values.update(overrides)
     return _model_class()(**values)
@@ -426,3 +453,40 @@ def test_postgres_rejects_invalid_model_configuration_rows_without_poisoning_ses
                 session.flush()
 
         assert session.get(_model_class(), DEFAULT_MODEL_CONFIG_ID) is not None, constraint_name
+
+
+@pytest.mark.parametrize(
+    ("overrides", "constraint"),
+    [
+        ({"temperature": -0.1}, "ck_modelconfiguration_temperature_range"),
+        ({"temperature": 2.1}, "ck_modelconfiguration_temperature_range"),
+        ({"context_window_tokens": 0}, "ck_modelconfiguration_context_window_positive"),
+        ({"chat_max_tokens": 32000}, "ck_modelconfiguration_chat_output_fits_context"),
+        (
+            {"structured_max_tokens": 32000},
+            "ck_modelconfiguration_structured_output_fits_context",
+        ),
+    ],
+)
+def test_postgres_rejects_invalid_runtime_parameters(
+    overrides: dict[str, int | float], constraint: str
+) -> None:
+    runtime = model_runtime_parameters(**overrides)
+    with Session(get_engine()) as session:
+        session.add(
+            _model_class()(
+                id=f"invalid-{constraint}",
+                version=99,
+                base_url="https://models.test.invalid/v1",
+                model_name="test-model",
+                api_key_ciphertext="test-ciphertext",
+                api_key_fingerprint="a" * 64,
+                api_key_hint="key-…890",
+                created_by_user_id="local-user",
+                is_active=False,
+                **runtime,
+            )
+        )
+        with pytest.raises(IntegrityError, match=constraint):
+            session.commit()
+        session.rollback()

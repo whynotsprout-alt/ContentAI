@@ -16,7 +16,7 @@ from core.model_config_crypto import ModelConfigurationSecretProtector
 from core.security import authenticate_request
 from db.session import get_engine
 from langchain_core.messages import AIMessage
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, model_runtime_parameters
 from models.chat import (
     AgentExecution,
     AgentInvocation,
@@ -118,6 +118,7 @@ def test_new_executions_snapshot_active_configuration_version() -> None:
                     api_key_hint=protector.hint("second-test-key"),
                     is_active=True,
                     created_by_user_id="local-user",
+                    **model_runtime_parameters(),
                 )
             )
             session.commit()
@@ -154,6 +155,7 @@ def test_runtime_resolves_inactive_execution_snapshot_after_active_switch() -> N
                 api_key_hint=protector.hint("active-v2-key"),
                 is_active=True,
                 created_by_user_id="local-user",
+                **model_runtime_parameters(),
             )
         )
         session.commit()
@@ -226,6 +228,7 @@ def test_background_postprocessing_uses_execution_snapshot(
                 api_key_hint=protector.hint("background-v2-key"),
                 is_active=True,
                 created_by_user_id="local-user",
+                **model_runtime_parameters(),
             )
         )
         session.commit()
@@ -395,6 +398,7 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
                     api_key_hint=protector.hint("worker-v2-key"),
                     is_active=True,
                     created_by_user_id="local-user",
+                    **model_runtime_parameters(),
                 )
             )
             session.commit()
@@ -496,6 +500,7 @@ def test_postprocess_rejects_delivery_and_outbox_configuration_mismatches() -> N
                 api_key_hint=protector.hint("postprocess-v2-key"),
                 is_active=False,
                 created_by_user_id="local-user",
+                **model_runtime_parameters(),
             )
         )
         session.commit()

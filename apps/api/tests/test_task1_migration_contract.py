@@ -233,6 +233,21 @@ def test_tenant_and_execution_lineage_constraints_are_database_enforced():
     assert "model_config_id" in _column_names(inspector, "agentexecution")
     assert "model_config_id" in _column_names(inspector, "executionoutbox")
     assert {"decision", "message_id"} <= _column_names(inspector, "executionresumerequest")
+    assert {
+        "temperature",
+        "context_window_tokens",
+        "chat_max_tokens",
+        "structured_max_tokens",
+    } <= _column_names(inspector, "modelconfiguration")
+    model_configuration_checks = {
+        constraint["name"] for constraint in inspector.get_check_constraints("modelconfiguration")
+    }
+    assert {
+        "ck_modelconfiguration_temperature_range",
+        "ck_modelconfiguration_context_window_positive",
+        "ck_modelconfiguration_chat_output_fits_context",
+        "ck_modelconfiguration_structured_output_fits_context",
+    } <= model_configuration_checks
 
     assert ("id", "user_id") in _unique_column_sets(inspector, "agentprofile")
     assert ("id", "agent_id") in _unique_column_sets(inspector, "agentversion")
