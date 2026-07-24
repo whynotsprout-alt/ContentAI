@@ -53,6 +53,32 @@ describe('quiet product workbench contract', () => {
     expect(productCss).not.toMatch(/linear-gradient|radial-gradient|repeating-linear-gradient/);
   });
 
+  it('uses fallback-first glass only for structural workbench surfaces', async () => {
+    const productCss = await readOptional('../src/styles/product.css');
+
+    expect(productCss).toContain('--product-structure-fallback: rgb(255 255 255 / 0.96)');
+    expect(productCss).toContain('--product-structure-glass: rgb(255 255 255 / 0.84)');
+    expect(productCss).toContain('--product-glass-blur: 18px');
+    expect(productCss).toMatch(
+      /\.workbench-header[\s\S]*background:\s*var\(--product-structure-fallback\)/
+    );
+    expect(productCss).toMatch(
+      /\.session-rail[\s\S]*background:\s*var\(--product-structure-fallback\)/
+    );
+    expect(productCss).toMatch(
+      /\.composer\s*\{[\s\S]*background:\s*var\(--product-structure-fallback\)/
+    );
+    expect(productCss).toMatch(
+      /\.composer-wrap\s*\{[\s\S]*background:\s*transparent;[\s\S]*border-top:\s*0/
+    );
+    expect(productCss).toMatch(
+      /@supports \(\(backdrop-filter: blur\(1px\)\) or \(-webkit-backdrop-filter: blur\(1px\)\)\)[\s\S]*\.workbench-header,[\s\S]*\.session-rail,[\s\S]*\.composer,[\s\S]*\.popover-menu[\s\S]*backdrop-filter:\s*blur\(var\(--product-glass-blur\)\) saturate\(1\.08\)/
+    );
+    expect(productCss).toMatch(
+      /\.message\.assistant \.message-bubble\s*\{[\s\S]*background:\s*transparent;[\s\S]*border:\s*0/
+    );
+  });
+
   it('centers every conversation surface on the viewport only when the desktop has safe space', async () => {
     const productCss = await readOptional('../src/styles/product.css');
     const desktop1024Start = productCss.indexOf('@media (min-width: 1024px) and (max-width: 1279px)');

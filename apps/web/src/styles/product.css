@@ -22,6 +22,9 @@ body[data-surface='product'],
   --product-focus-ring: rgb(46 125 96 / 0.16);
   --product-shadow: rgb(23 26 24 / 0.1);
   --product-shadow-strong: rgb(23 26 24 / 0.12);
+  --product-structure-fallback: rgb(255 255 255 / 0.96);
+  --product-structure-glass: rgb(255 255 255 / 0.84);
+  --product-glass-blur: 18px;
   --product-space-1: 4px;
   --product-space-2: 8px;
   --product-space-3: 12px;
@@ -211,7 +214,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
     max(var(--product-space-3), env(safe-area-inset-right))
     0
     max(var(--product-space-3), env(safe-area-inset-left));
-  background: var(--product-surface);
+  background: var(--product-structure-fallback);
   border-bottom: 1px solid var(--product-border);
 }
 
@@ -368,7 +371,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   width: min(320px, calc(100vw - 24px));
   padding: var(--product-space-2);
   color: var(--product-text);
-  background: var(--product-surface);
+  background: var(--product-structure-fallback);
   border: 1px solid var(--product-border);
   border-radius: var(--product-radius-panel);
   box-shadow: 0 6px 8px var(--product-shadow);
@@ -478,7 +481,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
     max(var(--product-space-3), env(safe-area-inset-left));
   overflow: hidden;
   color: var(--product-text);
-  background: var(--product-surface);
+  background: var(--product-structure-fallback);
   border-right: 1px solid var(--product-border);
   border-radius: 0 var(--product-radius-overlay) var(--product-radius-overlay) 0;
 }
@@ -1254,8 +1257,8 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
     max(var(--product-space-4), env(safe-area-inset-right))
     max(var(--product-space-3), env(safe-area-inset-bottom))
     max(var(--product-space-4), env(safe-area-inset-left));
-  background: var(--product-surface);
-  border-top: 1px solid var(--product-border);
+  background: transparent;
+  border-top: 0;
 }
 
 .composer-wrap > .field-error {
@@ -1274,11 +1277,22 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   gap: var(--product-space-2);
   margin: 0 auto;
   padding: var(--product-space-2);
-  background: var(--product-surface);
+  background: var(--product-structure-fallback);
   border: 1px solid var(--product-border);
   border-radius: var(--product-radius-panel);
-  box-shadow: none;
+  box-shadow: 0 4px 8px var(--product-shadow);
   transition: border-color var(--product-transition);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .workbench-header,
+  .session-rail,
+  .composer,
+  .popover-menu {
+    background: var(--product-structure-glass);
+    backdrop-filter: blur(var(--product-glass-blur)) saturate(1.08);
+    -webkit-backdrop-filter: blur(var(--product-glass-blur)) saturate(1.08);
+  }
 }
 
 .composer:focus-within {
