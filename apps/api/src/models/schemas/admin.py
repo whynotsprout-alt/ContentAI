@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 
 from models.schemas.base import InputSchemaBase, SchemaBase
 from models.schemas.chat import ChatMessageResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 
 class AdminUserUpdate(InputSchemaBase):
@@ -59,6 +66,21 @@ class AdminUsageResponse(SchemaBase):
     items: list[AdminUsageBucket] = Field(default_factory=list)
 
 
+class ModelRuntimeParameters(BaseModel):
+    temperature: float = Field(ge=0, le=2)
+    context_window_tokens: int = Field(gt=0)
+    chat_max_tokens: int = Field(gt=0)
+    structured_max_tokens: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_output_budgets(self) -> Self:
+        if self.chat_max_tokens >= self.context_window_tokens:
+            raise ValueError("chat_max_tokens must be less than context_window_tokens")
+        if self.structured_max_tokens >= self.context_window_tokens:
+            raise ValueError("structured_max_tokens must be less than context_window_tokens")
+        return self
+
+
 class ModelConfigurationResponse(SchemaBase):
     configured: bool
     id: str | None = None
@@ -66,6 +88,10 @@ class ModelConfigurationResponse(SchemaBase):
     provider: str | None = None
     base_url: str | None = None
     model_name: str | None = None
+    temperature: float | None = None
+    context_window_tokens: int | None = None
+    chat_max_tokens: int | None = None
+    structured_max_tokens: int | None = None
     api_key_hint: str | None = None
     validated_at: datetime | None = None
     created_at: datetime | None = None
@@ -91,7 +117,10 @@ class ModelConfigurationProbeRequest(BaseModel):
         return value
 
 
-class ModelConfigurationUpdateRequest(ModelConfigurationProbeRequest):
+class ModelConfigurationUpdateRequest(
+    ModelConfigurationProbeRequest,
+    ModelRuntimeParameters,
+):
     model_name: str = Field(max_length=256)
     expected_version: int = Field(ge=0)
 

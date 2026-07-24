@@ -10,6 +10,7 @@ from models.schemas.admin import (
     ModelConfigurationProbeResponse,
     ModelConfigurationResponse,
     ModelConfigurationUpdateRequest,
+    ModelRuntimeParameters,
     TemporaryPasswordResponse,
 )
 from models.schemas.agent import (
@@ -97,4 +98,5 @@ __all__ = [
     "ModelConfigurationProbeResponse",
     "ModelConfigurationResponse",
     "ModelConfigurationUpdateRequest",
+    "ModelRuntimeParameters",
 ]

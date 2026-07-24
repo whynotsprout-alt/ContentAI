@@ -82,6 +82,10 @@ def _model_configuration_response(active) -> ModelConfigurationResponse:
         provider=configuration.provider,
         base_url=configuration.base_url,
         model_name=configuration.model_name,
+        temperature=configuration.temperature,
+        context_window_tokens=configuration.context_window_tokens,
+        chat_max_tokens=configuration.chat_max_tokens,
+        structured_max_tokens=configuration.structured_max_tokens,
         api_key_hint=configuration.api_key_hint,
         validated_at=configuration.validated_at,
         created_at=configuration.created_at,
@@ -154,6 +158,10 @@ def update_model_configuration(
             base_url=payload.base_url,
             api_key=payload.api_key.get_secret_value() if payload.api_key is not None else None,
             model_name=payload.model_name,
+            temperature=payload.temperature,
+            context_window_tokens=payload.context_window_tokens,
+            chat_max_tokens=payload.chat_max_tokens,
+            structured_max_tokens=payload.structured_max_tokens,
             expected_version=payload.expected_version,
         )
     except (

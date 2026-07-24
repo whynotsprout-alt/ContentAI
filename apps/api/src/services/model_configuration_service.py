@@ -38,6 +38,10 @@ class RuntimeModelConfiguration:
     base_url: str
     model_name: str
     api_key: SecretStr
+    temperature: float
+    context_window_tokens: int
+    chat_max_tokens: int
+    structured_max_tokens: int
 
 
 class ModelConfigurationService:
@@ -97,6 +101,10 @@ class ModelConfigurationService:
         base_url: str,
         api_key: str | None,
         model_name: str,
+        temperature: float,
+        context_window_tokens: int,
+        chat_max_tokens: int,
+        structured_max_tokens: int,
         expected_version: int,
     ) -> ModelConfiguration:
         active = self._repository.get_active(session)
@@ -130,6 +138,10 @@ class ModelConfigurationService:
                 request_id=request_id,
                 base_url=result.base_url,
                 model_name=model_name,
+                temperature=temperature,
+                context_window_tokens=context_window_tokens,
+                chat_max_tokens=chat_max_tokens,
+                structured_max_tokens=structured_max_tokens,
                 api_key_ciphertext=ciphertext,
                 api_key_fingerprint=fingerprint,
                 api_key_hint=hint,
@@ -161,4 +173,8 @@ class ModelConfigurationService:
             base_url=configuration.base_url,
             model_name=configuration.model_name,
             api_key=SecretStr(self._protector.decrypt(configuration.api_key_ciphertext)),
+            temperature=configuration.temperature,
+            context_window_tokens=configuration.context_window_tokens,
+            chat_max_tokens=configuration.chat_max_tokens,
+            structured_max_tokens=configuration.structured_max_tokens,
         )

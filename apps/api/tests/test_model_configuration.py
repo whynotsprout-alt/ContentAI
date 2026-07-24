@@ -18,7 +18,6 @@ from sqlalchemy import func, inspect, text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlmodel import Session, select
 
-
 RUNTIME_COLUMNS = {
     "temperature",
     "context_window_tokens",
@@ -239,6 +238,7 @@ def test_model_configuration_persistence_failure_rolls_back_and_hides_parameters
             base_url="https://models.example.test/v1",
             api_key="test-only-key",
             model_name="test-model",
+            **model_runtime_parameters(),
             expected_version=0,
         )
 
