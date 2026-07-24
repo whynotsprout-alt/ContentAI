@@ -16,6 +16,8 @@ from sqlmodel import Session, select
 BOOTSTRAP_ADMIN_CONFLICT_MESSAGE = (
     "Bootstrap administrator conflicts with an existing account."
 )
+BOOTSTRAP_ADMIN_EMAIL_UNIQUE_CONSTRAINT = "ux_appuser_email_normalized"
+UNIQUE_VIOLATION_SQLSTATE = "23505"
 
 
 class AuthServiceError(RuntimeError):
@@ -95,8 +97,10 @@ class AuthService:
         session.add(user)
         try:
             session.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             session.rollback()
+            if not self._is_bootstrap_email_unique_violation(exc):
+                raise
             existing = self.get_user_by_email(session, email)
             if existing is None:
                 raise BootstrapAdminConflictError() from None
@@ -113,6 +117,21 @@ class AuthService:
             or user.email_verified_at is None
         ):
             raise BootstrapAdminConflictError()
+
+    @staticmethod
+    def _is_bootstrap_email_unique_violation(exc: IntegrityError) -> bool:
+        original = exc.orig
+        sqlstate = getattr(original, "sqlstate", None) or getattr(
+            original,
+            "pgcode",
+            None,
+        )
+        diagnostics = getattr(original, "diag", None)
+        constraint_name = getattr(diagnostics, "constraint_name", None)
+        return (
+            sqlstate == UNIQUE_VIOLATION_SQLSTATE
+            and constraint_name == BOOTSTRAP_ADMIN_EMAIL_UNIQUE_CONSTRAINT
+        )
 
     def login(
         self,

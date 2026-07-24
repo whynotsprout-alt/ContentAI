@@ -240,7 +240,13 @@ def test_test_env_requires_test_database():
         )
 
 
-def test_production_requires_auth_frontend_origins_and_traffic_relay_key():
+def test_production_requires_auth_frontend_origins_and_traffic_relay_key(monkeypatch):
+    for name in (
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
+        "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     with pytest.raises(ValidationError):
         Settings(
             _env_file=None,

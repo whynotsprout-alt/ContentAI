@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, local
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -28,6 +29,15 @@ DEV_DATABASE = {
 TEST_DATABASE = {
     "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
 }
+BOOTSTRAP_ADMIN_ENV_VARS = (
+    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
+    "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",
+)
+
+
+def _clear_bootstrap_admin_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in BOOTSTRAP_ADMIN_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def auth_app():
@@ -315,7 +325,11 @@ def test_concurrent_bootstrap_admin_calls_converge_without_secret_leakage(
 
 
 @pytest.mark.parametrize("env", ["development", "production"])
-def test_runtime_requires_bootstrap_admin_credentials(env: str):
+def test_runtime_requires_bootstrap_admin_credentials(
+    env: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_bootstrap_admin_environment(monkeypatch)
     settings_kwargs: dict[str, object] = {
         "_env_file": None,
         "env": env,
@@ -365,6 +379,35 @@ def test_runtime_rejects_invalid_bootstrap_admin_credentials(auth: dict[str, obj
     assert bootstrap_password not in str(caught.value)
 
 
+def test_runtime_validation_error_redacts_bootstrap_password_from_all_representations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_bootstrap_admin_environment(monkeypatch)
+    secret_marker = "BOOTSTRAP_PASSWORD_REVIEW_SECRET_MARKER_"
+    invalid_password = secret_marker + ("x" * 128)
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            _env_file=None,
+            env="development",
+            database=DEV_DATABASE,
+            auth={
+                "bootstrap_admin_email": "admin@example.com",
+                "bootstrap_admin_password": invalid_password,
+            },
+        )
+
+    errors = caught.value.errors()
+    assert errors[0]["loc"] == ()
+    assert errors[0]["type"] == "value_error"
+    assert "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD" in errors[0]["msg"]
+    assert errors[0]["input"] is None
+    assert "ctx" not in errors[0]
+    assert secret_marker not in str(caught.value)
+    assert secret_marker not in repr(errors)
+    assert secret_marker not in caught.value.json()
+
+
 def test_runtime_normalizes_bootstrap_email_without_trimming_password():
     bootstrap_password = "  valid password 123  "
 
@@ -385,7 +428,10 @@ def test_runtime_normalizes_bootstrap_email_without_trimming_password():
     )
 
 
-def test_test_environment_allows_omitting_bootstrap_admin_credentials():
+def test_test_environment_allows_omitting_bootstrap_admin_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_bootstrap_admin_environment(monkeypatch)
     settings = Settings(
         _env_file=None,
         env="test",
@@ -397,7 +443,10 @@ def test_test_environment_allows_omitting_bootstrap_admin_credentials():
     assert settings.auth.bootstrap_admin_password.get_secret_value() == ""
 
 
-def test_bootstrap_admin_requires_email_and_password_together():
+def test_bootstrap_admin_requires_email_and_password_together(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_bootstrap_admin_environment(monkeypatch)
     with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN_PASSWORD"):
         Settings(
             _env_file=None,
@@ -405,6 +454,61 @@ def test_bootstrap_admin_requires_email_and_password_together():
             database=TEST_DATABASE,
             auth={"bootstrap_admin_email": "bootstrap-admin@example.com"},
         )
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "constraint_name"),
+    [
+        ("23514", "ck_appuser_unrelated"),
+        ("23505", "ux_appuser_other_unique"),
+    ],
+)
+def test_bootstrap_propagates_non_email_unique_integrity_errors_after_rollback(
+    sqlstate: str,
+    constraint_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = Settings(
+        env="test",
+        database=TEST_DATABASE,
+        auth={
+            "bootstrap_admin_email": "integrity-error@example.com",
+            "bootstrap_admin_password": "integrity error password",
+        },
+    )
+    auth_service = AuthService(settings)
+
+    class InjectedDatabaseError(Exception):
+        def __init__(self) -> None:
+            super().__init__("injected database failure")
+            self.sqlstate = sqlstate
+            self.pgcode = sqlstate
+            self.diag = SimpleNamespace(constraint_name=constraint_name)
+
+    injected = IntegrityError(
+        "INSERT INTO appuser",
+        {},
+        InjectedDatabaseError(),
+    )
+    with Session(get_engine(settings)) as session:
+        original_commit = session.commit
+
+        def raise_injected_integrity_error() -> None:
+            raise injected
+
+        monkeypatch.setattr(session, "commit", raise_injected_integrity_error)
+
+        with pytest.raises(IntegrityError) as caught:
+            auth_service.bootstrap_default_admin(session)
+
+        assert caught.value is injected
+        monkeypatch.setattr(session, "commit", original_commit)
+        users = session.exec(
+            select(AppUser).where(
+                AppUser.email_normalized == "integrity-error@example.com"
+            )
+        ).all()
+        assert users == []
 
 
 def test_admin_user_listing_usage_and_disable():

@@ -15,6 +15,7 @@ from core.config.redis import RedisSettings
 from core.config.search import SearchSettings
 from core.config.server import ServerSettings
 from pydantic import EmailStr, Field, SecretStr, TypeAdapter, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 LOCAL_FRONTEND_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
@@ -39,7 +40,29 @@ class Settings(BaseSettings):
     )
 
     def __init__(self, **values) -> None:
-        super().__init__(**values)
+        try:
+            super().__init__(**values)
+        except ValidationError as exc:
+            line_errors = [
+                {
+                    "type": PydanticCustomError(
+                        str(error["type"]),
+                        str(error["msg"]),
+                    ),
+                    "loc": error["loc"],
+                    "input": None,
+                }
+                for error in exc.errors(
+                    include_url=False,
+                    include_context=False,
+                    include_input=False,
+                )
+            ]
+            raise ValidationError.from_exception_data(
+                exc.title,
+                line_errors,
+                hide_input=True,
+            ) from None
 
     env: Env = Env.development
     server: ServerSettings = Field(default_factory=ServerSettings)
