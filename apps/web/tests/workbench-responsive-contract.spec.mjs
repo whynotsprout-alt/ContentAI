@@ -93,6 +93,9 @@ describe('quiet product workbench contract', () => {
     expect(productCss).toMatch(
       /@media \(min-width: 1440px\)[\s\S]*--conversation-inline-shift:\s*calc\(var\(--session-rail-width\) \* -0\.5\)/
     );
+    expect(productCss).toMatch(
+      /\.message\.user\s*\{[\s\S]*margin-right:\s*max\(0px, calc\(\(100% - var\(--conversation-measure\)\) \/ 2\)\)/
+    );
     expect(desktop1024Start).toBeGreaterThan(-1);
     expect(desktop1280Start).toBeGreaterThan(desktop1024Start);
     expect(desktop1440Start).toBeGreaterThan(desktop1280Start);

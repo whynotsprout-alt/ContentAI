@@ -851,7 +851,7 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
 
 .message.user {
   width: min(720px, 88%);
-  margin-right: 0;
+  margin-right: max(0px, calc((100% - var(--conversation-measure)) / 2));
 }
 
 .message.user:has(+ .message.assistant) {
