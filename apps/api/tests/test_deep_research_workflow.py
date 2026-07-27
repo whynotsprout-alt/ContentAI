@@ -5,6 +5,7 @@ from typing import Any
 import agent.workflows.deep_research as deep_research
 import httpx
 import pytest
+from langchain_core.messages import HumanMessage
 
 
 class FakeTool:
@@ -414,6 +415,7 @@ def test_schema_invalid_research_output_gets_one_constrained_evidence_repair(mon
 
     assert result.package_data["core_conclusion"]["text"] == "Conclusion after retry"
     assert len(model.calls) == 2
+    assert isinstance(model.calls[1][0][-1], HumanMessage)
     repair_prompt = model.calls[1][0][-1].content
     assert "previous structured response failed evidence validation" in repair_prompt
     assert known_source in repair_prompt

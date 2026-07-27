@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.config import Settings, get_settings
+from database_helpers import get_test_database_url
 from db.session import build_engine, get_engine
 from model_config_helpers import (
     DEFAULT_MODEL_CONFIG_ID,
@@ -47,7 +48,11 @@ def _model_class():
 def test_model_configuration_contains_required_runtime_snapshot() -> None:
     table = _model_class().__table__
     assert RUNTIME_COLUMNS <= set(table.columns.keys())
-    assert all(not table.columns[name].nullable for name in RUNTIME_COLUMNS)
+    assert table.columns["temperature"].nullable
+    assert all(
+        not table.columns[name].nullable
+        for name in RUNTIME_COLUMNS - {"temperature"}
+    )
 
 
 def _development_settings(**values: object) -> Settings:
@@ -131,9 +136,7 @@ def test_test_settings_accept_explicit_deterministic_model_config_key() -> None:
     settings = Settings(
         _env_file=None,
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database={"url": get_test_database_url()},
         **{"CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": _fernet_key(4)},
     )
 
@@ -317,7 +320,11 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
         "created_by_user_id",
     } == set(columns)
     assert not columns["version"]["nullable"]
-    assert all(not columns[name]["nullable"] for name in RUNTIME_COLUMNS)
+    assert columns["temperature"]["nullable"]
+    assert all(
+        not columns[name]["nullable"]
+        for name in RUNTIME_COLUMNS - {"temperature"}
+    )
     assert not columns["api_key_ciphertext"]["nullable"]
     assert not columns["created_by_user_id"]["nullable"]
 

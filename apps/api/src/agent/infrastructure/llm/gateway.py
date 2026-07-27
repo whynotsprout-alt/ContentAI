@@ -18,7 +18,7 @@ class ModelGateway:
         base_url: str,
         api_key: SecretStr,
         model_name: str,
-        temperature: float,
+        temperature: float | None,
         context_window_tokens: int,
         chat_max_tokens: int,
         structured_max_tokens: int,
@@ -73,7 +73,7 @@ class ModelGateway:
 
         return self.client.build_structured_output_model(
             model=self.model_name,
-            temperature=0,
+            temperature=self.temperature,
             max_tokens=self.structured_max_tokens,
             schema=HotspotFilterResult,
         )
@@ -83,16 +83,27 @@ class ModelGateway:
 
         return self.client.build_structured_output_model(
             model=self.model_name,
-            temperature=0,
+            temperature=self.temperature,
             max_tokens=self.structured_max_tokens,
             schema=ResearchFinalSelection,
+            disable_streaming=True,
+        )
+
+    def build_research_presentation_model(self) -> Any:
+        from agent.workflows.final_evidence import ResearchFinalPresentation
+
+        return self.client.build_structured_output_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.structured_max_tokens,
+            schema=ResearchFinalPresentation,
             disable_streaming=True,
         )
 
     def build_token_counter(self, *, tools: list[Any] | None = None) -> TokenCounter:
         model = self.client.build_chat_model(
             model=self.model_name,
-            temperature=0,
+            temperature=self.temperature,
             max_tokens=1,
             timeout_seconds=5.0,
             max_retries=0,
@@ -115,7 +126,7 @@ class ModelGateway:
     ) -> Any:
         return self.client.build_structured_output_model(
             model=self.model_name,
-            temperature=0,
+            temperature=self.temperature,
             max_tokens=self.structured_max_tokens,
             schema=schema,
             timeout_seconds=timeout_seconds,

@@ -27,6 +27,11 @@ def prepare_topic_research(topic: str) -> dict[str, object]:
             "tool": "prepare_topic_research",
         }
 
+    _emit_research_progress(
+        runtime,
+        stage="searching_sources",
+        label="正在并行检索 Metaso 与 Anspire，并整理可引用证据",
+    )
     try:
         result = run_deep_research_package_workflow(
             topic=topic,
@@ -40,6 +45,11 @@ def prepare_topic_research(topic: str) -> dict[str, object]:
             "tool": "prepare_topic_research",
         }
     runtime.ensure_not_cancelled()
+    _emit_research_progress(
+        runtime,
+        stage="validating_evidence",
+        label="正在校验证据引用并保存资料包",
+    )
     research_package = ResearchPackageRepository.persist(
         session_id=runtime.conversation_id,
         execution_id=runtime.execution_id,
@@ -59,6 +69,23 @@ def prepare_topic_research(topic: str) -> dict[str, object]:
         "research_topic_hash": topic_digest(topic),
         "supported_evidence": supported_evidence,
     }
+
+
+def _emit_research_progress(runtime: object, *, stage: str, label: str) -> None:
+    writer = getattr(runtime, "event_writer", None)
+    emit = getattr(writer, "emit", None)
+    if not callable(emit):
+        return
+    emit(
+        "tool_progress",
+        {
+            "tool_name": "prepare_topic_research",
+            "status": "running",
+            "progress": {"stage": stage, "label": label},
+        },
+    )
+
+
 prepare_topic_research.metadata = {
     "timeout_seconds": 180.0,
     "execution_mode": "cooperative",

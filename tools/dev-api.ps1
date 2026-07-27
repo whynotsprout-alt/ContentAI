@@ -19,6 +19,16 @@ if (Test-Path $EnvFile) {
     }
   }
 }
+
+$PostgresPort = if ($DotEnv.ContainsKey("POSTGRES_PORT")) { $DotEnv["POSTGRES_PORT"] } else { "5432" }
+$RedisPort = if ($DotEnv.ContainsKey("REDIS_PORT")) { $DotEnv["REDIS_PORT"] } else { "6379" }
+if ($env:CONTENTAI_DATABASE__URL) {
+  $env:CONTENTAI_DATABASE__URL = $env:CONTENTAI_DATABASE__URL -replace "@postgres(?::\d+)?(?=/)", "@127.0.0.1:$PostgresPort"
+}
+if ($env:CONTENTAI_REDIS__URL) {
+  $env:CONTENTAI_REDIS__URL = $env:CONTENTAI_REDIS__URL -replace "://redis(?::\d+)?(?=/)", "://127.0.0.1:$RedisPort"
+}
+
 $Port = if ($DotEnv.ContainsKey("CONTENTAI_API_PORT")) { $DotEnv["CONTENTAI_API_PORT"] } else { "8000" }
 $Reload = if ($DotEnv.ContainsKey("CONTENTAI_API_RELOAD")) { $DotEnv["CONTENTAI_API_RELOAD"] } else { "false" }
 if ($Reload -eq "true") {

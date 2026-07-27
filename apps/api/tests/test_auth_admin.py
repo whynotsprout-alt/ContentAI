@@ -10,6 +10,7 @@ import pytest
 from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
+from database_helpers import get_test_database_url
 from db.session import get_engine
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -27,7 +28,7 @@ DEV_DATABASE = {
     "url": "postgresql+psycopg://postgres:postgres@db/contentai",
 }
 TEST_DATABASE = {
-    "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
+    "url": get_test_database_url(),
 }
 BOOTSTRAP_ADMIN_ENV_VARS = (
     "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
@@ -114,7 +115,6 @@ def _production_settings(**auth_overrides: object) -> Settings:
         env="production",
         server={"frontend_origins": "https://content.example.com"},
         database={"url": "postgresql+psycopg://postgres:postgres@db/contentai"},
-        search={"traffic_relay_api_key": "test-relay-key"},
         auth={
             "bootstrap_admin_email": "admin@example.com",
             "bootstrap_admin_password": "bootstrap password 123",
@@ -338,7 +338,6 @@ def test_runtime_requires_bootstrap_admin_credentials(
     }
     if env == "production":
         settings_kwargs["server"] = {"frontend_origins": "https://content.example.com"}
-        settings_kwargs["search"] = {"traffic_relay_api_key": "test-relay-key"}
 
     with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN"):
         Settings(**settings_kwargs)
@@ -564,9 +563,7 @@ def test_retired_bootstrap_admin_allowlist_is_rejected_explicitly():
     with pytest.raises(ValidationError, match="bootstrap_admin_emails"):
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": get_test_database_url()},
             auth={"bootstrap_admin_emails": ["allowlisted@example.com"]},
         )
 

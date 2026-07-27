@@ -19,23 +19,19 @@ describe('frontend plan contracts', () => {
     expect(source).not.toContain("defaultPrompt");
   });
 
-  it('keeps tool activity transient instead of defining workflow stages', async () => {
-    const [app, activity] = await Promise.all([
+  it('removes the global run activity while keeping in-conversation generation feedback', async () => {
+    const [app, chat, activity, store] = await Promise.all([
       read('../src/App.vue'),
-      read('../src/components/RunActivityBar.vue')
+      read('../src/components/ChatCanvas.vue'),
+      readOptional('../src/components/RunActivityBar.vue'),
+      read('../src/stores/workbench.ts')
     ]);
-    expect(app).not.toMatch(/pinnedSessionIds|archivedSessionIds|workflowStages/);
-    expect(activity).toContain("tool_start");
-    expect(activity).not.toMatch(/research_package|draft_version|workflow_stage/);
-  });
-
-  it('keeps the primary status copy but hides activity details', async () => {
-    const activity = await read('../src/components/RunActivityBar.vue');
-    expect(activity).toContain('progressLabel');
-    expect(activity).not.toContain('activity-detail');
-    expect(activity).not.toContain('source-health');
-    expect(activity).not.toContain('source_health');
-    expect(activity).not.toContain('candidate_count');
+    expect(app).not.toContain('RunActivityBar');
+    expect(activity).toBe('');
+    expect(store).not.toContain("addEventListener('tools'");
+    expect(store).not.toMatch(/tool_start|tool_progress|tool_end/);
+    expect(chat).toContain('class="assistant-progress"');
+    expect(chat).toContain("message.assistant_state === 'pending'");
   });
 
   it('falls back to three-second run status polling for degraded SSE', async () => {

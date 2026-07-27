@@ -262,12 +262,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"CONTENTAI_SEARCH__{name} must be between 1 and {maximum}."
                 )
-        if self.env == Env.production:
-            if not self.search.traffic_relay_api_key.get_secret_value().strip():
-                raise ValueError(
-                    "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY is required in production."
-                )
-
     def _validate_auth(self) -> None:
         if self.auth.session_days < 1:
             raise ValueError("CONTENTAI_AUTH__SESSION_DAYS must be at least 1.")

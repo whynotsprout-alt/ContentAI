@@ -169,7 +169,7 @@ def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:
         assert "secret" not in audit.error
 
 
-def test_tool_execution_emits_start_and_end_progress_events() -> None:
+def test_tool_execution_does_not_emit_ui_progress_events() -> None:
     execution_id = "execution-tool-events"
     _seed_execution(execution_id)
     writer = RecordingEventWriter()
@@ -187,9 +187,7 @@ def test_tool_execution_emits_start_and_end_progress_events() -> None:
         result = execute_tool_call(request, lambda _request: {"ok": True})
 
     assert result == {"ok": True}
-    assert [event for event, _ in writer.events] == ["tool_start", "tool_end"]
-    assert writer.events[0][1]["tool_name"] == "fetch_hotspots"
-    assert writer.events[1][1]["status"] == "completed"
+    assert writer.events == []
 
 
 def test_tool_timeout_returns_structured_error_and_marks_audit_failed() -> None:
@@ -551,7 +549,7 @@ def test_side_effect_timeout_does_not_wait_for_worker_row_lock() -> None:
         assert audit.error == ""
 
 
-def test_side_effect_dispatch_emits_one_start_and_terminal_event() -> None:
+def test_side_effect_dispatch_does_not_emit_ui_progress_events() -> None:
     execution_id = "execution-side-effect-events"
     _seed_execution(execution_id)
     writer = RecordingEventWriter()
@@ -585,8 +583,7 @@ def test_side_effect_dispatch_emits_one_start_and_terminal_event() -> None:
     with tool_runtime_scope(runtime):
         execute_tool_call(request, lambda _request: None)
 
-    assert [name for name, _payload in writer.events] == ["tool_start", "tool_end"]
-    assert writer.events[-1][1]["status"] == "completed"
+    assert writer.events == []
 
 
 def test_side_effect_timeout_bounds_blocking_dispatcher() -> None:

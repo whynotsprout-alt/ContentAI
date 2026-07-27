@@ -139,7 +139,6 @@ describe('admin model configuration', () => {
     expect(configuration).toContain('configured: false;');
 
     for (const field of [
-      'temperature',
       'context_window_tokens',
       'chat_max_tokens',
       'structured_max_tokens'
@@ -149,6 +148,9 @@ describe('admin model configuration', () => {
       expect(updatePayload).toMatch(new RegExp(`\\n\\s*${field}: number;`));
       expect(probePayload).not.toContain(field);
     }
+    expect(configuration).toMatch(/\n\s*temperature: number \| null;/);
+    expect(updatePayload).toMatch(/\n\s*temperature: number \| null;/);
+    expect(probePayload).not.toContain('temperature');
     for (const field of [
       'temperature',
       'contextWindowTokens',
@@ -198,9 +200,50 @@ describe('admin model configuration', () => {
 
     try {
       expect(state.temperature).toBe(0.2);
+      expect(state.temperatureMode).toBe('auto');
+      expect(state.selectedTemperature).toBeNull();
       expect(state.contextWindowTokens).toBe(32_000);
       expect(state.chatMaxTokens).toBe(8_000);
       expect(state.structuredMaxTokens).toBe(8_000);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it('submits null temperature when the model decides automatically', async () => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel({ temperature: null }));
+    const update = vi.spyOn(adminApi, 'updateModelConfig').mockResolvedValue(configuredModel({
+      version: 2,
+      temperature: null
+    }));
+    const { app, state } = await mountAdminModels();
+
+    try {
+      expect(state.temperatureMode).toBe('auto');
+      expect(state.selectedTemperature).toBeNull();
+      await state.saveConfiguration();
+
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({
+        temperature: null
+      }));
+      expect(state.active.temperature).toBeNull();
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it('restores the last custom temperature after switching through auto mode', async () => {
+    const { adminApi } = await import('../src/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(configuredModel({ temperature: 0.7 }));
+    const { app, state } = await mountAdminModels();
+
+    try {
+      expect(state.temperatureMode).toBe('custom');
+      state.setTemperatureMode('auto');
+      expect(state.selectedTemperature).toBeNull();
+      state.setTemperatureMode('custom');
+      expect(state.selectedTemperature).toBe(0.7);
     } finally {
       app.unmount();
     }
@@ -266,6 +309,7 @@ describe('admin model configuration', () => {
     const { app, state } = await mountAdminModels();
 
     try {
+      state.setTemperatureMode('custom');
       state.temperature = 0.65;
       state.contextWindowTokens = 200_000;
       state.chatMaxTokens = 12_000;
@@ -431,6 +475,8 @@ describe('admin model configuration', () => {
     expect(models).toContain('model_validated');
     expect(models).toContain('aria-live="polite"');
     expect(models).toContain(':aria-busy="loading || probing || saving"');
+    expect(models).toContain('自动（由模型决定）');
+    expect(models).toContain('id="model-temperature-mode"');
     expect(models).toContain('probeGuard.isCurrent');
     expect(models).toContain('saveGuard.isCurrent');
   });

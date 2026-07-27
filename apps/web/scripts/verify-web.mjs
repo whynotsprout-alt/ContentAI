@@ -1408,12 +1408,18 @@ async function runDesktopAcceptance(browser) {
 
     const modelBaseUrl = page.getByRole('textbox', { name: /Base URL/ });
     const modelName = page.getByRole('combobox', { name: '模型 ID' });
+    const modelTemperatureMode = page.getByRole('combobox', { name: 'Temperature 控制方式', exact: true });
     const modelTemperature = page.getByRole('spinbutton', { name: 'Temperature', exact: true });
     const modelContextWindow = page.getByRole('spinbutton', { name: '上下文窗口（tokens）', exact: true });
     const modelChatMax = page.getByRole('spinbutton', { name: '对话最大输出（tokens）', exact: true });
     const modelStructuredMax = page.getByRole('spinbutton', { name: '结构化输出（tokens）', exact: true });
     await modelBaseUrl.fill('https://draft.example.test/v1');
     await modelName.fill('custom-model-draft');
+    assert.equal(await modelTemperatureMode.inputValue(), 'custom', '已保存数值应进入自定义 Temperature 模式');
+    await modelTemperatureMode.selectOption('auto');
+    assert.equal(await modelTemperature.isDisabled(), true, '自动模式应禁用自定义 Temperature 输入');
+    await modelTemperatureMode.selectOption('custom');
+    assert.equal(await modelTemperature.isEnabled(), true, '切回自定义模式应恢复 Temperature 输入');
     await modelTemperature.fill('0.7');
     await modelContextWindow.fill('200000');
     await modelChatMax.fill('12000');

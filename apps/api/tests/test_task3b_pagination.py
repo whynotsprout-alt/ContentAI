@@ -8,6 +8,7 @@ from time import perf_counter
 from api.app import create_app
 from client import ApiClient as TestClient
 from core.config import Settings
+from database_helpers import get_test_database_url
 from db.session import get_engine
 from models.agent import AgentProfile, AgentVersion
 from models.chat import ChatMessage, ChatSession
@@ -25,9 +26,7 @@ from sqlmodel import Session
 def _settings() -> Settings:
     return Settings(
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database={"url": get_test_database_url()},
         auth={
             "bootstrap_admin_email": "admin@example.com",
             "bootstrap_admin_password": "admin password 123",

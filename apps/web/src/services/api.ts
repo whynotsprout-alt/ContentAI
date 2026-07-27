@@ -459,7 +459,7 @@ interface AdminModelConfigurationMetadata {
 export type AdminModelConfiguration = AdminModelConfigurationMetadata & (
   | {
     configured: true;
-    temperature: number;
+    temperature: number | null;
     context_window_tokens: number;
     chat_max_tokens: number;
     structured_max_tokens: number;
@@ -490,7 +490,7 @@ export interface AdminModelProbePayload {
 export interface AdminModelUpdatePayload extends AdminModelProbePayload {
   model_name: string;
   expected_version: number;
-  temperature: number;
+  temperature: number | null;
   context_window_tokens: number;
   chat_max_tokens: number;
   structured_max_tokens: number;

@@ -55,7 +55,7 @@ def upgrade() -> None:
     sa.Column('provider', sa.String(length=32), nullable=False),
     sa.Column('base_url', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('model_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('temperature', sa.Float(), nullable=False),
+    sa.Column('temperature', sa.Float(), nullable=True),
     sa.Column('context_window_tokens', sa.Integer(), nullable=False),
     sa.Column('chat_max_tokens', sa.Integer(), nullable=False),
     sa.Column('structured_max_tokens', sa.Integer(), nullable=False),

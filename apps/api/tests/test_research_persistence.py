@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from models.agent import AgentProfile, AgentVersion
 from models.chat import AgentExecution, AgentInvocation, ChatSession
+from models.enums import RunStatus
 from models.research import ResearchPackage
 from sqlmodel import Session, select
 
@@ -240,6 +241,38 @@ def test_research_package_load_requires_package_execution_and_topic_hash_match()
     assert not hasattr(ResearchPackageRepository, "latest_for_session")
 
 
+def test_latest_completed_research_package_is_available_to_the_next_turn():
+    chat_id, execution_id = seed_execution()
+    package = ResearchPackageRepository.persist(
+        session_id=chat_id,
+        execution_id=execution_id,
+        agent_version_id="default-agent-v1",
+        topic="跨轮研究主题",
+        package_data={"core_conclusion": {"text": "跨轮完整结论", "source_ids": ["S1"]}},
+        sources=[{"source_id": "S1", "url": "https://example.com/cross-turn"}],
+        provider_diagnostics={},
+        rendered_content="rendered",
+        valid_source_count=1,
+        isolated_source_count=0,
+        removed_unknown_reference_count=0,
+    )
+
+    with Session(get_engine()) as session:
+        execution = session.get(AgentExecution, execution_id)
+        assert execution is not None
+        execution.status = RunStatus.completed
+        session.add(execution)
+        session.commit()
+
+        loaded = ResearchPackageRepository.latest_completed_for_session(
+            session,
+            session_id=chat_id,
+            agent_version_id="default-agent-v1",
+        )
+
+    assert loaded is not None and loaded.id == package.id
+
+
 def test_execution_research_loader_uses_only_checkpointed_package_identity(monkeypatch):
     graph = SimpleNamespace(
         get_state=lambda _config: SimpleNamespace(
@@ -292,16 +325,18 @@ def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelo
     from agent.workflows.final_evidence import (
         build_research_final_proof,
         build_supported_research_evidence,
-        render_deterministic_research_answer,
     )
 
     package = _durable_final_package()
     evidence = build_supported_research_evidence(package)
     claim_id = evidence["claims"][0]["claim_id"]
+    readable_answer = _readable_research_answer(evidence)
     deterministic_message = AIMessage(
-        content=render_deterministic_research_answer(evidence, [claim_id]),
+        content=readable_answer,
         additional_kwargs={
-            "research_backed_final_proof": build_research_final_proof(evidence, [claim_id])
+            "research_backed_final_proof": build_research_final_proof(
+                evidence, [claim_id], readable_answer
+            )
         },
     )
 
@@ -345,17 +380,26 @@ def _research_final_proof_message(package: SimpleNamespace) -> AIMessage:
     from agent.workflows.final_evidence import (
         build_research_final_proof,
         build_supported_research_evidence,
-        render_deterministic_research_answer,
     )
 
     evidence = build_supported_research_evidence(package)
     claim_id = evidence["claims"][0]["claim_id"]
+    answer = _readable_research_answer(evidence)
     return AIMessage(
-        content=render_deterministic_research_answer(evidence, [claim_id]),
+        content=answer,
         additional_kwargs={
-            "research_backed_final_proof": build_research_final_proof(evidence, [claim_id])
+            "research_backed_final_proof": build_research_final_proof(evidence, [claim_id], answer)
         },
     )
+
+
+def _readable_research_answer(evidence: dict[str, object]) -> str:
+    sources = evidence["sources"]
+    assert isinstance(sources, list)
+    links = "\n".join(
+        f"[可靠来源 {index}]({source['url']})" for index, source in enumerate(sources, start=1)
+    )
+    return f"## 核心结论\n\n这是基于已核验资料整理的说明。\n\n## 来源\n\n{links}"
 
 
 def test_runner_final_proof_scope_ignores_assistants_before_current_research_boundary():

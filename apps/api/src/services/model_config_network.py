@@ -182,6 +182,11 @@ class ModelProbeFailed(ModelProbeError):
     status_code = 502
 
 
+class ModelCapabilitiesUnsupported(ModelProbeError):
+    code = "MODEL_CAPABILITIES_UNSUPPORTED"
+    status_code = 422
+
+
 @dataclass(frozen=True)
 class ModelProbeResult:
     base_url: str
@@ -514,20 +519,78 @@ class OpenAICompatibleProbe:
         models, truncated = _parse_models(models_payload)
         model_validated = False
         if model_name:
-            completion_payload = self._request_json(
+            tool_completion_payload = self._request_json(
                 "POST",
                 f"{normalized_url}/chat/completions",
                 headers=headers,
                 json_payload={
                     "model": model_name,
-                    "messages": [{"role": "user", "content": "ping"}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Call contentai_probe with value set to ok.",
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "contentai_probe",
+                                "description": "Verify native OpenAI tool calling.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"value": {"type": "string", "enum": ["ok"]}},
+                                    "required": ["value"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "contentai_probe"},
+                    },
                     "stream": False,
-                    "max_tokens": 1,
+                    "max_tokens": 32,
                 },
                 base_url=normalized_url,
                 model_request=True,
+                capability_request=True,
             )
-            _validate_completion(completion_payload)
+            _validate_tool_call_completion(tool_completion_payload)
+            structured_completion_payload = self._request_json(
+                "POST",
+                f"{normalized_url}/chat/completions",
+                headers=headers,
+                json_payload={
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Return a JSON object with ok set to true.",
+                        }
+                    ],
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "contentai_probe",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {"ok": {"type": "boolean", "const": True}},
+                                "required": ["ok"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "stream": False,
+                    "max_tokens": 16,
+                },
+                base_url=normalized_url,
+                model_request=True,
+                capability_request=True,
+            )
+            _validate_structured_completion(structured_completion_payload)
             model_validated = True
 
         latency_ms = min(MAX_PROBE_LATENCY_MS, max(0, round((monotonic() - started_at) * 1000)))
@@ -547,6 +610,7 @@ class OpenAICompatibleProbe:
         headers: dict[str, str],
         base_url: str,
         model_request: bool,
+        capability_request: bool = False,
         json_payload: dict[str, object] | None = None,
     ) -> object:
         pinned_url, host_header, sni_hostname = _pinned_request_target(
@@ -583,6 +647,10 @@ class OpenAICompatibleProbe:
                         )
                     if model_request and status_code == 404:
                         raise ModelNotFound("The requested model was not found.")
+                    if capability_request and status_code in {400, 405, 422}:
+                        raise ModelCapabilitiesUnsupported(
+                            "The model provider does not support required OpenAI capabilities."
+                        )
                     if status_code < 200 or status_code >= 300:
                         raise ModelProbeFailed("The model provider probe failed.")
                     content_encoding = response.headers.get("Content-Encoding", "").strip()
@@ -640,3 +708,58 @@ def _validate_completion(payload: object) -> None:
     message = choices[0].get("message")
     if not isinstance(message, dict) or not isinstance(message.get("content"), str):
         raise ModelProbeFailed("The model provider returned an invalid response.")
+
+
+def _completion_message(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support required OpenAI capabilities."
+        )
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support required OpenAI capabilities."
+        )
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support required OpenAI capabilities."
+        )
+    return message
+
+
+def _validate_tool_call_completion(payload: object) -> None:
+    message = _completion_message(payload)
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support native OpenAI tool calls."
+        )
+    tool_call = tool_calls[0]
+    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+    if not isinstance(function, dict) or function.get("name") != "contentai_probe":
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support native OpenAI tool calls."
+        )
+    arguments = function.get("arguments")
+    try:
+        parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else None
+    except json.JSONDecodeError:
+        parsed_arguments = None
+    if parsed_arguments != {"value": "ok"}:
+        raise ModelCapabilitiesUnsupported(
+            "The model provider returned invalid native tool arguments."
+        )
+
+
+def _validate_structured_completion(payload: object) -> None:
+    message = _completion_message(payload)
+    content = message.get("content")
+    try:
+        parsed_content = json.loads(content) if isinstance(content, str) else None
+    except json.JSONDecodeError:
+        parsed_content = None
+    if parsed_content != {"ok": True}:
+        raise ModelCapabilitiesUnsupported(
+            "The model provider does not support JSON Schema structured output."
+        )

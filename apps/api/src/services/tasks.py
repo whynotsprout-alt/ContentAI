@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
 SIDE_EFFECT_TASK_MAX_RETRIES = 3
+POSTPROCESS_COMPENSATION_VERSION = 1
 
 
 @lru_cache(maxsize=1)
@@ -277,6 +278,41 @@ def recover_expired_executions() -> int:
             outbox.locked_until = None
             outbox.updated_at = now
             session.add(outbox)
+
+        failed_postprocess = list(
+            session.exec(
+                select(ExecutionOutbox)
+                .join(
+                    AgentExecution,
+                    ExecutionOutbox.execution_id == AgentExecution.id,
+                )
+                .where(ExecutionOutbox.kind == "postprocess")
+                .where(ExecutionOutbox.status == "failed")
+                .where(AgentExecution.status == RunStatus.completed)
+                .where(AgentExecution.postprocess_completed_at.is_(None))
+                .with_for_update(skip_locked=True)
+            ).all()
+        )
+        for outbox in failed_postprocess:
+            payload = dict(outbox.payload or {})
+            compensation_version = int(
+                payload.get("postprocess_compensation_version") or 0
+            )
+            if compensation_version >= POSTPROCESS_COMPENSATION_VERSION:
+                continue
+            payload["postprocess_compensation_version"] = (
+                POSTPROCESS_COMPENSATION_VERSION
+            )
+            outbox.payload = payload
+            outbox.status = "pending"
+            outbox.processing_attempts = 0
+            outbox.available_at = now
+            outbox.locked_by = None
+            outbox.locked_until = None
+            outbox.last_error = ""
+            outbox.updated_at = now
+            session.add(outbox)
+            recovered += 1
         session.commit()
     return recovered
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from core.config import Settings
+from database_helpers import get_test_database_url
 from db.session import (
     calculate_connection_budget,
     engine_options_for_role,
@@ -39,7 +43,7 @@ def _settings(**database: object) -> Settings:
     return Settings(
         env="test",
         database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
+            "url": get_test_database_url(),
             **database,
         },
     )
@@ -488,6 +492,34 @@ def test_dispatcher_writes_a_service_heartbeat_even_when_outbox_is_empty() -> No
         ).one()
 
     assert row.queue_name == ""
+
+
+def test_dispatcher_entrypoint_registers_all_relationship_models() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    env = os.environ.copy()
+    source_path = str(project_root / "apps" / "api" / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (source_path, env.get("PYTHONPATH", "")) if value
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from services.dispatcher import OutboxDispatcher; "
+                "from sqlalchemy.orm import configure_mappers; "
+                "configure_mappers()"
+            ),
+        ],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_dispatcher_uses_stable_hostname_pid_identity_by_default() -> None:

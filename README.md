@@ -23,8 +23,8 @@ tools/                 本地开发、验收与 Ubuntu 发布打包脚本
 - 最终稿件是普通 Assistant 消息。
 - checkpoint、执行状态与不含正文的审计仅用于持续对话与可靠性恢复。
 
-完整文档导航见 [docs/README.md](docs/README.md)；产品与技术事实源分别是
-[产品说明](docs/PRODUCT.md) 和 [技术设计](docs/DESIGN.md)。
+项目交接文档分为 [前端功能设计](docs/FRONTEND_DESIGN.md)、
+[后端功能设计](docs/BACKEND_DESIGN.md) 和 [项目部署与运维](docs/DEPLOYMENT.md)。
 
 ## 本地开发
 
@@ -59,4 +59,4 @@ docker compose up --detach --build --wait
 
 Web 容器以 Nginx 提供前端静态文件，并将 `/api/` 反向代理到 API 服务。
 
-生产部署仅将 Web 绑定到宿主机 `127.0.0.1`；HTTPS 由宿主机 Nginx、Caddy 或云负载均衡终止。Ubuntu 部署、备份、恢复和打包见 [运维文档](docs/OPERATIONS.md)，完整接口见 [API 清单](docs/API.md)。所有应用日志写入 stdout/stderr，通过 `docker compose logs <service>` 按容器查看。
+生产部署仅将 Web 绑定到宿主机 `127.0.0.1`；HTTPS 由宿主机 Nginx、Caddy 或云负载均衡终止。Ubuntu 部署、备份、恢复和打包见 [项目部署与运维](docs/DEPLOYMENT.md)，完整接口与服务端约束见 [后端功能设计](docs/BACKEND_DESIGN.md)。所有应用日志写入 stdout/stderr，通过 `docker compose logs <service>` 按容器查看。

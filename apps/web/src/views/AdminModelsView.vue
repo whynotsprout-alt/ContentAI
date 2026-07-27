@@ -26,6 +26,7 @@ const baseUrl = ref('');
 const apiKey = ref('');
 const modelName = ref('');
 const temperature = ref<number | null>(0.2);
+const temperatureMode = ref<'auto' | 'custom'>('auto');
 const contextWindowTokens = ref<number | null>(32_000);
 const chatMaxTokens = ref<number | null>(8_000);
 const structuredMaxTokens = ref<number | null>(8_000);
@@ -49,7 +50,7 @@ const readConnectionDraft = () => ({
 });
 const readSaveDraft = () => ({
   ...readConnectionDraft(),
-  temperature: temperature.value,
+  temperature: selectedTemperature.value,
   contextWindowTokens: contextWindowTokens.value,
   chatMaxTokens: chatMaxTokens.value,
   structuredMaxTokens: structuredMaxTokens.value
@@ -59,7 +60,11 @@ const saveGuard = createModelConfigRequestGuard(readSaveDraft);
 
 const configured = computed(() => Boolean(active.value?.configured));
 const expectedVersion = computed(() => active.value?.version ?? 0);
+const selectedTemperature = computed(() => (
+  temperatureMode.value === 'auto' ? null : temperature.value
+));
 const temperatureError = computed(() => {
+  if (temperatureMode.value === 'auto') return '';
   const value = temperature.value;
   if (typeof value !== 'number' || !Number.isFinite(value)) return '请输入 0 到 2 之间的数字。';
   if (value < 0 || value > 2) return 'Temperature 必须在 0 到 2 之间。';
@@ -105,6 +110,7 @@ const errorCopy: Record<string, string> = {
   MODEL_AUTH_FAILED: '模型服务拒绝了当前凭证，请检查 API Key。',
   MODEL_NOT_FOUND: '模型服务无法使用这个模型 ID，请刷新候选或检查自定义值。',
   MODEL_PROVIDER_UNREACHABLE: '暂时无法连接模型服务，请检查地址和网络。',
+  MODEL_CAPABILITIES_UNSUPPORTED: '该模型端点不支持原生工具调用或 JSON Schema 结构化输出，无法用于 ContentAI。',
   MODEL_PROBE_FAILED: '模型服务返回了无法验证的结果，请稍后重试。',
   MODEL_CONFIG_PERSISTENCE_FAILED: '模型配置保存失败，请稍后重试。',
   MODEL_CONFIG_CHANGED: '配置已被其他管理员更新，已刷新为最新版本，请核对后重试。'
@@ -122,6 +128,19 @@ function formatDate(value: string | null | undefined) {
 
 function formatRuntimeNumber(value: number | null | undefined) {
   return typeof value === 'number' && Number.isFinite(value) ? new Intl.NumberFormat('zh-CN').format(value) : '—';
+}
+
+function formatTemperature(value: number | null | undefined) {
+  return value === null
+    ? '自动（由模型决定）'
+    : formatRuntimeNumber(value);
+}
+
+function setTemperatureMode(mode: 'auto' | 'custom') {
+  temperatureMode.value = mode;
+  if (mode === 'custom' && (typeof temperature.value !== 'number' || !Number.isFinite(temperature.value))) {
+    temperature.value = 0.2;
+  }
 }
 
 function payload(includeModel: boolean): AdminModelProbePayload {
@@ -149,7 +168,12 @@ async function loadConfiguration(options: { preserveForm?: boolean; background?:
         baseUrl.value = result.base_url ?? '';
         modelName.value = result.model_name ?? '';
         apiKey.value = '';
-        temperature.value = result.configured ? result.temperature : 0.2;
+        temperatureMode.value = result.configured && result.temperature !== null ? 'custom' : 'auto';
+        if (result.configured && result.temperature !== null) {
+          temperature.value = result.temperature;
+        } else if (typeof temperature.value !== 'number' || !Number.isFinite(temperature.value)) {
+          temperature.value = 0.2;
+        }
         contextWindowTokens.value = result.configured ? result.context_window_tokens : 32_000;
         chatMaxTokens.value = result.configured ? result.chat_max_tokens : 8_000;
         structuredMaxTokens.value = result.configured ? result.structured_max_tokens : 8_000;
@@ -231,7 +255,6 @@ async function runProbe(includeModel: boolean) {
 async function saveConfiguration() {
   if (!canSave.value) return;
   const runtimeValues = [
-    temperature.value,
     contextWindowTokens.value,
     chatMaxTokens.value,
     structuredMaxTokens.value
@@ -241,7 +264,7 @@ async function saveConfiguration() {
     ...payload(true),
     model_name: modelName.value.trim(),
     expected_version: expectedVersion.value,
-    temperature: temperature.value!,
+    temperature: selectedTemperature.value,
     context_window_tokens: contextWindowTokens.value!,
     chat_max_tokens: chatMaxTokens.value!,
     structured_max_tokens: structuredMaxTokens.value!
@@ -260,7 +283,11 @@ async function saveConfiguration() {
       baseUrl.value = result.base_url ?? requestPayload.base_url;
       modelName.value = result.model_name ?? requestPayload.model_name;
       apiKey.value = '';
-      temperature.value = result.temperature ?? requestPayload.temperature;
+      const savedTemperature = result.temperature === undefined
+        ? requestPayload.temperature
+        : result.temperature;
+      temperatureMode.value = savedTemperature === null ? 'auto' : 'custom';
+      if (savedTemperature !== null) temperature.value = savedTemperature;
       contextWindowTokens.value = result.context_window_tokens ?? requestPayload.context_window_tokens;
       chatMaxTokens.value = result.chat_max_tokens ?? requestPayload.chat_max_tokens;
       structuredMaxTokens.value = result.structured_max_tokens ?? requestPayload.structured_max_tokens;
@@ -321,7 +348,7 @@ watch(modelName, () => {
   }
 }, { flush: 'sync' });
 
-watch([temperature, contextWindowTokens, chatMaxTokens, structuredMaxTokens], () => {
+watch([temperatureMode, temperature, contextWindowTokens, chatMaxTokens, structuredMaxTokens], () => {
   if (applyingServerState) return;
   saveGuard.invalidate();
   successMessage.value = '';
@@ -350,7 +377,7 @@ onMounted(() => void loadConfiguration());
         <p v-else-if="configured">{{ active?.base_url }}</p>
         <p v-else>完成验证并保存后，新对话才能提交。</p>
         <dl v-if="!loading && !initialLoadFailed && configured" class="model-runtime-summary" aria-label="当前生效运行参数">
-          <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+          <div><dt>Temperature</dt><dd>{{ formatTemperature(active?.temperature) }}</dd></div>
           <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }}</dd></div>
           <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }}</dd></div>
           <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }}</dd></div>
@@ -408,6 +435,17 @@ onMounted(() => void loadConfiguration());
             <div class="model-runtime-grid">
               <div class="model-field">
                 <label for="model-temperature">Temperature</label>
+                <label class="model-temperature-mode" for="model-temperature-mode">
+                  <span>Temperature 控制方式</span>
+                  <select
+                    id="model-temperature-mode"
+                    :value="temperatureMode"
+                    @change="setTemperatureMode(($event.target as HTMLSelectElement).value as 'auto' | 'custom')"
+                  >
+                    <option value="auto">自动（由模型决定）</option>
+                    <option value="custom">自定义数值</option>
+                  </select>
+                </label>
                 <input
                   id="model-temperature"
                   v-model.number="temperature"
@@ -416,11 +454,12 @@ onMounted(() => void loadConfiguration());
                   max="2"
                   step="0.1"
                   inputmode="decimal"
-                  required
+                  :disabled="temperatureMode === 'auto'"
+                  :required="temperatureMode === 'custom'"
                   :aria-invalid="Boolean(temperatureError)"
                   :aria-describedby="temperatureError ? 'model-temperature-help model-temperature-error' : 'model-temperature-help'"
                 />
-                <small id="model-temperature-help">采样温度，允许 0 到 2，包含边界。</small>
+                <small id="model-temperature-help">自动模式不会向模型服务发送 Temperature；自定义值允许 0 到 2，包含边界。</small>
                 <p v-if="temperatureError" id="model-temperature-error" class="model-field-error">{{ temperatureError }}</p>
               </div>
 
@@ -521,7 +560,7 @@ onMounted(() => void loadConfiguration());
               <div><dt>Base URL</dt><dd>{{ active?.base_url }}</dd></div>
               <div><dt>模型</dt><dd>{{ active?.model_name }}</dd></div>
               <div><dt>Key</dt><dd>{{ active?.api_key_hint }}</dd></div>
-              <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+              <div><dt>Temperature</dt><dd>{{ formatTemperature(active?.temperature) }}</dd></div>
               <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }} tokens</dd></div>
               <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }} tokens</dd></div>
               <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }} tokens</dd></div>
@@ -553,7 +592,7 @@ onMounted(() => void loadConfiguration());
             <div><dt>Base URL</dt><dd>{{ active?.base_url }}</dd></div>
             <div><dt>模型</dt><dd>{{ active?.model_name }}</dd></div>
             <div><dt>Key</dt><dd>{{ active?.api_key_hint }}</dd></div>
-            <div><dt>Temperature</dt><dd>{{ formatRuntimeNumber(active?.temperature) }}</dd></div>
+            <div><dt>Temperature</dt><dd>{{ formatTemperature(active?.temperature) }}</dd></div>
             <div><dt>上下文窗口</dt><dd>{{ formatRuntimeNumber(active?.context_window_tokens) }} tokens</dd></div>
             <div><dt>对话输出</dt><dd>{{ formatRuntimeNumber(active?.chat_max_tokens) }} tokens</dd></div>
             <div><dt>结构化输出</dt><dd>{{ formatRuntimeNumber(active?.structured_max_tokens) }} tokens</dd></div>

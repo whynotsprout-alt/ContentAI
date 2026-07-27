@@ -221,7 +221,10 @@ class MemoryRepository:
         for row in rows:
             row.touch_accessed_at(now)
             self.session.add(row)
-        self.session.commit()
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
 
     @staticmethod
     def _to_entry(row: MemoryRecord) -> MemoryEntry:

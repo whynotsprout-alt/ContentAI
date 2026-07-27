@@ -106,3 +106,35 @@ def test_memory_repository_tracks_access_statistics():
     assert entry is not None
     assert entry.access_count == 1
     assert entry.last_accessed_at is not None
+
+
+def test_memory_repository_respects_non_autocommit_access_updates():
+    with Session(get_engine()) as session:
+        MemoryRepository(session).upsert(
+            "remembered",
+            content="accessed memory",
+            user_id="local-user",
+            agent_id="default-agent",
+        )
+
+        repository = MemoryRepository(session, auto_commit=False)
+        entry = repository.get(
+            "remembered",
+            user_id="local-user",
+            agent_id="default-agent",
+        )
+        assert entry is not None and entry.access_count == 1
+
+        with Session(get_engine()) as observer:
+            before_commit = observer.exec(
+                select(MemoryRecord).where(MemoryRecord.memory_key == "remembered")
+            ).one()
+            assert before_commit.access_count == 0
+
+        session.commit()
+
+    with Session(get_engine()) as observer:
+        after_commit = observer.exec(
+            select(MemoryRecord).where(MemoryRecord.memory_key == "remembered")
+        ).one()
+        assert after_commit.access_count == 1

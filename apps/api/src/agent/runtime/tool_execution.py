@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from agent.runtime.context import get_tool_runtime_context
 from agent.runtime.errors import PUBLIC_RUNTIME_ERROR_CODES, classify_runtime_error
-from agent.runtime.events import emit_event
 from db.session import get_engine
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
@@ -170,14 +169,6 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
             status="error",
         )
 
-    _emit_tool_event(
-        runtime,
-        "tool_start",
-        tool_name=tool_name,
-        tool_call_id=tool_call_id,
-        status="running",
-        stage="started",
-    )
     started_at = time.perf_counter()
     executor: ThreadPoolExecutor | None = None
     future: Any | None = None
@@ -207,15 +198,6 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
             started_at=started_at,
             keep_running=side_effecting,
         )
-        _emit_tool_event(
-            runtime,
-            "tool_end",
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            status="running" if side_effecting else "failed",
-            stage="timeout",
-            error=error,
-        )
         return ToolMessage(
             content={"status": "failed", "error": error},
             name=tool_name,
@@ -224,27 +206,10 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         )
     except GraphBubbleUp:
         _finish_audit(audit.row_id, error="GRAPH_INTERRUPT", started_at=started_at)
-        _emit_tool_event(
-            runtime,
-            "tool_end",
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            status="waiting_input",
-            stage="waiting_input",
-        )
         raise
     except Exception as exc:  # noqa: BLE001
         error = classify_runtime_error(exc).message
         _finish_audit(audit.row_id, error=error, started_at=started_at)
-        _emit_tool_event(
-            runtime,
-            "tool_end",
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            status="failed",
-            stage="failed",
-            error=error,
-        )
         if _is_public_terminal_error(exc):
             raise
         return ToolMessage(
@@ -261,15 +226,6 @@ def execute_tool_call(request: Any, execute: Any) -> Any:
         audit.row_id,
         result_digest=stable_json_hash(_result_for_digest(bounded)),
         started_at=started_at,
-    )
-    _emit_tool_event(
-        runtime,
-        "tool_end",
-        tool_name=tool_name,
-        tool_call_id=tool_call_id,
-        status="completed",
-        stage="completed",
-        duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
     )
     return bounded
 
@@ -307,21 +263,12 @@ def _execute_side_effect_remotely(
         if receipt is not None and receipt.get("status") in {"completed", "failed"}:
             return _return_side_effect_receipt(
                 receipt,
-                runtime=runtime,
                 audit=audit,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
                 started_at=started_at,
             )
         if audit.created:
-            _emit_tool_event(
-                runtime,
-                "tool_start",
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                status="running",
-                stage="started",
-            )
             _call_before_deadline(
                 dispatcher,
                 deadline,
@@ -349,7 +296,6 @@ def _execute_side_effect_remotely(
             if receipt is not None and receipt.get("status") in {"completed", "failed"}:
                 return _return_side_effect_receipt(
                     receipt,
-                    runtime=runtime,
                     audit=audit,
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
@@ -361,17 +307,6 @@ def _execute_side_effect_remotely(
             time.sleep(min(0.05, remaining))
     except FutureTimeoutError:
         error = f"TOOL_TIMEOUT: {tool_name} exceeded {timeout_seconds:g} seconds"
-        if audit.created:
-            _emit_tool_event(
-                runtime,
-                "tool_end",
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                status="running",
-                stage="timeout",
-                error=error,
-                duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
-            )
         return ToolMessage(
             content={"status": "failed", "error": error},
             name=tool_name,
@@ -399,7 +334,6 @@ def _get_remote_io_gate() -> _RemoteIOGate:
 def _return_side_effect_receipt(
     receipt: dict[str, Any],
     *,
-    runtime: Any,
     audit: _AuditStart,
     tool_name: str,
     tool_call_id: str,
@@ -409,16 +343,6 @@ def _return_side_effect_receipt(
     if error:
         if audit.created:
             _finish_audit(audit.row_id, error=error, started_at=started_at)
-            _emit_tool_event(
-                runtime,
-                "tool_end",
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                status="failed",
-                stage="failed",
-                error=error,
-                duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
-            )
         return ToolMessage(
             content={"status": "failed", "error": error},
             name=tool_name,
@@ -431,47 +355,11 @@ def _return_side_effect_receipt(
             result_digest=str(receipt.get("result_digest") or ""),
             started_at=started_at,
         )
-        _emit_tool_event(
-            runtime,
-            "tool_end",
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            status="completed",
-            stage="completed",
-            duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
-        )
     return ToolMessage(
         content=receipt.get("result") or {},
         name=tool_name,
         tool_call_id=tool_call_id,
     )
-
-
-def _emit_tool_event(
-    runtime: Any,
-    event_name: str,
-    *,
-    tool_name: str,
-    tool_call_id: str,
-    status: str,
-    stage: str,
-    error: str = "",
-    duration_ms: int | None = None,
-) -> None:
-    progress: dict[str, Any] = {"stage": stage}
-    if duration_ms is not None:
-        progress["duration_ms"] = duration_ms
-    payload: dict[str, Any] = {
-        "execution_id": runtime.execution_id,
-        "name": event_name,
-        "tool_name": tool_name,
-        "tool_call_id": tool_call_id,
-        "status": status,
-        "progress": progress,
-    }
-    if error:
-        payload["error"] = error[:1000]
-    emit_event(event_name, payload, writer=runtime.event_writer)
 
 
 class _AuditStart:

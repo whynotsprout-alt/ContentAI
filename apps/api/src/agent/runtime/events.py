@@ -30,9 +30,6 @@ _STREAM_BATCH_MAX_CHARS = 256
 _CONTRACT_EVENT_TYPES = {
     "state",
     "token",
-    "tool_start",
-    "tool_progress",
-    "tool_end",
     "error",
     "done",
     "heartbeat",
@@ -295,16 +292,6 @@ class AgentEventWriter:
             contract_payload["content"] = _coerce_content(contract_payload)
             return "token", contract_payload
 
-        if normalized_name == "tool_call_completed":
-            tool_name = str(contract_payload.get("tool_name") or "tool")
-            contract_payload.setdefault("name", tool_name)
-            contract_payload.setdefault("content", "")
-            return "tool_end", contract_payload
-
-        if normalized_name == "tool_call_started":
-            contract_payload.setdefault("name", "tool_call_started")
-            return "tool_start", contract_payload
-
         if normalized_name in {
             "run_start",
             "run_retry",
@@ -318,6 +305,11 @@ class AgentEventWriter:
         }:
             contract_payload.setdefault("name", normalized_name)
             contract_payload.setdefault("content", "")
+            return "state", contract_payload
+
+        if normalized_name == "session_title_updated":
+            contract_payload.setdefault("name", normalized_name)
+            contract_payload.setdefault("content", str(contract_payload.get("title") or ""))
             return "state", contract_payload
 
         if normalized_name == "run_error":

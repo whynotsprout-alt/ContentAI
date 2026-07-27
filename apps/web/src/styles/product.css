@@ -687,7 +687,6 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   background: var(--product-bg);
 }
 
-.run-activity,
 .workspace-alert,
 .onboarding-empty,
 .message,
@@ -698,7 +697,6 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   translate: var(--conversation-inline-shift) 0;
 }
 
-.run-activity,
 .workspace-alert {
   display: flex;
   width: min(var(--conversation-measure), calc(100% - 32px));
@@ -716,19 +714,6 @@ body[data-surface='product'] .accessible-dialog :where(button, input, textarea, 
   font-size: 13px;
 }
 
-.run-activity.state-queued,
-.run-activity.state-running,
-.run-activity.state-reconnecting,
-.run-activity.state-cancelling {
-  color: var(--product-accent);
-}
-
-.run-activity.state-waiting_input {
-  color: var(--product-warning);
-}
-
-.run-activity.state-failed,
-.run-activity.state-cancelled,
 .workspace-alert {
   color: var(--product-danger);
 }

@@ -6,7 +6,13 @@ import httpx
 
 MODEL_STREAM_INTERRUPTED_MESSAGE = "模型服务的流式连接意外中断，请稍后重试。"
 MODEL_STREAM_INTERRUPTED_CODE = "MODEL_STREAM_INTERRUPTED"
-PUBLIC_RUNTIME_ERROR_CODES = {"CONTENT_EVIDENCE_INVALID"}
+PUBLIC_RUNTIME_ERROR_CODES = {
+    "CONTENT_EVIDENCE_INVALID",
+    "HOTSPOT_FILTER_FAILED",
+    "HOTSPOT_FILTER_INVALID_RESULT",
+    "HOTSPOT_FILTER_UNAVAILABLE",
+    "TOPIC_SCORING_PROMPT_REQUIRED",
+}
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,8 @@ def _normalize_runtime_error(exc: Exception) -> str:
     declared_code = str(getattr(exc, "code", "") or "").strip()
     if declared_code == "CONTENT_EVIDENCE_INVALID":
         return "Research evidence could not be validated."
+    if declared_code in PUBLIC_RUNTIME_ERROR_CODES:
+        return "热点评分模型未能返回有效结果，请检查模型兼容性后重试。"
     return "模型服务请求失败，请检查当前模型配置后重试。"
 
 

@@ -234,7 +234,7 @@ def create_session_message(
             "Idempotency-Key header and body values must match."
         )
     request_idempotency_key = idempotency_key or payload.idempotency_key
-    return service.submit_user_message_background(
+    created, _replayed = service.create_turn(
         session,
         AgentMessageRequest(
             session_id=session_id,
@@ -245,6 +245,7 @@ def create_session_message(
         idempotency_key=request_idempotency_key,
         request_id=request_context.request_id,
     )
+    return created
 
 
 @router.get("/runs/{execution_id}/events")
@@ -841,8 +842,6 @@ def _to_stream_event_v3(
 
 
 def _stream_channel(event_name: str, semantic_name: str) -> str:
-    if event_name in {"tool_start", "tool_progress", "tool_end"}:
-        return "tools"
     if event_name == "error" or semantic_name in {"run_error", "execution_failed"}:
         return "errors"
     if semantic_name in {"run_interrupt", "execution_waiting_input"}:
@@ -935,6 +934,7 @@ def _public_stream_data(payload: dict[str, Any], *, channel: str) -> dict[str, A
         "progress",
         "state_truncated",
         "history_cursor",
+        "title",
     }
     projected = {
         key: value for key, value in payload.items() if key in allowed and key not in blocked

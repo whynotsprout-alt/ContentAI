@@ -9,7 +9,7 @@ from core.config import Settings, get_settings
 from core.logging import configure_logging
 from db.session import get_engine
 from models.base import utcnow
-from models.chat import AgentExecution, ExecutionOutbox
+from models.database import AgentExecution, ExecutionOutbox
 from services.celery_app import celery_app
 from services.service_heartbeat import (
     HEARTBEAT_INTERVAL_SECONDS,

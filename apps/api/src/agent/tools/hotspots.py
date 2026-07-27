@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from agent.prompts.registry import load_tool_description
 from agent.runtime.context import get_tool_runtime_context
-from agent.runtime.events import emit_event
-from agent.tools.hotspot_filter import filter_hotspot_candidates, normalize_hotspot_candidates
+from agent.tools.hotspot_filter import (
+    HotspotFilterRuntimeError,
+    filter_hotspot_candidates,
+    normalize_hotspot_candidates,
+)
 from core.config import get_settings
 from core.hotspot_sources import (
     AIHOT_SOURCE,
@@ -58,7 +61,6 @@ def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str
     )
     tikhub_api_key = runtime.api_keys.get("tikhub_api_key")
     limits = get_settings().search
-    _emit_hotspot_progress(runtime, "fetching_sources", "正在采集热点源")
     result = fetch_hotspot_sources(
         sources=source_groups,
         rss_sources=selected_rss_sources,
@@ -84,24 +86,23 @@ def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str
         max_candidates=limits.hotspot_raw_candidate_limit,
     )
     runtime.ensure_not_cancelled()
-    _emit_hotspot_progress(
-        runtime,
-        "scoring_topics",
-        "正在使用选题评分提示词评估热点",
-        candidate_count=len(candidates),
-        source_health=source_health,
-    )
-    if runtime.hotspot_filter_model is None:
-        return {
-            **result,
-            "items": [],
-            "filtering": {
-                "status": "error",
-                "code": "HOTSPOT_FILTER_UNAVAILABLE",
-                "collected_count": collected_count,
-                "candidate_count": len(candidates),
-            },
+    if not candidates:
+        result["result"] = "未获取到可供筛选的热点。"
+        result["items"] = []
+        result["filtering"] = {
+            "status": "ok",
+            "collected_count": collected_count,
+            "candidate_count": 0,
+            "selected_count": 0,
+            "source_distribution": {},
+            "result_ready": True,
+            "scoring_basis": "topic_scoring_prompt",
+            "primary_model_action": "format_result_only",
         }
+        runtime.ensure_not_cancelled()
+        return result
+    if runtime.hotspot_filter_model is None:
+        raise HotspotFilterRuntimeError("HOTSPOT_FILTER_UNAVAILABLE")
     try:
         filtered = filter_hotspot_candidates(
             model=runtime.hotspot_filter_model,
@@ -111,21 +112,9 @@ def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str
         result["result"] = filtered.result
         result["items"] = []
     except ValueError as exc:
-        result["items"] = []
-        result["filtering"] = {
-            "status": "error",
-            "code": str(exc),
-            "collected_count": collected_count,
-            "candidate_count": len(candidates),
-        }
+        raise HotspotFilterRuntimeError(str(exc)) from None
     except Exception:
-        result["items"] = []
-        result["filtering"] = {
-            "status": "error",
-            "code": "HOTSPOT_FILTER_FAILED",
-            "collected_count": collected_count,
-            "candidate_count": len(candidates),
-        }
+        raise HotspotFilterRuntimeError("HOTSPOT_FILTER_FAILED") from None
     else:
         result["filtering"] = {
             "status": "ok",
@@ -141,41 +130,8 @@ def fetch_hotspots(source: str = "all", platforms: str = "all", rss_sources: str
             "scoring_basis": "topic_scoring_prompt",
             "primary_model_action": "format_result_only",
         }
-        _emit_hotspot_progress(
-            runtime,
-            "formatting_result",
-            "热点评分完成，正在整理结果",
-            candidate_count=len(candidates),
-            source_health=source_health,
-        )
     runtime.ensure_not_cancelled()
     return result
-
-
-def _emit_hotspot_progress(
-    runtime: object,
-    stage: str,
-    label: str,
-    *,
-    candidate_count: int | None = None,
-    source_health: list[dict[str, object]] | None = None,
-) -> None:
-    progress: dict[str, object] = {"stage": stage, "label": label}
-    if candidate_count is not None:
-        progress["candidate_count"] = candidate_count
-    if source_health is not None:
-        progress["source_health"] = source_health
-    emit_event(
-        "tool_progress",
-        {
-            "execution_id": getattr(runtime, "execution_id", ""),
-            "name": "tool_progress",
-            "tool_name": "fetch_hotspots",
-            "status": "running",
-            "progress": progress,
-        },
-        writer=getattr(runtime, "event_writer", None),
-    )
 
 
 def _select_requested_sources(

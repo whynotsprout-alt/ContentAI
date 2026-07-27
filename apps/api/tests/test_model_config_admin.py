@@ -18,6 +18,7 @@ from models.model_configuration import ModelConfiguration
 from models.user import AdminAuditLog
 from services.model_config_network import (
     ModelAuthenticationFailed,
+    ModelCapabilitiesUnsupported,
     ModelEndpointForbidden,
     ModelNotFound,
     ModelProbeFailed,
@@ -263,6 +264,52 @@ def test_save_creates_new_immutable_version_and_secret_free_audit(
     assert "Authorization" not in audit_text
 
 
+def test_save_accepts_auto_temperature_as_explicit_null(
+    admin_client: ApiClient,
+) -> None:
+    _set_probe(admin_client, FakeProbe())
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json={
+            "base_url": "https://new.example.test/v1",
+            "model_name": "custom-model",
+            "expected_version": 1,
+            **RUNTIME_PAYLOAD,
+            "temperature": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["temperature"] is None
+    with Session(get_engine()) as session:
+        active = session.exec(
+            select(ModelConfiguration).where(ModelConfiguration.is_active.is_(True))
+        ).one()
+    assert active.temperature is None
+
+
+def test_save_still_requires_temperature_field(
+    admin_client: ApiClient,
+) -> None:
+    payload = {
+        "base_url": "https://new.example.test/v1",
+        "model_name": "custom-model",
+        "expected_version": 1,
+        **RUNTIME_PAYLOAD,
+    }
+    payload.pop("temperature")
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
 def test_blank_key_reuses_active_secret_for_probe_and_new_version(
     admin_client: ApiClient,
 ) -> None:
@@ -346,6 +393,11 @@ def test_optimistic_version_conflict_does_not_probe_or_switch(admin_client: ApiC
         (ModelAuthenticationFailed("remote-secret-message"), 422, "MODEL_AUTH_FAILED"),
         (ModelNotFound("remote-secret-message"), 422, "MODEL_NOT_FOUND"),
         (ModelProviderUnreachable("remote-secret-message"), 502, "MODEL_PROVIDER_UNREACHABLE"),
+        (
+            ModelCapabilitiesUnsupported("remote-secret-message"),
+            422,
+            "MODEL_CAPABILITIES_UNSUPPORTED",
+        ),
         (ModelProbeFailed("remote-secret-message"), 502, "MODEL_PROBE_FAILED"),
     ],
 )

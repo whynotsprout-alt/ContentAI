@@ -372,7 +372,8 @@
   line-height: 1.55;
 }
 
-.model-field input {
+.model-field input,
+.model-field select {
   width: 100%;
   height: 46px;
   padding: 0 var(--space-3);
@@ -386,10 +387,27 @@
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast), background-color var(--transition-fast);
 }
 
-.model-field input:focus-visible {
+.model-field input:focus-visible,
+.model-field select:focus-visible {
   border-color: var(--accent-strong);
   background: var(--control-hover);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.model-field input:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  background: var(--panel-dense);
+}
+
+.model-temperature-mode {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--type-caption);
+  font-weight: 520;
 }
 
 .model-runtime-fieldset {

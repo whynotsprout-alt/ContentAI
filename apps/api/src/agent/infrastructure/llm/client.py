@@ -1,17 +1,111 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import Future
 from typing import Any
 
 import httpx
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 from services.model_config_network import PinnedAsyncModelTransport, PinnedModelTransport
 
 _STREAM_END = object()
+
+
+class _StructuredOutputCompatibilityModel:
+    def __init__(self, *, primary: Any, chat_model: Any, schema: type[Any]) -> None:
+        self._primary = primary
+        self._chat_model = chat_model
+        self._schema = schema
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        try:
+            return self._primary.invoke(input, config=config, **kwargs)
+        except Exception:  # noqa: BLE001
+            response = self._chat_model.invoke(
+                _structured_fallback_messages(input, self._schema),
+                config=config,
+                **kwargs,
+            )
+            return _validate_structured_fallback_response(response, self._schema)
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        try:
+            return await self._primary.ainvoke(input, config=config, **kwargs)
+        except Exception:  # noqa: BLE001
+            response = await self._chat_model.ainvoke(
+                _structured_fallback_messages(input, self._schema),
+                config=config,
+                **kwargs,
+            )
+            return _validate_structured_fallback_response(response, self._schema)
+
+
+def _structured_fallback_messages(input: Any, schema: type[Any]) -> list[BaseMessage]:
+    schema_builder = getattr(schema, "model_json_schema", None)
+    json_schema = schema_builder() if callable(schema_builder) else schema
+    instruction = (
+        "Return exactly one JSON object that conforms to the following JSON Schema. "
+        "Do not add markdown fences, commentary, or any text outside the JSON object.\n"
+        f"JSON Schema: {json.dumps(json_schema, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    to_messages = getattr(input, "to_messages", None)
+    if callable(to_messages):
+        original = list(to_messages())
+    elif isinstance(input, BaseMessage):
+        original = [input]
+    elif isinstance(input, list | tuple) and all(
+        isinstance(message, BaseMessage) for message in input
+    ):
+        original = list(input)
+    else:
+        original = [HumanMessage(content=str(input))]
+    return [SystemMessage(content=instruction), *original]
+
+
+def _validate_structured_fallback_response(response: Any, schema: type[Any]) -> Any:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        content = "".join(
+            item if isinstance(item, str) else str(item.get("text") or "")
+            for item in content
+            if isinstance(item, str | dict)
+        )
+    if not isinstance(content, str):
+        raise ValueError("The compatibility model did not return JSON text.")
+    payload = _decode_first_json_object(content)
+    validator = getattr(schema, "model_validate", None)
+    if callable(validator):
+        return validator(payload)
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        return schema.model_validate(payload)
+    return payload
+
+
+def _decode_first_json_object(content: str) -> dict[str, Any]:
+    stripped = content.strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        payload = None
+        for index, character in enumerate(stripped):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(stripped[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+    if not isinstance(payload, dict):
+        raise ValueError("The compatibility model did not return a JSON object.")
+    return payload
 
 
 class _OwnerLoopAsyncByteStream(httpx.AsyncByteStream):
@@ -59,6 +153,7 @@ class _OwnerLoopAsyncClient(httpx.AsyncClient):
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._close_state_lock = threading.Lock()
         self._close_future: Future[None] | None = None
+        self._close_generation = 0
         self._async_closed = False
         self._transport_closed = False
         self._closed_mount_ids: set[int] = set()
@@ -155,25 +250,34 @@ class _OwnerLoopAsyncClient(httpx.AsyncClient):
                 completed: Future[None] = Future()
                 completed.set_result(None)
                 return completed
-            if self._close_future is not None and not self._close_future.done():
+            if self._close_future is not None:
                 return self._close_future
             future = asyncio.run_coroutine_threadsafe(
                 self._close_on_owner_loop(),
                 self._require_owner_loop(),
             )
+            self._close_generation += 1
+            generation = self._close_generation
             self._close_future = future
-        future.add_done_callback(self._finish_close)
+        future.add_done_callback(
+            lambda completed: self._finish_close(completed, generation=generation)
+        )
         return future
 
-    def _finish_close(self, future: Future[None]) -> None:
-        error = None if future.cancelled() else future.exception()
+    def _finish_close(self, future: Future[None], *, generation: int) -> None:
+        succeeded = not future.cancelled() and future.exception() is None
+        should_stop = False
         with self._close_state_lock:
-            if error is None and not future.cancelled():
+            if future is not self._close_future or generation != self._close_generation:
+                return
+            if succeeded:
                 self._async_closed = True
+                should_stop = True
             else:
                 self._close_future = None
-        if error is None and not future.cancelled():
-            self._require_owner_loop().call_soon_threadsafe(self._require_owner_loop().stop)
+        if should_stop:
+            owner_loop = self._require_owner_loop()
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
 
     def close_from_sync(self) -> bool:
         future = self._submit_close()
@@ -246,7 +350,7 @@ class LangChainChatClient:
     def build_chat_model(
         self,
         *,
-        temperature: float,
+        temperature: float | None,
         max_tokens: int,
         model: str | None = None,
         tools: list[Any] | None = None,
@@ -257,17 +361,21 @@ class LangChainChatClient:
         selected_model = model or self._model_name
         if selected_model != self._model_name:
             raise ValueError("The requested model does not match the execution configuration.")
+        model_options: dict[str, Any] = {
+            "model": selected_model,
+            "api_key": self._api_key,
+            "base_url": self._base_url,
+            "max_tokens": max_tokens,
+            "timeout": max(0.1, float(timeout_seconds)),
+            "max_retries": max(0, int(max_retries)),
+            "disable_streaming": disable_streaming,
+            "http_client": self._http_client,
+            "http_async_client": self._http_async_client,
+        }
+        if temperature is not None:
+            model_options["temperature"] = temperature
         chat_model = ChatOpenAI(
-            model=selected_model,
-            api_key=self._api_key,
-            base_url=self._base_url,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=max(0.1, float(timeout_seconds)),
-            max_retries=max(0, int(max_retries)),
-            disable_streaming=disable_streaming,
-            http_client=self._http_client,
-            http_async_client=self._http_async_client,
+            **model_options,
         )
         if not tools:
             return chat_model
@@ -279,7 +387,7 @@ class LangChainChatClient:
     def build_structured_output_model(
         self,
         *,
-        temperature: float,
+        temperature: float | None,
         max_tokens: int,
         schema: type[Any],
         model: str | None = None,
@@ -295,4 +403,9 @@ class LangChainChatClient:
             max_retries=max_retries,
             disable_streaming=disable_streaming,
         )
-        return chat_model.with_structured_output(schema)
+        primary = chat_model.with_structured_output(schema, method="json_schema")
+        return _StructuredOutputCompatibilityModel(
+            primary=primary,
+            chat_model=chat_model,
+            schema=schema,
+        )

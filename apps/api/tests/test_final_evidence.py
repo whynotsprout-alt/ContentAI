@@ -6,7 +6,8 @@ from agent.workflows.deep_research import ContentEvidenceInvalidError
 from agent.workflows.final_evidence import (
     build_research_final_proof,
     build_supported_research_evidence,
-    render_deterministic_research_answer,
+    select_research_evidence,
+    validate_research_final_presentation,
     validate_research_final_selection,
 )
 
@@ -50,9 +51,9 @@ def test_research_final_selection_is_only_stable_durable_claim_ids():
     assert second_id.startswith("clm_")
 
 
-def test_research_final_protocol_has_no_model_authored_answer_envelope():
+def test_research_final_selection_protocol_has_no_model_authored_answer_envelope():
     assert set(final_evidence.ResearchFinalSelection.model_fields) == {"claim_ids"}
-    assert not hasattr(final_evidence, "ResearchBackedFinalResponse")
+    assert set(final_evidence.ResearchFinalPresentation.model_fields) == {"content"}
 
 
 @pytest.mark.parametrize(
@@ -71,19 +72,22 @@ def test_research_final_selection_rejects_empty_unknown_or_model_authored_conten
         validate_research_final_selection(selection, evidence=evidence)
 
 
-def test_research_final_answer_and_proof_are_deterministic_from_durable_selection():
+def test_research_final_presentation_and_proof_are_bound_to_selected_durable_evidence():
     evidence = build_supported_research_evidence(_package())
     claim_id = evidence["claims"][0]["claim_id"]
     selection = validate_research_final_selection({"claim_ids": [claim_id]}, evidence=evidence)
-
-    answer = render_deterministic_research_answer(evidence, selection.claim_ids)
-    proof = build_research_final_proof(evidence, selection.claim_ids)
-
-    assert answer == (
-        "Research-backed findings:\n"
-        "1. The durable conclusion. [S1](https://one.example/source), "
-        "[S2](https://two.example/source)"
+    selected_evidence = select_research_evidence(evidence, selection.claim_ids)
+    answer = (
+        "## 核心结论\n\n这是一段基于已核验资料的用户友好说明。\n\n"
+        "## 来源\n\n[来源一](https://one.example/source)\n"
+        "[来源二](https://two.example/source)"
     )
+    presentation = validate_research_final_presentation(
+        {"content": answer}, selected_evidence=selected_evidence
+    )
+    proof = build_research_final_proof(evidence, selection.claim_ids, presentation.content)
+
+    assert presentation.content == answer
     assert proof == {
         "package_id": "rsp-evidence",
         "topic_hash": "topic-hash",
@@ -91,3 +95,19 @@ def test_research_final_answer_and_proof_are_deterministic_from_durable_selectio
         "digest": proof["digest"],
     }
     assert len(proof["digest"]) == 64
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "## 结论\n\n内容足够长，但没有来源链接，不能作为最终答案。",
+        "## 结论\n\n不要泄露 S1。\n\n[来源](https://one.example/source)\n[来源](https://two.example/source)",
+        "## 结论\n\n使用了未选择的来源。\n\n[来源](https://invalid.example/source)",
+    ],
+)
+def test_research_final_presentation_rejects_missing_raw_or_unknown_citations(content):
+    evidence = build_supported_research_evidence(_package())
+    selected = select_research_evidence(evidence, [evidence["claims"][0]["claim_id"]])
+
+    with pytest.raises(ContentEvidenceInvalidError):
+        validate_research_final_presentation({"content": content}, selected_evidence=selected)

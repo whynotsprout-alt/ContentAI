@@ -312,9 +312,8 @@ describe('workbench cross-session recovery', () => {
     const frames = [
       ['lifecycle', 1, { name: 'run_start', content: '' }],
       ['messages', 2, { name: 'assistant_message_delta', content: '实时', chunk: '实时', message_type: 'markdown', done: false }],
-      ['tools', 3, { name: 'tool_progress', tool_name: 'fetch_hotspots', status: 'running', progress: { stage: 'scoring_topics', label: '正在使用选题评分提示词评估热点', candidate_count: 60 } }],
-      ['messages', 4, { name: 'assistant_message_delta', content: '结果', chunk: '结果', message_type: 'markdown', done: true }],
-      ['lifecycle', 5, { name: 'run_finish', content: '' }]
+      ['messages', 3, { name: 'assistant_message_delta', content: '结果', chunk: '结果', message_type: 'markdown', done: true }],
+      ['lifecycle', 4, { name: 'run_finish', content: '' }]
     ].map(([channel, sequence, data]) => {
       const envelope = {
         schema_version: 3,
@@ -347,10 +346,9 @@ describe('workbench cross-session recovery', () => {
       globalThis.document = originalDocument;
     }
 
-    expect(store.lastEventSequence).toBe(5);
+    expect(store.lastEventSequence).toBe(4);
     expect(store.runLifecycle).toBe('completed');
     expect(store.messages.at(-1)?.content).toBe('实时结果');
-    expect(store.events.some((event) => event.event === 'tool_progress')).toBe(true);
   });
 
   it('shows pending, streams tokens, and writes the final assistant content', async () => {
@@ -457,6 +455,53 @@ describe('workbench cross-session recovery', () => {
     expect(last.role).toBe('assistant');
     expect(last.content).toBe('Hello world');
     expect(last.assistant_state).toBe('normal');
+  });
+
+  it('keeps the completed stream open for the dedicated title update and refreshes the session', async () => {
+    const executionId = 'exe-title-update';
+    setSession('s1', {
+      title: 'New Session',
+      latest_execution_status: 'completed',
+      latest_execution: {
+        id: executionId,
+        session_id: 's1',
+        agent_id: 'acc-1',
+        status: 'completed',
+        error: ''
+      }
+    });
+    const store = initStore();
+    store.sessionId = 's1';
+    store.sessionInfo = apiState.sessionState.get('s1');
+    store.executionId = executionId;
+    store.runLifecycle = 'running';
+    await store.refreshSessions();
+    const stream = new apiState.FakeFetchEventStream('s1');
+
+    store.listen('s1', store.sessionContextToken, stream);
+    await stream.dispatch('lifecycle', {
+      name: 'run_finish',
+      session_id: 's1',
+      execution_id: executionId
+    });
+
+    expect(stream.closed).toBe(false);
+    apiState.sessionState.get('s1').title = 'Updated title';
+    await stream.dispatch('lifecycle', {
+      name: 'session_title_updated',
+      title: 'Updated title',
+      session_id: 's1',
+      execution_id: executionId
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.sessionInfo?.title).toBe('Updated title');
+    expect(store.sessions.find((session) => session.session_id === 's1')?.title).toBe('Updated title');
+
+    await stream.dispatch('close', {});
+    await Promise.resolve();
+    expect(stream.closed).toBe(true);
   });
 
   it('ignores diagnostic marker events for frontend running state', async () => {

@@ -17,6 +17,7 @@ from agent.runtime.turn_context import (
     fallback_turn_context,
     load_turn_prompt_inputs,
 )
+from agent.workflows.research_repository import ResearchPackageRepository
 from core.security import AuthContext
 from models.agent import AgentProfile, AgentVersion
 from models.base import new_id
@@ -361,13 +362,7 @@ class ConversationService:
             request_id=request_id,
             model_config_id=model_configuration.id,
         )
-        try:
-            session.commit()
-        except Exception as exc:
-            session.rollback()
-            raise ActiveExecutionExistsError(
-                "Chat session already has an active execution"
-            ) from exc
+        session.commit()
 
         response = ChatUserMessageResponse(
             session_id=chat.id,
@@ -422,6 +417,11 @@ class ConversationService:
                 pending_message=HumanMessage(content=content, id=message_id),
             )
             tool_names = [str(getattr(tool, "name", "")) for tool in tools]
+            research_package = ResearchPackageRepository.latest_completed_for_session(
+                session,
+                session_id=chat.id,
+                agent_version_id=chat.agent_version_id,
+            )
             context = assemble_turn_context(
                 context_assembler=ContextAssembler(settings=settings),
                 context_window_tokens=model_configuration.context_window_tokens,
@@ -434,7 +434,7 @@ class ConversationService:
                 user_id=auth.user_id,
                 conversation_id=chat.id,
                 execution_id=execution_id,
-                research_package=None,
+                research_package=research_package,
                 token_counter=token_counter,
             )
             input_tokens = token_counter.count_messages(
@@ -466,23 +466,6 @@ class ConversationService:
             raise CurrentInputTooLargeError(
                 "Current input exceeds the model context budget."
             ) from exc
-
-    def submit_user_message_background(
-        self,
-        session: Session,
-        payload: AgentMessageRequest,
-        auth: AuthContext,
-        idempotency_key: str | None = None,
-        request_id: str | None = None,
-    ) -> ChatUserMessageResponse:
-        created, _is_replayed = self.create_turn(
-            session,
-            payload,
-            auth,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
-        )
-        return created
 
     def get_execution_status(
         self,
@@ -572,6 +555,7 @@ class ConversationService:
         while True:
             with Session(session_bind) as session:
                 execution = session.get(AgentExecution, execution_id)
+                stream_settled = self._execution_stream_settled(session, execution)
                 if execution is not None and execution.streaming_degraded:
                     raise StreamingDegradedError(
                         execution.streaming_degraded_reason or "STREAMING_DEGRADED"
@@ -599,7 +583,7 @@ class ConversationService:
                     return
                 if execution.status == RunStatus.failed:
                     return
-                if execution.status in TERMINAL_EXECUTION_STATUSES:
+                if stream_settled:
                     return
                 time.sleep(max(0.05, poll_interval_seconds))
                 continue
@@ -619,8 +603,29 @@ class ConversationService:
                 return
             if execution.status == RunStatus.failed:
                 return
-            if execution.status in TERMINAL_EXECUTION_STATUSES:
+            if stream_settled:
                 return
+
+    @staticmethod
+    def _execution_stream_settled(
+        session: Session,
+        execution: AgentExecution | None,
+    ) -> bool:
+        if execution is None:
+            return True
+        if execution.status not in TERMINAL_EXECUTION_STATUSES:
+            return False
+        if execution.status != RunStatus.completed:
+            return True
+        if execution.postprocess_completed_at is not None:
+            return True
+        outbox = session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution.id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).first()
+        return outbox is None or outbox.status in {"completed", "failed"}
 
     def _get_execution_in_scope(
         self,
@@ -1153,6 +1158,3 @@ class ConversationService:
                 retryable=True,
             )
         return ErrorDetail(code="EXECUTION_ERROR", message=msg, retryable=False)
-
-
-__all__ = ["ConversationService"]

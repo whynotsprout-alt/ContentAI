@@ -26,10 +26,14 @@ def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> No
     package_script = (ROOT / "tools/package-ubuntu.ps1").read_text(encoding="utf-8")
     maintained_docs = "\n".join(
         (ROOT / path).read_text(encoding="utf-8")
-        for path in ("docs/OPERATIONS.md", "docs/UBUNTU_FROM_SCRATCH.md")
+        for path in (
+            "docs/FRONTEND_DESIGN.md",
+            "docs/BACKEND_DESIGN.md",
+            "docs/DEPLOYMENT.md",
+        )
     )
 
-    assert version == "0.5.0-rc.1"
+    assert version == "0.6.0"
     assert web_package["version"] == version
     assert web_lock["version"] == version
     assert web_lock["packages"][""]["version"] == version
@@ -43,25 +47,25 @@ def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> No
 
 
 def test_maintained_docs_match_current_authentication_and_compose_topology() -> None:
-    design = (ROOT / "docs/DESIGN.md").read_text(encoding="utf-8")
-    operations = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
-    architecture = (ROOT / "docs/ARCHITECTURE.md").read_text(encoding="utf-8")
+    frontend = (ROOT / "docs/FRONTEND_DESIGN.md").read_text(encoding="utf-8")
+    backend = (ROOT / "docs/BACKEND_DESIGN.md").read_text(encoding="utf-8")
+    deployment = (ROOT / "docs/DEPLOYMENT.md").read_text(encoding="utf-8")
 
-    assert "pending_verification" in design
-    assert "403" in design
-    assert "404" in design
-    assert "410 Gone" not in design
-    for document in (design, operations, architecture):
-        assert "side-effect-worker" in document
-        assert "十个" in document
-        assert "三个 Worker" in document or "三个 worker" in document
+    assert "must_change_password" in frontend
+    assert "直接创建已验证、启用" in backend
+    assert "side-effect-worker" in backend
+    assert "side-effect-worker" in deployment
+    assert "10 个服务" in deployment
+    assert "agent-worker" in deployment
+    assert "background-worker" in deployment
 
 
 def test_release_diff_files_have_one_canonical_eof_newline() -> None:
     for relative_path in (
         "apps/api/src/core/client_ip.py",
-        "docs/superpowers/plans/2026-07-17-bootstrap-admin-and-env-cleanup.md",
-        "docs/superpowers/specs/2026-07-17-bootstrap-admin-design.md",
+        "docs/FRONTEND_DESIGN.md",
+        "docs/BACKEND_DESIGN.md",
+        "docs/DEPLOYMENT.md",
     ):
         content = (ROOT / relative_path).read_bytes()
         assert content.endswith(b"\n"), relative_path
@@ -69,7 +73,7 @@ def test_release_diff_files_have_one_canonical_eof_newline() -> None:
 
 
 def test_model_config_persistence_failure_is_a_documented_stable_code() -> None:
-    api_documentation = (ROOT / "docs/API.md").read_text(encoding="utf-8")
+    api_documentation = (ROOT / "docs/BACKEND_DESIGN.md").read_text(encoding="utf-8")
 
     assert "MODEL_CONFIG_PERSISTENCE_FAILED" in api_documentation
     assert "503" in api_documentation
@@ -97,14 +101,14 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path:
         "apps/web/tsconfig.json": "{}\n",
         "apps/web/tsconfig.node.json": "{}\n",
         "apps/web/vite.config.ts": "\n",
-        "docs/OPERATIONS.md": "tracked documentation\n",
+        "docs/DEPLOYMENT.md": "tracked documentation\n",
         "infra/ubuntu/deploy.sh": "#!/usr/bin/env bash\n",
         "infra/ubuntu/health.sh": "#!/usr/bin/env bash\n",
         "infra/ubuntu/backup.sh": "#!/usr/bin/env bash\n",
         "infra/ubuntu/restore.sh": "#!/usr/bin/env bash\n",
         "infra/ubuntu/upgrade.sh": "#!/usr/bin/env bash\n",
         "compose.yaml": "services: {}\n",
-        "pyproject.toml": "[project]\nversion = \"0.5.0-rc.1\"\n",
+        "pyproject.toml": "[project]\nversion = \"0.6.0\"\n",
         "uv.lock": "version = 1\n",
         "requirements.txt": "\n",
         "alembic.ini": "\n",
@@ -177,7 +181,7 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path:
         )
         assert result.returncode == 0, result.stderr
 
-        archive = repository / "dist/contentai-0.5.0-rc.1-ubuntu.tar.gz"
+        archive = repository / "dist/contentai-0.6.0-ubuntu.tar.gz"
         checksum = archive.with_suffix(archive.suffix + ".sha256")
         archives.append(archive)
         archive_bytes.append(archive.read_bytes())
@@ -189,23 +193,23 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(tmp_path:
     assert checksum_texts[0] == checksum_texts[1]
     expected_hash = hashlib.sha256(archive_bytes[0]).hexdigest()
     assert checksum_texts[0] == (
-        f"{expected_hash}  contentai-0.5.0-rc.1-ubuntu.tar.gz"
+        f"{expected_hash}  contentai-0.6.0-ubuntu.tar.gz"
     )
 
     with tarfile.open(archives[0], "r:gz") as packaged:
         names = packaged.getnames()
-        archive_root = "contentai-0.5.0-rc.1-ubuntu"
+        archive_root = "contentai-0.6.0-ubuntu"
         assert all(name == archive_root or name.startswith(f"{archive_root}/") for name in names)
         assert not any("untracked-review" in name for name in names)
         tracked = packaged.extractfile(
-            "contentai-0.5.0-rc.1-ubuntu/apps/api/src/tracked.py"
+            "contentai-0.6.0-ubuntu/apps/api/src/tracked.py"
         )
-        manifest = packaged.extractfile("contentai-0.5.0-rc.1-ubuntu/release-manifest.json")
+        manifest = packaged.extractfile("contentai-0.6.0-ubuntu/release-manifest.json")
         assert tracked is not None
         assert manifest is not None
         tracked_content = tracked.read()
         assert tracked_content == tracked_from_tree, tracked_content
         assert json.loads(manifest.read()) == {
-            "version": "0.5.0-rc.1",
+            "version": "0.6.0",
             "commit": commit,
         }

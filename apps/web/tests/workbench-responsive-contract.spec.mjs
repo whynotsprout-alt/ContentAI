@@ -89,7 +89,7 @@ describe('quiet product workbench contract', () => {
     const userMessageRule = productCss.match(/\.message\.user\s*\{([^}]*)\}/)?.[1] ?? '';
 
     expect(productCss).toMatch(
-      /\.run-activity,[\s\S]*\.workspace-alert,[\s\S]*\.onboarding-empty,[\s\S]*\.message,[\s\S]*\.interrupt-approval,[\s\S]*\.composer-wrap > \.field-error,[\s\S]*\.composer,[\s\S]*\.composer-hint[\s\S]*translate:\s*var\(--conversation-inline-shift\) 0/
+      /\.workspace-alert,[\s\S]*\.onboarding-empty,[\s\S]*\.message,[\s\S]*\.interrupt-approval,[\s\S]*\.composer-wrap > \.field-error,[\s\S]*\.composer,[\s\S]*\.composer-hint[\s\S]*translate:\s*var\(--conversation-inline-shift\) 0/
     );
     expect(productCss).toMatch(
       /@media \(min-width: 1440px\)[\s\S]*--conversation-inline-shift:\s*calc\(var\(--session-rail-width\) \* -0\.5\)/
@@ -151,11 +151,11 @@ describe('quiet product workbench contract', () => {
     expect(legacy420Block).not.toMatch(/\.session-rail[\s\S]*max-width:\s*none/);
   });
 
-  it('gives icon-only tablet header actions explicit accessible names', async () => {
+  it('keeps the tablet admin action labelled after removing the duplicate account shortcut', async () => {
     const header = await read('../src/components/WorkbenchHeader.vue');
 
-    expect(header).toMatch(/class="nav-button"[^>]*aria-label="内容账号"/);
-    expect(header).toMatch(/class="nav-button"[^>]*aria-label="管理后台"/);
+    expect(header).not.toMatch(/class="nav-button"[^>]*aria-label="内容账号"/);
+    expect(header).toMatch(/class="nav-button header-admin-button"[^>]*aria-label="管理后台"/);
   });
 
   it('exposes the phone rail as a modal dialog and keeps non-drawer navigation semantics', async () => {

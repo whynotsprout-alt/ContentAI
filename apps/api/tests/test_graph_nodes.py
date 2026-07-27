@@ -4,9 +4,10 @@ import agent.graph.nodes as graph_nodes
 import httpx
 import pytest
 from agent.graph.factory import AgentGraphBuilder
-from agent.graph.nodes import build_agent_node, build_tool_error_node
+from agent.graph.nodes import ToolIntentDecision, build_agent_node, build_tool_error_node
 from agent.workflows.deep_research import ContentEvidenceInvalidError
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
 
 
 class _EventWriter:
@@ -34,6 +35,32 @@ class _FlakyStreamModel:
         if self.calls <= self.failures:
             raise httpx.RemoteProtocolError("incomplete chunked read")
         return AIMessage(content="Recovered")
+
+
+class _TextualToolCallModel:
+    def invoke(self, _messages: object) -> AIMessage:
+        return AIMessage(
+            content=(
+                "我来帮你抓取当前热点。\n\n"
+                '<invoke name="fetch_hotspots">\n'
+                '<parameter name="query">商业 消费 品牌 平台</parameter>\n'
+                "</invoke>\n"
+                '{"result":"这是模型伪造的热点结果，不得作为最终回复。"}'
+            )
+        )
+
+
+class _SystemWarningToolCallModel:
+    def invoke(self, _messages: object) -> AIMessage:
+        return AIMessage(
+            content=(
+                "我来帮你获取实时热点。\n\n"
+                "<system_warning>調用開始 fetch_hotspots 中斷聊天 "
+                "hjmedia_pipeline 上 (ID: toolu_016CxTQAj2qBBP8mA7ekY23s)</system_warning>\n\n"
+                "<function_results>Error executing tool: rate limited</function_results>\n\n"
+                "稍等片刻后我再帮你重试。"
+            )
+        )
 
 
 class _SelectionModel:
@@ -124,6 +151,197 @@ def test_agent_node_stops_after_limited_stream_retries(monkeypatch: pytest.Monke
     assert model.calls == graph_nodes.MODEL_STREAM_MAX_ATTEMPTS
 
 
+def test_agent_node_normalizes_provider_textual_tool_call_before_routing():
+    @tool("fetch_hotspots")
+    def fetch_hotspots(
+        source: str = "all",
+        platforms: str = "all",
+        rss_sources: str = "all",
+    ) -> dict[str, str]:
+        """Fetch current hotspots."""
+        return {"result": "real tool result"}
+
+    result = build_agent_node(
+        _TextualToolCallModel(),
+        tools=[fetch_hotspots],
+    )(
+        {
+            "messages": [HumanMessage(content="继续执行刚才的动作")],
+            "available_tool_names": ["fetch_hotspots"],
+            "task_status": "thinking",
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.content == ""
+    assert message.tool_calls == [
+        {
+            "name": "fetch_hotspots",
+            "args": {},
+            "id": message.tool_calls[0]["id"],
+            "type": "tool_call",
+        }
+    ]
+    assert result["task_status"] == "executing"
+
+
+def test_agent_node_normalizes_provider_system_warning_tool_call_before_routing():
+    @tool("fetch_hotspots")
+    def fetch_hotspots(
+        source: str = "all",
+        platforms: str = "all",
+        rss_sources: str = "all",
+    ) -> dict[str, str]:
+        """Fetch current hotspots."""
+        return {"result": "real tool result"}
+
+    result = build_agent_node(
+        _SystemWarningToolCallModel(),
+        tools=[fetch_hotspots],
+    )(
+        {
+            "messages": [HumanMessage(content="继续执行刚才的动作")],
+            "available_tool_names": ["fetch_hotspots"],
+            "task_status": "thinking",
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.content == ""
+    assert message.tool_calls[0]["name"] == "fetch_hotspots"
+    assert message.tool_calls[0]["args"] == {}
+    assert result["task_status"] == "executing"
+
+
+def test_agent_node_does_not_repeat_hotspot_fetch_after_tool_result():
+    @tool("fetch_hotspots")
+    def fetch_hotspots() -> dict[str, str]:
+        """Fetch current hotspots."""
+        return {"result": "real tool result"}
+
+    result = build_agent_node(
+        _Model(),
+        tools=[fetch_hotspots],
+    )(
+        {
+            "messages": [
+                HumanMessage(content="找热点"),
+                ToolMessage(
+                    content=json.dumps(
+                        {
+                            "result": "real tool result",
+                            "filtering": {"result_ready": True},
+                        }
+                    ),
+                    name="fetch_hotspots",
+                    tool_call_id="call-hotspots",
+                ),
+            ],
+            "available_tool_names": ["fetch_hotspots"],
+            "task_status": "thinking",
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.content == "real tool result"
+    assert not message.tool_calls
+    assert result["task_status"] == "completed"
+
+
+def test_agent_node_uses_model_intent_gate_when_native_tool_call_is_missing():
+    @tool("prepare_topic_research")
+    def prepare_topic_research(topic: str) -> dict[str, str]:
+        """Research one confirmed topic."""
+        return {"topic": topic}
+
+    class _NarratingModel:
+        def invoke(self, _messages: object) -> AIMessage:
+            return AIMessage(
+                content="Let me call the research tool. Calling prepare_topic_research now."
+            )
+
+    class _IntentModel:
+        def __init__(self) -> None:
+            self.messages: list[object] = []
+
+        def invoke(self, messages: list[object]) -> ToolIntentDecision:
+            self.messages = messages
+            return ToolIntentDecision(
+                action="call_tool",
+                tool_name="prepare_topic_research",
+                arguments={"topic": "携程51.79亿罚单完整解读,垄断生意走到头"},
+            )
+
+    intent_model = _IntentModel()
+
+    result = build_agent_node(
+        _NarratingModel(),
+        tools=[prepare_topic_research],
+        tool_intent_model=intent_model,
+    )(
+        {
+            "messages": [
+                AIMessage(content="1. **携程罚单完整解读** — 82 分"),
+                HumanMessage(content="换个角度分析携程罚单背后的平台规则"),
+            ],
+            "available_tool_names": ["prepare_topic_research"],
+            "task_status": "thinking",
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.content == ""
+    assert message.tool_calls[0]["name"] == "prepare_topic_research"
+    assert message.tool_calls[0]["args"] == {
+        "topic": "携程51.79亿罚单完整解读,垄断生意走到头"
+    }
+    assert any(
+        "Candidate assistant reply" in str(message.content)
+        for message in intent_model.messages
+    )
+
+
+def test_agent_node_preserves_native_tool_calls_without_intent_gate():
+    @tool("fetch_hotspots")
+    def fetch_hotspots() -> dict[str, str]:
+        """Fetch current hotspots."""
+        return {"result": "real tool result"}
+
+    class _NativeToolCallModel:
+        def invoke(self, _messages: object) -> AIMessage:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "fetch_hotspots",
+                        "args": {},
+                        "id": "call-native-hotspots",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+
+    class _FailingIntentModel:
+        def invoke(self, _messages: object) -> ToolIntentDecision:
+            raise AssertionError("native calls must bypass the intent gate")
+
+    result = build_agent_node(
+        _NativeToolCallModel(),
+        tools=[fetch_hotspots],
+        tool_intent_model=_FailingIntentModel(),
+    )(
+        {
+            "messages": [HumanMessage(content="给我看今天热点")],
+            "available_tool_names": ["fetch_hotspots"],
+            "task_status": "thinking",
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.tool_calls[0]["name"] == "fetch_hotspots"
+    assert result["task_status"] == "executing"
+
+
 def test_tool_error_node_does_not_append_an_assistant_prefill_message():
     result = build_tool_error_node()(
         {
@@ -179,21 +397,34 @@ def test_research_tool_result_is_carried_in_execution_graph_state():
     assert result["research_topic_hash"] == "hash-local"
 
 
-def test_research_final_node_renders_only_deterministic_claim_selection_with_isolated_callbacks():
+def test_research_final_node_formats_selected_evidence_with_isolated_callbacks():
     final_model = _SelectionModel([{"claim_ids": ["clm_node_claim"]}])
+    presentation_model = _SelectionModel(
+        [
+            {
+                "content": (
+                    "## 核心结论\n\n这是面向用户的研究简报，内容只来自已核验资料。\n\n"
+                    "## 来源\n\n[节点来源](https://node.example/source)"
+                )
+            }
+        ]
+    )
 
-    result = build_agent_node(_Model(), research_final_model=final_model)(_research_final_state())
+    result = build_agent_node(
+        _Model(),
+        research_final_model=final_model,
+        research_presentation_model=presentation_model,
+    )(_research_final_state())
 
     message = result["messages"][0]
-    assert message.content == (
-        "Research-backed findings:\n"
-        "1. Durable node finding. [S1](https://node.example/source)"
-    )
+    assert message.content.startswith("## 核心结论")
+    assert "S1" not in message.content
     assert set(message.additional_kwargs) == {"research_backed_final_proof"}
     assert message.additional_kwargs["research_backed_final_proof"]["claim_ids"] == [
         "clm_node_claim"
     ]
     assert final_model.calls[0][1] == {"callbacks": []}
+    assert presentation_model.calls[0][1] == {"callbacks": []}
 
 
 def test_research_final_model_factory_is_not_built_for_plain_chat():
@@ -203,16 +434,37 @@ def test_research_final_model_factory_is_not_built_for_plain_chat():
         calls.append("built")
         return _SelectionModel([{"claim_ids": ["clm_node_claim"]}])
 
-    plain_result = build_agent_node(_Model(), research_final_model=build_final_model)(
+    def build_presentation_model() -> _SelectionModel:
+        calls.append("presentation-built")
+        return _SelectionModel(
+            [
+                {
+                    "content": (
+                        "## 核心结论\n\n这是仅依据已核验资料生成的说明。\n\n"
+                        "## 来源\n\n[节点来源](https://node.example/source)"
+                    )
+                }
+            ]
+        )
+
+    plain_result = build_agent_node(
+        _Model(),
+        research_final_model=build_final_model,
+        research_presentation_model=build_presentation_model,
+    )(
         {"messages": [], "task_status": "thinking"}
     )
-    research_result = build_agent_node(_Model(), research_final_model=build_final_model)(
+    research_result = build_agent_node(
+        _Model(),
+        research_final_model=build_final_model,
+        research_presentation_model=build_presentation_model,
+    )(
         _research_final_state()
     )
 
     assert plain_result["messages"][0].content == "Hello world"
-    assert research_result["messages"][0].content.startswith("Research-backed findings:")
-    assert calls == ["built"]
+    assert research_result["messages"][0].content.startswith("## 核心结论")
+    assert calls == ["built", "presentation-built"]
 
 
 @pytest.mark.parametrize(

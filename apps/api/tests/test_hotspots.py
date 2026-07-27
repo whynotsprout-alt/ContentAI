@@ -4,8 +4,13 @@ import json
 from typing import Any
 
 import integrations.hotspot.hotspots as hotspots
+import pytest
 from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.tools.hotspot_filter import filter_hotspot_candidates, normalize_hotspot_candidates
+from agent.tools.hotspot_filter import (
+    HotspotFilterRuntimeError,
+    filter_hotspot_candidates,
+    normalize_hotspot_candidates,
+)
 from agent.tools.hotspots import fetch_hotspots
 from agent.tools.registry import build_tool_set, tool_names
 
@@ -473,7 +478,7 @@ def test_fetch_hotspots_marks_filtered_result_as_format_only(monkeypatch):
     assert "候选热点" in result["result"]
 
 
-def test_fetch_hotspots_returns_explicit_error_when_filter_prompt_is_missing(monkeypatch):
+def test_fetch_hotspots_raises_terminal_error_when_filter_prompt_is_missing(monkeypatch):
     monkeypatch.setattr(
         "agent.tools.hotspots.fetch_hotspot_sources",
         lambda **_: {"items": [{"title": "候选热点"}], "sources": {}, "errors": []},
@@ -490,10 +495,41 @@ def test_fetch_hotspots_returns_explicit_error_when_filter_prompt_is_missing(mon
     )
 
     with tool_runtime_scope(context):
-        result = fetch_hotspots.invoke({"source": "all"})
+        with pytest.raises(HotspotFilterRuntimeError) as exc_info:
+            fetch_hotspots.invoke({"source": "all"})
 
-    assert result["items"] == []
-    assert result["filtering"]["code"] == "TOPIC_SCORING_PROMPT_REQUIRED"
+    assert exc_info.value.code == "TOPIC_SCORING_PROMPT_REQUIRED"
+
+
+def test_fetch_hotspots_raises_terminal_error_when_filter_model_returns_plain_text(
+    monkeypatch,
+):
+    class PlainTextFilterModel:
+        def invoke(self, _: list[Any]) -> str:
+            return "I cannot produce the requested schema."
+
+    monkeypatch.setattr(
+        "agent.tools.hotspots.fetch_hotspot_sources",
+        lambda **_: {"items": [{"title": "候选热点"}], "sources": {}, "errors": []},
+    )
+    context = ToolRuntimeContext(
+        execution_id="exe_1",
+        conversation_id="conv_1",
+        session_id="session_1",
+        agent_id="agent_1",
+        user_id="user_1",
+        allowed_hotspot_sources=["douyin"],
+        permissions=("fetch_hotspots",),
+        topic_scoring_prompt="按可验证性评分。",
+        hotspot_filter_model=PlainTextFilterModel(),
+        long_term_memory=None,  # type: ignore[arg-type]
+    )
+
+    with tool_runtime_scope(context):
+        with pytest.raises(HotspotFilterRuntimeError) as exc_info:
+            fetch_hotspots.invoke({"source": "all"})
+
+    assert exc_info.value.code == "HOTSPOT_FILTER_INVALID_RESULT"
 
 
 def test_fetch_hotspot_sources_emits_source_level_markers(monkeypatch):

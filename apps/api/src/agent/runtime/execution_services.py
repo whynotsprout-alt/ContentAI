@@ -50,6 +50,10 @@ from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
 
 LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
+POSTPROCESS_STEP_MEMORY = "memory"
+POSTPROCESS_STEP_SUMMARY = "summary"
+POSTPROCESS_STEP_TITLE = "title"
+POSTPROCESS_COMPENSATION_VERSION = 1
 logger = logging.getLogger(__name__)
 
 
@@ -539,9 +543,6 @@ class AgentExecutionEngine:
             return {}
         search_settings = getattr(settings, "search", settings)
         return {
-            "traffic_relay_api_key": _secret_value(
-                getattr(search_settings, "traffic_relay_api_key", ""),
-            ),
             "tikhub_api_key": _secret_value(
                 getattr(search_settings, "tikhub_api_key", ""),
             ),
@@ -573,6 +574,7 @@ class AgentExecutionEngine:
         new_messages: list[BaseMessage] = []
         streamed_assistant_parts: list[str] = []
         streamed_assistant_by_id: dict[str, str] = {}
+        quarantined_assistant_chunks: dict[str, list[str]] = {}
         stream_message_id: str = ""
 
         graph_started_at = time.perf_counter()
@@ -621,6 +623,7 @@ class AgentExecutionEngine:
                     event_writer=event_writer,
                     streamed_assistant_parts=streamed_assistant_parts,
                     streamed_assistant_by_id=streamed_assistant_by_id,
+                    quarantined_assistant_chunks=quarantined_assistant_chunks,
                 )
                 if chunk:
                     if llm_started_at is None or llm_message_id != stream_message_id:
@@ -664,6 +667,14 @@ class AgentExecutionEngine:
 
                 update_nodes = _extract_node_names(payload)
                 update_messages = _messages_from_update_payload(payload)
+                if "agent" in update_nodes:
+                    _finalize_quarantined_assistant_chunks(
+                        messages=update_messages,
+                        execution_id=execution_id,
+                        event_writer=event_writer,
+                        streamed_assistant_parts=streamed_assistant_parts,
+                        quarantined_assistant_chunks=quarantined_assistant_chunks,
+                    )
                 if update_messages:
                     update_text = _assistant_text_from_messages(update_messages)
                     if update_text and not streamed_assistant_parts:
@@ -806,6 +817,9 @@ class AgentPostExecutionService:
                 model_config_id=execution.model_config_id,
                 kind="postprocess",
                 request_id=request_id or "",
+                payload={
+                    "postprocess_compensation_version": POSTPROCESS_COMPENSATION_VERSION,
+                },
             )
         elif outbox.status not in {"published", "completed", "failed"}:
             now = utcnow()
@@ -935,29 +949,98 @@ class AgentPostExecutionService:
                     "model_config_id": execution.model_config_id,
                 }
 
-            model_gateway = self.container.gateway_for_model_config(
-                context["model_config_id"]
-            )
-            if self.settings.agent.memory_after_turn_enabled:
+            resolved_gateway: list[Any] = []
+
+            def resolve_model_gateway() -> Any:
+                if resolved_gateway:
+                    return resolved_gateway[0]
+                model_gateway = self.container.gateway_for_model_config(
+                    context["model_config_id"]
+                )
+                resolved_gateway.append(model_gateway)
+                return model_gateway
+
+            def run_memory_step() -> None:
+                if not self.settings.agent.memory_after_turn_enabled:
+                    return
                 _extract_memory_background(
                     **context,
-                    model_gateway=model_gateway,
+                    model_gateway=resolve_model_gateway(),
                     settings=self.settings,
                     request_id=request_id,
                     conversation_id=context["session_id"],
                 )
-            _refresh_short_summary_background(
-                session_id=context["session_id"],
-                settings=self.settings,
-            )
-            _update_title_background(
-                session_id=context["session_id"],
-                execution_id=context["execution_id"],
-                user_id=context["user_id"],
-                user_message=context["user_message"],
-                settings=self.settings,
-                model_gateway=model_gateway,
-            )
+
+            def run_summary_step() -> None:
+                _refresh_short_summary_background(
+                    session_id=context["session_id"],
+                    settings=self.settings,
+                )
+
+            def run_title_step() -> None:
+                try:
+                    model_gateway = resolve_model_gateway()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Session title model lookup failed; using fallback: execution=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
+                    model_gateway = None
+                updated_title = _update_title_background(
+                    session_id=context["session_id"],
+                    execution_id=context["execution_id"],
+                    user_id=context["user_id"],
+                    user_message=context["user_message"],
+                    settings=self.settings,
+                    model_gateway=model_gateway,
+                )
+                if updated_title is not None:
+                    _emit_session_title_updated(
+                        execution_id=context["execution_id"],
+                        session_id=context["session_id"],
+                        title=updated_title,
+                        trace_id=context["trace_id"],
+                        thread_id=context["thread_id"],
+                        request_id=request_id,
+                        settings=self.settings,
+                    )
+
+            failures: list[str] = []
+            for step_name, callback in (
+                (POSTPROCESS_STEP_TITLE, run_title_step),
+                (POSTPROCESS_STEP_SUMMARY, run_summary_step),
+                (POSTPROCESS_STEP_MEMORY, run_memory_step),
+            ):
+                if self._postprocess_step_completed(execution_id, step_name):
+                    continue
+                try:
+                    callback()
+                except Exception as exc:  # noqa: BLE001
+                    error = classify_runtime_error(exc).message
+                    logger.warning(
+                        "Post-execution step failed: execution=%s step=%s error_type=%s",
+                        execution_id,
+                        step_name,
+                        type(exc).__name__,
+                    )
+                    self._record_postprocess_step(
+                        execution_id,
+                        step_name,
+                        status="failed",
+                        error=error,
+                    )
+                    failures.append(f"{step_name}: {error}")
+                    continue
+                self._record_postprocess_step(
+                    execution_id,
+                    step_name,
+                    status="completed",
+                )
+
+            if failures:
+                self._mark_processing_failure(execution_id, "; ".join(failures))
+                return
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Post-execution processing failed: execution=%s error_type=%s",
@@ -990,6 +1073,66 @@ class AgentPostExecutionService:
                 outbox.last_error = ""
                 outbox.updated_at = utcnow()
                 session.add(outbox)
+            session.commit()
+
+    def _postprocess_step_completed(self, execution_id: str, step_name: str) -> bool:
+        with Session(get_engine(self.settings)) as session:
+            outbox = session.exec(
+                select(ExecutionOutbox).where(
+                    ExecutionOutbox.execution_id == execution_id,
+                    ExecutionOutbox.kind == "postprocess",
+                )
+            ).first()
+            if outbox is None:
+                return False
+            payload = outbox.payload if isinstance(outbox.payload, dict) else {}
+            steps = payload.get("postprocess_steps")
+            if not isinstance(steps, dict):
+                return False
+            step = steps.get(step_name)
+            return isinstance(step, dict) and step.get("status") == "completed"
+
+    def _record_postprocess_step(
+        self,
+        execution_id: str,
+        step_name: str,
+        *,
+        status: str,
+        error: str = "",
+    ) -> None:
+        with Session(get_engine(self.settings)) as session:
+            outbox = session.exec(
+                select(ExecutionOutbox)
+                .where(
+                    ExecutionOutbox.execution_id == execution_id,
+                    ExecutionOutbox.kind == "postprocess",
+                )
+                .with_for_update()
+            ).first()
+            if outbox is None:
+                raise RuntimeError("postprocess outbox is missing")
+            payload = dict(outbox.payload or {})
+            payload.setdefault(
+                "postprocess_compensation_version",
+                POSTPROCESS_COMPENSATION_VERSION,
+            )
+            steps = dict(payload.get("postprocess_steps") or {})
+            previous = steps.get(step_name)
+            previous_attempts = (
+                int(previous.get("attempts") or 0) if isinstance(previous, dict) else 0
+            )
+            step_payload: dict[str, Any] = {
+                "status": status,
+                "attempts": previous_attempts + 1,
+                "updated_at": utcnow().isoformat(),
+            }
+            if error:
+                step_payload["last_error"] = error[:2000]
+            steps[step_name] = step_payload
+            payload["postprocess_steps"] = steps
+            outbox.payload = payload
+            outbox.updated_at = utcnow()
+            session.add(outbox)
             session.commit()
 
     def _mark_processing_failure(self, execution_id: str, error: str) -> None:
@@ -1190,13 +1333,13 @@ def _update_title_background(
     user_message: str,
     settings: Any,
     model_gateway: Any | None = None,
-) -> None:
+) -> str | None:
     with Session(get_engine(settings)) as session:
         chat = session.get(ChatSession, session_id)
         if chat is None:
-            return
+            return None
         if chat.title != "New Session":
-            return
+            return None
         chat.title = _generate_session_title(
             user_message=user_message,
             model_gateway=model_gateway,
@@ -1215,6 +1358,7 @@ def _update_title_background(
         chat.touch_updated_at()
         session.add(chat)
         session.commit()
+        return chat.title
 
 
 def _generate_session_title(
@@ -1241,7 +1385,7 @@ def _generate_session_title(
             result = model.invoke(prompt)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Session title generation failed: error_type=%s", type(exc).__name__)
-        raise RuntimeError("Session title generation failed.") from None
+        return fallback
     if isinstance(result, SessionTitleResult):
         raw_title = result.title
     elif isinstance(result, dict):
@@ -1267,6 +1411,39 @@ def _fallback_session_title(content: str) -> str:
     return normalized
 
 
+def _emit_session_title_updated(
+    *,
+    execution_id: str,
+    session_id: str,
+    title: str,
+    trace_id: str | None,
+    thread_id: str | None,
+    request_id: str | None,
+    settings: Any,
+) -> None:
+    with Session(get_engine(settings)) as session:
+        writer = PersistentAgentEventWriter(
+            execution_id,
+            session.get_bind(),
+            settings=settings,
+            trace_id=trace_id,
+            thread_id=thread_id,
+            request_id=request_id,
+            conversation_id=session_id,
+        )
+        try:
+            writer.emit(
+                "session_title_updated",
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "title": title,
+                },
+            )
+        finally:
+            writer.close()
+
+
 def _emit_postprocess_marker(
     writer: Any,
     *,
@@ -1287,6 +1464,7 @@ def _emit_message_chunk(
     event_writer: Any,
     streamed_assistant_parts: list[str],
     streamed_assistant_by_id: dict[str, str],
+    quarantined_assistant_chunks: dict[str, list[str]],
 ) -> tuple[str, str]:
     message, metadata = _extract_message_payload(payload)
     if message is None:
@@ -1299,19 +1477,6 @@ def _emit_message_chunk(
     message_id = str(getattr(message, "id", "") or "")
     tool_chunks = getattr(message, "tool_call_chunks", None)
     if tool_chunks:
-        for tool_chunk in tool_chunks:
-            if not isinstance(tool_chunk, dict):
-                continue
-            event_writer.emit(
-                "tool_progress",
-                {
-                    "execution_id": execution_id,
-                    "message_id": message_id,
-                    "tool_call_id": str(tool_chunk.get("id") or tool_chunk.get("index") or ""),
-                    "tool_name": str(tool_chunk.get("name") or ""),
-                    "chunk": _make_public_tool_chunk(tool_chunk),
-                },
-            )
         return message_id, ""
     if getattr(message, "tool_calls", None):
         return message_id, ""
@@ -1327,18 +1492,58 @@ def _emit_message_chunk(
         return message_id, ""
 
     streamed_assistant_by_id[message_id] = normalized + delta
-    streamed_assistant_parts.append(delta)
-    event_writer.emit(
-        "assistant_message_delta",
-        {
-            "execution_id": execution_id,
-            "message_type": MessageType.markdown,
-            "message_id": message_id,
-            "chunk": delta,
-            "done": False,
-        },
-    )
+    quarantined_assistant_chunks.setdefault(message_id, []).append(delta)
     return message_id, delta
+
+
+def _finalize_quarantined_assistant_chunks(
+    *,
+    messages: list[BaseMessage],
+    execution_id: str,
+    event_writer: Any,
+    streamed_assistant_parts: list[str],
+    quarantined_assistant_chunks: dict[str, list[str]],
+) -> None:
+    if not quarantined_assistant_chunks:
+        return
+    agent_response = next(
+        (message for message in reversed(messages) if isinstance(message, AIMessage)),
+        None,
+    )
+    if agent_response is None:
+        return
+    if getattr(agent_response, "tool_calls", None):
+        quarantined_assistant_chunks.clear()
+        return
+    response_id = str(getattr(agent_response, "id", "") or "")
+    selected: list[tuple[str, list[str]]] = []
+    if response_id and response_id in quarantined_assistant_chunks:
+        selected = [(response_id, quarantined_assistant_chunks[response_id])]
+    elif len(quarantined_assistant_chunks) == 1:
+        selected = list(quarantined_assistant_chunks.items())
+    else:
+        response_text = message_to_text(agent_response)
+        matches = [
+            (message_id, chunks)
+            for message_id, chunks in quarantined_assistant_chunks.items()
+            if "".join(chunks) == response_text
+        ]
+        if len(matches) == 1:
+            selected = matches
+    for message_id, chunks in selected:
+        for chunk in chunks:
+            streamed_assistant_parts.append(chunk)
+            event_writer.emit(
+                "assistant_message_delta",
+                {
+                    "execution_id": execution_id,
+                    "message_type": MessageType.markdown,
+                    "message_id": message_id,
+                    "chunk": chunk,
+                    "done": False,
+                },
+            )
+    quarantined_assistant_chunks.clear()
 
 
 def _stream_mode_and_payload(item: Any) -> tuple[str | None, Any]:
@@ -1348,11 +1553,6 @@ def _stream_mode_and_payload(item: Any) -> tuple[str | None, Any]:
     if isinstance(item, tuple) and len(item) == 2:
         return str(item[0]), item[1]
     return None, None
-
-
-def _make_public_tool_chunk(value: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"name", "args", "id", "index"}
-    return {key: value[key] for key in allowed if key in value}
 
 
 def _public_custom_event(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1454,6 +1654,7 @@ def _validated_research_backed_final_answer(
     expected_answer = validate_research_final_proof(
         additional_kwargs["research_backed_final_proof"],
         evidence=evidence,
+        answer=final_message.content,
     )
     if not isinstance(final_message.content, str) or final_message.content != expected_answer:
         raise ContentEvidenceInvalidError

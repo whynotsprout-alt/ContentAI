@@ -19,6 +19,14 @@ class ResearchFinalSelection(BaseModel):
     claim_ids: list[str] = Field(min_length=1, max_length=16)
 
 
+class ResearchFinalPresentation(BaseModel):
+    """Model-authored, citation-checked presentation of selected evidence only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=40, max_length=16_000)
+
+
 def parse_research_identity(
     package_id: Any,
     topic_hash: Any,
@@ -163,6 +171,93 @@ def validate_research_final_selection(
     return selection
 
 
+def select_research_evidence(
+    evidence: dict[str, Any],
+    claim_ids: list[str],
+) -> dict[str, Any]:
+    """Return only the durable claims and sources selected for final presentation."""
+    selection = validate_research_final_selection({"claim_ids": claim_ids}, evidence=evidence)
+    claims_by_id = {
+        str(claim.get("claim_id")): claim
+        for claim in evidence["claims"]
+        if isinstance(claim, dict)
+    }
+    source_by_id = {
+        str(source.get("source_id")): source
+        for source in evidence.get("sources", [])
+        if isinstance(source, dict)
+    }
+    selected_claims: list[dict[str, Any]] = []
+    selected_source_ids: set[str] = set()
+    for claim_id in selection.claim_ids:
+        claim = claims_by_id.get(claim_id)
+        if not isinstance(claim, dict):
+            raise ContentEvidenceInvalidError
+        selected_claims.append(claim)
+        selected_source_ids.update(str(source_id) for source_id in claim.get("source_ids", []))
+    selected_sources = [
+        source for source_id, source in source_by_id.items() if source_id in selected_source_ids
+    ]
+    if not selected_claims or len(selected_sources) != len(selected_source_ids):
+        raise ContentEvidenceInvalidError
+    return {
+        "research_pack_id": evidence.get("research_pack_id"),
+        "topic_hash": evidence.get("topic_hash"),
+        "topic": evidence.get("topic", ""),
+        "claims": selected_claims,
+        "sources": selected_sources,
+    }
+
+
+def coerce_research_final_presentation(value: Any) -> ResearchFinalPresentation:
+    if isinstance(value, ResearchFinalPresentation):
+        return value
+    try:
+        if isinstance(value, dict):
+            return ResearchFinalPresentation.model_validate(value)
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return ResearchFinalPresentation.model_validate(model_dump())
+    except ValidationError as exc:
+        raise ContentEvidenceInvalidError from exc
+    raise ContentEvidenceInvalidError
+
+
+def validate_research_final_presentation(
+    value: Any,
+    *,
+    selected_evidence: dict[str, Any],
+) -> ResearchFinalPresentation:
+    """Accept readable prose only when it cites exactly the selected durable sources."""
+    presentation = coerce_research_final_presentation(value)
+    content = presentation.content.strip()
+    sources = selected_evidence.get("sources") if isinstance(selected_evidence, dict) else None
+    if not content or not isinstance(sources, list):
+        raise ContentEvidenceInvalidError
+    allowed_urls = {
+        str(source.get("url") or "").strip()
+        for source in sources
+        if isinstance(source, dict) and str(source.get("url") or "").strip()
+    }
+    source_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in sources
+        if isinstance(source, dict) and str(source.get("source_id") or "").strip()
+    }
+    cited_urls = re.findall(r"\[[^\]\n]{1,500}\]\((https?://[^\s)]+)\)", content)
+    if (
+        not allowed_urls
+        or set(cited_urls) != allowed_urls
+        or len(cited_urls) != len(allowed_urls)
+    ):
+        raise ContentEvidenceInvalidError
+    for source_id in source_ids:
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(source_id)}(?![A-Za-z0-9_-])", content):
+            raise ContentEvidenceInvalidError
+    presentation.content = content
+    return presentation
+
+
 def render_deterministic_research_answer(
     evidence: dict[str, Any],
     claim_ids: list[str],
@@ -197,18 +292,25 @@ def render_deterministic_research_answer(
     return "\n".join(lines)
 
 
-def build_research_final_proof(evidence: dict[str, Any], claim_ids: list[str]) -> dict[str, Any]:
+def build_research_final_proof(
+    evidence: dict[str, Any],
+    claim_ids: list[str],
+    answer: str,
+) -> dict[str, Any]:
     selection = validate_research_final_selection({"claim_ids": claim_ids}, evidence=evidence)
     package_id = str(evidence.get("research_pack_id") or "").strip()
     topic_hash = str(evidence.get("topic_hash") or "").strip()
     if not package_id or not topic_hash:
         raise ContentEvidenceInvalidError
-    answer = render_deterministic_research_answer(evidence, selection.claim_ids)
+    selected_evidence = select_research_evidence(evidence, selection.claim_ids)
+    presentation = validate_research_final_presentation(
+        {"content": answer}, selected_evidence=selected_evidence
+    )
     digest_payload = {
         "package_id": package_id,
         "topic_hash": topic_hash,
         "claim_ids": selection.claim_ids,
-        "answer": answer,
+        "answer": presentation.content,
     }
     digest = hashlib.sha256(
         json.dumps(
@@ -226,8 +328,8 @@ def build_research_final_proof(evidence: dict[str, Any], claim_ids: list[str]) -
     }
 
 
-def validate_research_final_proof(proof: Any, *, evidence: dict[str, Any]) -> str:
-    """Validate proof fields against durable evidence and return its expected public answer."""
+def validate_research_final_proof(proof: Any, *, evidence: dict[str, Any], answer: Any) -> str:
+    """Validate a readable final answer against durable evidence and its proof."""
     if not isinstance(proof, dict) or set(proof) != {
         "package_id",
         "topic_hash",
@@ -238,10 +340,12 @@ def validate_research_final_proof(proof: Any, *, evidence: dict[str, Any]) -> st
     claim_ids = proof.get("claim_ids")
     if not isinstance(claim_ids, list) or not all(isinstance(item, str) for item in claim_ids):
         raise ContentEvidenceInvalidError
-    expected = build_research_final_proof(evidence, claim_ids)
+    if not isinstance(answer, str):
+        raise ContentEvidenceInvalidError
+    expected = build_research_final_proof(evidence, claim_ids, answer)
     if proof != expected:
         raise ContentEvidenceInvalidError
-    return render_deterministic_research_answer(evidence, claim_ids)
+    return answer.strip()
 
 
 def _stable_claim_id(claim: str, source_ids: list[str]) -> str:
@@ -262,11 +366,14 @@ def _stable_claim_id(claim: str, source_ids: list[str]) -> str:
 
 __all__ = [
     "ResearchFinalSelection",
+    "ResearchFinalPresentation",
     "build_research_final_proof",
     "build_supported_research_evidence",
     "coerce_research_final_selection",
     "parse_research_identity",
     "render_deterministic_research_answer",
+    "select_research_evidence",
     "validate_research_final_proof",
+    "validate_research_final_presentation",
     "validate_research_final_selection",
 ]

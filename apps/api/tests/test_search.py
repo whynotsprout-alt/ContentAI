@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -158,6 +159,62 @@ def test_search_result_urls_are_never_requested(monkeypatch):
     asyncio.run(search_integration.asearch_metaso_sources("no page fetch"))
 
     assert result_url not in {call["url"] for call in FakeAsyncClient.calls}
+
+
+def test_shared_cache_reads_do_not_block_parallel_provider_searches(monkeypatch):
+    settings = fake_settings()
+    settings.env = Env.development
+    settings.redis = SimpleNamespace(url="redis://unresolvable.invalid:6379/0")
+    monkeypatch.setattr(search, "get_settings", lambda: settings)
+
+    cache_read_count = 0
+    cache_read_lock = threading.Lock()
+    both_reads_started = threading.Event()
+    overlapped_reads: list[bool] = []
+
+    def blocking_cache_get(_cache: Any, _key: str) -> None:
+        nonlocal cache_read_count
+        with cache_read_lock:
+            cache_read_count += 1
+            if cache_read_count == 2:
+                both_reads_started.set()
+        overlapped_reads.append(both_reads_started.wait(timeout=0.5))
+
+    monkeypatch.setattr(search.SharedJsonCache, "get", blocking_cache_get)
+    monkeypatch.setattr(search.SharedJsonCache, "set", lambda *_args, **_kwargs: None)
+
+    async def provider_result(provider: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "provider": provider,
+            "items": [{"url": f"https://{provider}.example/result"}],
+        }
+
+    async def run_searches() -> None:
+        await asyncio.gather(
+            search._cached_provider_search(
+                provider="metaso",
+                query="parallel cache probe",
+                result_size=1,
+                timeout=5,
+                api_key="metaso-key",
+                success_ttl=300,
+                call=lambda _deadline: provider_result("metaso"),
+            ),
+            search._cached_provider_search(
+                provider="anspire",
+                query="parallel cache probe",
+                result_size=1,
+                timeout=5,
+                api_key="anspire-key",
+                success_ttl=300,
+                call=lambda _deadline: provider_result("anspire"),
+            ),
+        )
+
+    asyncio.run(run_searches())
+
+    assert overlapped_reads == [True, True]
 
 
 def test_source_id_is_stable_across_result_order_and_provider():

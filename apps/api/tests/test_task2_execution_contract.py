@@ -21,6 +21,7 @@ from agent.runtime.checkpoint import (
 )
 from agent.runtime.container import RuntimeContainer
 from agent.tools.memory import normalize_remember_input, remember
+from agent.workflows.research_repository import ResearchPackageRepository
 from api.chat import _encode_sse_event, _public_stream_data, _to_stream_event_v3
 from core.config import get_settings
 from core.security import AuthContext
@@ -331,7 +332,7 @@ def test_public_interrupt_event_recursively_exposes_only_allowlisted_fields() ->
 
 @pytest.mark.parametrize(
     "channel",
-    ["lifecycle", "values", "messages", "tools", "interrupts"],
+    ["lifecycle", "values", "messages", "interrupts"],
 )
 @pytest.mark.parametrize("variant", ["raw", "legacy", "malformed"])
 def test_interrupt_stream_sanitization_is_channel_independent_and_total(
@@ -414,7 +415,7 @@ def test_interrupt_stream_sanitization_is_channel_independent_and_total(
 
 def test_interrupt_sse_envelope_drops_call_ids_and_raw_sibling_fields() -> None:
     stream_event = _to_stream_event_v3(
-        "tool_progress",
+        "state",
         {
             "execution_id": "execution-public",
             "sequence": 1,
@@ -865,6 +866,71 @@ def test_idempotency_key_is_bound_to_normalized_request_payload() -> None:
                 auth,
                 idempotency_key="digest-key",
             )
+
+
+def test_new_turn_snapshot_contains_latest_completed_research_evidence() -> None:
+    service = _conversation_service()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    with Session(get_engine()) as session:
+        chat = _seed_chat(session, suffix="cross-turn-research")
+        invocation = AgentInvocation(
+            id="invocation-cross-turn-research",
+            session_id=chat.id,
+            agent_id=chat.agent_id,
+            user_id=chat.user_id,
+        )
+        session.add(invocation)
+        session.flush()
+        execution = AgentExecution(
+            id="execution-cross-turn-research",
+            invocation_id=invocation.id,
+            session_id=chat.id,
+            agent_version_id=chat.agent_version_id,
+            model_config_id=DEFAULT_MODEL_CONFIG_ID,
+            status=RunStatus.completed,
+        )
+        session.add(execution)
+        session.commit()
+        session_id = chat.id
+
+    ResearchPackageRepository.persist(
+        session_id=session_id,
+        execution_id="execution-cross-turn-research",
+        agent_version_id="default-agent-v1",
+        topic="跨轮研究主题",
+        package_data={
+            "core_conclusion": {"text": "跨轮完整结论", "source_ids": ["S1"]},
+            "findings": [],
+        },
+        sources=[
+            {
+                "source_id": "S1",
+                "url": "https://example.com/cross-turn",
+                "isolated": False,
+            }
+        ],
+        provider_diagnostics={},
+        rendered_content="must not be injected",
+        valid_source_count=1,
+        isolated_source_count=0,
+        removed_unknown_reference_count=0,
+    )
+
+    with Session(get_engine()) as session:
+        created, replayed = service.create_turn(
+            session,
+            AgentMessageRequest(session_id=session_id, message="按刚才资料写稿"),
+            auth,
+        )
+        outbox = session.exec(
+            select(ExecutionOutbox).where(ExecutionOutbox.execution_id == created.execution_id)
+        ).one()
+        snapshot = json.dumps(outbox.payload, ensure_ascii=False)
+
+    assert replayed is False
+    assert "跨轮完整结论" in snapshot
+    assert "https://example.com/cross-turn" in snapshot
+    assert "must not be injected" not in snapshot
 
 
 def test_historical_key_without_digest_is_not_replayable() -> None:

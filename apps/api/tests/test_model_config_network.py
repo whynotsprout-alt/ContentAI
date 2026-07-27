@@ -189,6 +189,7 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
         ["93.184.216.34"],
         ["93.184.216.34"],
         ["93.184.216.34"],
+        ["93.184.216.34"],
     )
     requests: list[httpx.Request] = []
 
@@ -200,13 +201,37 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
                 json={"data": [{"id": "z-model"}, {"id": "a-model"}, {"id": "z-model"}]},
             )
         assert request.url.path == "/v1/chat/completions"
-        assert json.loads(request.content) == {
-            "model": "custom-model",
-            "messages": [{"role": "user", "content": "ping"}],
-            "stream": False,
-            "max_tokens": 1,
-        }
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        body = json.loads(request.content)
+        assert body["model"] == "custom-model"
+        assert body["stream"] is False
+        if "tools" in body:
+            assert body["tool_choice"]["function"]["name"] == "contentai_probe"
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "contentai_probe",
+                                            "arguments": '{"value":"ok"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        assert body["response_format"]["type"] == "json_schema"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
 
     transport = ClosingMockTransport(handle)
     prober = network.OpenAICompatibleProbe(
@@ -223,15 +248,16 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
     assert [request.url.path for request in requests] == [
         "/v1/models",
         "/v1/chat/completions",
+        "/v1/chat/completions",
     ]
-    assert len(resolver.calls) == 3
+    assert len(resolver.calls) == 4
     assert all(request.headers["Authorization"] == "Bearer test-secret-key" for request in requests)
     assert all(request.url.host == "93.184.216.34" for request in requests)
     assert all(request.headers["Host"] == "api.example.test" for request in requests)
     assert all(
         request.extensions["sni_hostname"] == "api.example.test" for request in requests
     )
-    assert transport.close_calls == 2
+    assert transport.close_calls == 3
 
 
 def test_probe_rejects_dns_rebinding_before_second_outbound_request() -> None:
@@ -646,7 +672,7 @@ def test_probe_rejects_error_status_without_reading_response_body() -> None:
     assert stream.iterations == 0
 
 
-def test_probe_rejects_malformed_successful_completion() -> None:
+def test_probe_rejects_provider_without_native_tool_calls() -> None:
     network = _network_module()
     resolver = Resolver(
         ["93.184.216.34"],
@@ -664,5 +690,65 @@ def test_probe_rejects_malformed_successful_completion() -> None:
         transport=httpx.MockTransport(handle),
     )
 
-    with pytest.raises(network.ModelProbeFailed):
+    with pytest.raises(network.ModelCapabilitiesUnsupported):
+        prober.probe("https://api.example.test/v1", "test-secret-key", "custom-model")
+
+
+def test_probe_rejects_provider_without_json_schema_output() -> None:
+    network = _network_module()
+    resolver = Resolver(*(["93.184.216.34"],) * 4)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+        body = json.loads(request.content)
+        if "tools" in body:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "contentai_probe",
+                                            "arguments": '{"value":"ok"}',
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Here is the result: ok"}}]},
+        )
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=resolver,
+        transport=httpx.MockTransport(handle),
+    )
+
+    with pytest.raises(network.ModelCapabilitiesUnsupported):
+        prober.probe("https://api.example.test/v1", "test-secret-key", "custom-model")
+
+
+def test_probe_maps_capability_request_rejection_to_unsupported() -> None:
+    network = _network_module()
+    resolver = Resolver(*(["93.184.216.34"],) * 3)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+        return httpx.Response(400, json={"error": {"message": "tools unsupported"}})
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=resolver,
+        transport=httpx.MockTransport(handle),
+    )
+
+    with pytest.raises(network.ModelCapabilitiesUnsupported):
         prober.probe("https://api.example.test/v1", "test-secret-key", "custom-model")

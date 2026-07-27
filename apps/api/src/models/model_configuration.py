@@ -62,7 +62,7 @@ class ModelConfiguration(SQLModel, table=True):
     provider: str = Field(default="openai_compatible", sa_type=String(32))
     base_url: str
     model_name: str
-    temperature: float = Field(sa_type=Float)
+    temperature: float | None = Field(default=None, sa_type=Float)
     context_window_tokens: int = Field(sa_type=Integer)
     chat_max_tokens: int = Field(sa_type=Integer)
     structured_max_tokens: int = Field(sa_type=Integer)

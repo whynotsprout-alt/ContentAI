@@ -213,6 +213,17 @@ class RuntimeContainer:
             raise RuntimeError("Model gateway does not support structured research final output.")
         return build_research_final()
 
+    @staticmethod
+    def _build_research_presentation_model(entry: _RuntimeCacheEntry) -> Any:
+        build_research_presentation = getattr(
+            entry.owner.gateway, "build_research_presentation_model", None
+        )
+        if not callable(build_research_presentation):
+            raise RuntimeError(
+                "Model gateway does not support structured research presentation output."
+            )
+        return build_research_presentation()
+
     def gateway_for_model_config(self, model_config_id: str) -> ModelGateway:
         if not model_config_id:
             raise RuntimeError("model_config_id is required.")
@@ -278,6 +289,31 @@ class RuntimeContainer:
         self._cache_put(entry.models, cache_key, model)
         return model
 
+    def _tool_intent_model_for_entry(
+        self,
+        entry: _RuntimeCacheEntry,
+        *,
+        cache_key: tuple[str, ...],
+    ) -> Any | None:
+        """Build one structured intent gate per model/tool-permission cache key."""
+        intent_cache_key = ("tool_intent", *cache_key)
+        model = self._cache_get(entry.models, intent_cache_key)
+        if model is not None:
+            return model
+        build_structured = getattr(entry.owner.gateway, "build_structured_output_model", None)
+        if not callable(build_structured):
+            return None
+        from agent.graph.nodes import ToolIntentDecision
+
+        built_model = build_structured(ToolIntentDecision)
+        if not callable(getattr(built_model, "invoke", None)):
+            raise TypeError(
+                "Model gateway returned a non-invokable structured tool-intent model."
+            )
+        model = _RetainedRuntimeValue(built_model, entry.owner)
+        self._cache_put(entry.models, intent_cache_key, model)
+        return model
+
     def _graph_for_entry(
         self,
         entry: _RuntimeCacheEntry,
@@ -289,10 +325,13 @@ class RuntimeContainer:
         if graph is not None:
             return graph
         model = self._model_for_entry(entry, cache_key=cache_key, tools=tools)
+        tool_intent_model = self._tool_intent_model_for_entry(entry, cache_key=cache_key)
         built_graph = build_agent_graph(
             model=model,
             tools=tools,
             research_final_model=lambda: self._build_research_final_model(entry),
+            research_presentation_model=lambda: self._build_research_presentation_model(entry),
+            tool_intent_model=tool_intent_model,
             checkpointer=self.get_checkpointer(),
         )
         graph = _RetainedRuntimeValue(built_graph, entry.owner)

@@ -21,10 +21,16 @@ class AgentGraphBuilder:
     model: Any
     tools: Sequence[BaseTool]
     research_final_model: Any | None = None
+    research_presentation_model: Any | None = None
+    tool_intent_model: Any | None = None
 
     def _validate(self) -> None:
         if not callable(getattr(self.model, "invoke", None)):
             raise TypeError(f"model must provide invoke(), got {type(self.model)!r}.")
+        if self.tool_intent_model is not None and not callable(
+            getattr(self.tool_intent_model, "invoke", None)
+        ):
+            raise TypeError("tool_intent_model must provide invoke() when configured.")
         for index, tool in enumerate(self.tools):
             if not isinstance(tool, BaseTool):
                 raise TypeError(f"tools[{index}] must be a BaseTool instance, got {type(tool)!r}.")
@@ -34,7 +40,13 @@ class AgentGraphBuilder:
         graph = StateGraph(AgentState)
         graph.add_node(
             "agent",
-            build_agent_node(self.model, research_final_model=self.research_final_model),
+            build_agent_node(
+                self.model,
+                tools=self.tools,
+                research_final_model=self.research_final_model,
+                research_presentation_model=self.research_presentation_model,
+                tool_intent_model=self.tool_intent_model,
+            ),
         )
         graph.add_node("tools", build_tools_node(self.tools))
         graph.add_node("human", build_human_node())
@@ -73,10 +85,14 @@ def build_agent_graph(
     model: Any,
     tools: Sequence[BaseTool],
     research_final_model: Any | None = None,
+    research_presentation_model: Any | None = None,
+    tool_intent_model: Any | None = None,
     **compile_kwargs: Any,
 ) -> Any:
     return AgentGraphBuilder(
         model=model,
         tools=tools,
         research_final_model=research_final_model,
+        research_presentation_model=research_presentation_model,
+        tool_intent_model=tool_intent_model,
     ).compile(**compile_kwargs)

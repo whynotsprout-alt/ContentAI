@@ -82,15 +82,6 @@ function closeUserMenu() {
       <span>ContentAI</span>
     </a>
 
-    <nav class="workbench-nav" aria-label="工作台导航">
-      <button class="nav-button" data-agent-manager-trigger type="button" aria-label="内容账号" @click="emit('openAgents')">
-        <Settings :size="16" /><span>内容账号</span>
-      </button>
-      <button v-if="isAdmin" class="nav-button" type="button" aria-label="管理后台" @click="emit('openAdmin')">
-        <ShieldCheck :size="16" /><span>管理后台</span>
-      </button>
-    </nav>
-
     <div class="header-controls">
       <div class="header-popover" @keydown.esc.prevent.stop="closeAgentMenu">
         <button
@@ -122,6 +113,10 @@ function closeUserMenu() {
           </button>
         </div>
       </div>
+
+      <button v-if="isAdmin" class="nav-button header-admin-button" type="button" aria-label="管理后台" @click="emit('openAdmin')">
+        <ShieldCheck :size="16" /><span>管理后台</span>
+      </button>
 
       <div class="header-popover" @keydown.esc.prevent.stop="closeUserMenu">
         <button

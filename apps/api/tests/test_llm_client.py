@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import httpx
@@ -17,9 +18,9 @@ from agent.runtime.errors import (
     MODEL_STREAM_INTERRUPTED_MESSAGE,
     classify_runtime_error,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 
 def _gateway(*, client: Any | None = None) -> ModelGateway:
@@ -72,6 +73,77 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert "default_headers" not in observed
     assert "Authorization" not in repr(observed)
     assert "runtime-secret-key" not in repr(observed)
+
+
+def test_openai_client_omits_temperature_when_model_decides(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            observed.update(kwargs)
+
+    monkeypatch.setattr("agent.infrastructure.llm.client.ChatOpenAI", FakeChatOpenAI)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/custom-root",
+        api_key=SecretStr("runtime-secret-key"),
+        model_name="selected-model-v7",
+    )
+
+    client.build_chat_model(temperature=None, max_tokens=321)
+
+    assert "temperature" not in observed
+
+
+def test_structured_output_falls_back_to_plain_completion_and_validates_schema() -> None:
+    class Result(BaseModel):
+        ok: bool
+
+    class UnsupportedStructuredModel:
+        def invoke(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise ValueError("json_schema is unsupported")
+
+    class PlainChatModel:
+        def __init__(self) -> None:
+            self.messages: list[Any] = []
+
+        def invoke(self, messages: list[Any], **_kwargs: Any) -> AIMessage:
+            self.messages = messages
+            return AIMessage(content='Result: {"ok":true}')
+
+    chat_model = PlainChatModel()
+    model = client_module._StructuredOutputCompatibilityModel(
+        primary=UnsupportedStructuredModel(),
+        chat_model=chat_model,
+        schema=Result,
+    )
+
+    result = model.invoke([HumanMessage(content="return the result")])
+
+    assert result == Result(ok=True)
+    assert "JSON Schema" in chat_model.messages[0].content
+    assert chat_model.messages[-1].content == "return the result"
+
+
+def test_structured_output_fallback_rejects_explanatory_plain_text() -> None:
+    class Result(BaseModel):
+        ok: bool
+
+    class UnsupportedStructuredModel:
+        def invoke(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise ValueError("json_schema is unsupported")
+
+    class PlainChatModel:
+        def invoke(self, *_args: Any, **_kwargs: Any) -> AIMessage:
+            return AIMessage(content="I cannot provide JSON.")
+
+    model = client_module._StructuredOutputCompatibilityModel(
+        primary=UnsupportedStructuredModel(),
+        chat_model=PlainChatModel(),
+        schema=Result,
+    )
+
+    with pytest.raises(ValueError, match="JSON object"):
+        model.invoke([HumanMessage(content="return the result")])
 
 
 def test_langchain_client_closes_owned_http_clients_once(monkeypatch) -> None:
@@ -211,6 +283,112 @@ def test_immediate_async_close_completion_does_not_reenter_close_lock(monkeypatc
         client._owner_thread.join(timeout=1.0)
 
 
+def test_concurrent_immediate_close_keeps_the_first_future_canonical_until_callback_transition(
+    monkeypatch,
+) -> None:
+    client = client_module._OwnerLoopAsyncClient(
+        transport=httpx.MockTransport(lambda _request: None)
+    )
+    callback_waiting = threading.Event()
+    release_callback = threading.Event()
+    submitted: list[Future[None]] = []
+
+    class CallbackBarrierFuture(Future[None]):
+        def add_done_callback(self, fn) -> None:
+            callback_waiting.set()
+            assert release_callback.wait(timeout=1.0)
+            super().add_done_callback(fn)
+
+    def submit_close(coroutine, _loop) -> Future[None]:
+        coroutine.close()
+        future: Future[None]
+        if submitted:
+            future = Future()
+        else:
+            future = CallbackBarrierFuture()
+            future.set_result(None)
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(client_module.asyncio, "run_coroutine_threadsafe", submit_close)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first_call = executor.submit(client._submit_close)
+            assert callback_waiting.wait(timeout=1.0)
+            second_future = client._submit_close()
+            release_callback.set()
+            first_future = first_call.result(timeout=1.0)
+
+        assert second_future is first_future
+        assert len(submitted) == 1
+        assert client._owner_stopped.wait(timeout=1.0)
+    finally:
+        release_callback.set()
+        for future in submitted:
+            if not future.done():
+                future.cancel()
+        owner_loop = client._owner_loop
+        if owner_loop is not None and not client._owner_stopped.is_set():
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+        client._owner_thread.join(timeout=1.0)
+
+
+def test_failed_canonical_close_allows_one_shared_retry_after_callback_transition(
+    monkeypatch,
+) -> None:
+    client = client_module._OwnerLoopAsyncClient(
+        transport=httpx.MockTransport(lambda _request: None)
+    )
+    callback_waiting = threading.Event()
+    release_callback = threading.Event()
+    submitted: list[Future[None]] = []
+
+    class CallbackBarrierFuture(Future[None]):
+        def add_done_callback(self, fn) -> None:
+            callback_waiting.set()
+            assert release_callback.wait(timeout=1.0)
+            super().add_done_callback(fn)
+
+    def submit_close(coroutine, _loop) -> Future[None]:
+        coroutine.close()
+        future: Future[None]
+        if submitted:
+            future = Future()
+        else:
+            future = CallbackBarrierFuture()
+            future.set_exception(RuntimeError("first close failed"))
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(client_module.asyncio, "run_coroutine_threadsafe", submit_close)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first_call = executor.submit(client._submit_close)
+            assert callback_waiting.wait(timeout=1.0)
+            second_future = client._submit_close()
+            release_callback.set()
+            first_future = first_call.result(timeout=1.0)
+
+        assert second_future is first_future
+        with pytest.raises(RuntimeError, match="first close failed"):
+            first_future.result()
+
+        retry_future = client._submit_close()
+        assert client._submit_close() is retry_future
+        assert len(submitted) == 2
+        retry_future.set_result(None)
+        assert client._owner_stopped.wait(timeout=1.0)
+    finally:
+        release_callback.set()
+        for future in submitted:
+            if not future.done():
+                future.cancel()
+        owner_loop = client._owner_loop
+        if owner_loop is not None and not client._owner_stopped.is_set():
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+        client._owner_thread.join(timeout=1.0)
+
+
 def test_async_http_client_close_failure_can_be_retried(monkeypatch) -> None:
     class FlakyCloseTransport(httpx.AsyncBaseTransport):
         def __init__(self) -> None:
@@ -337,10 +515,44 @@ def test_every_gateway_scenario_uses_execution_selected_model_and_tuning():
     assert {call["model"] for call in observed} == {"selected-model-v7"}
     assert observed[0]["temperature"] == 0.7
     assert observed[0]["max_tokens"] == 12_000
-    assert all(call["temperature"] == 0 for call in observed[1:4])
+    assert all(call["temperature"] == 0.7 for call in observed[1:4])
     assert all(call["max_tokens"] == 6_000 for call in observed[1:4])
-    assert observed[4]["temperature"] == 0
+    assert observed[4]["temperature"] == 0.7
     assert observed[4]["max_tokens"] == 1
+
+
+def test_auto_temperature_is_used_by_every_gateway_scenario():
+    observed: list[dict[str, Any]] = []
+
+    class Client:
+        def build_chat_model(self, **kwargs: Any) -> Any:
+            observed.append(kwargs)
+            return object()
+
+        def build_structured_output_model(self, **kwargs: Any) -> Any:
+            observed.append(kwargs)
+            return object()
+
+    gateway = ModelGateway(
+        model_config_id="model-config-auto",
+        base_url="https://models.example.test/custom-root",
+        api_key=SecretStr("runtime-secret-key"),
+        model_name="selected-model-v7",
+        temperature=None,
+        context_window_tokens=200_000,
+        chat_max_tokens=12_000,
+        structured_max_tokens=6_000,
+        client=Client(),
+    )
+
+    gateway.build_agent_model()
+    gateway.build_hotspot_filter_model()
+    gateway.build_research_final_model()
+    gateway.build_structured_output_model(dict)
+    gateway.build_token_counter()
+
+    assert len(observed) == 5
+    assert all(call["temperature"] is None for call in observed)
 
 
 def test_research_final_gateway_builds_selection_schema_with_streaming_disabled():
@@ -355,6 +567,21 @@ def test_research_final_gateway_builds_selection_schema_with_streaming_disabled(
 
     assert gateway.build_research_final_model() == "selection-model"
     assert observed["schema"].__name__ == "ResearchFinalSelection"
+    assert observed["disable_streaming"] is True
+
+
+def test_research_presentation_gateway_builds_content_schema_with_streaming_disabled():
+    observed: dict[str, object] = {}
+
+    class Client:
+        def build_structured_output_model(self, **kwargs: Any):
+            observed.update(kwargs)
+            return "presentation-model"
+
+    gateway = _gateway(client=Client())
+
+    assert gateway.build_research_presentation_model() == "presentation-model"
+    assert observed["schema"].__name__ == "ResearchFinalPresentation"
     assert observed["disable_streaming"] is True
 
 

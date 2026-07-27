@@ -137,7 +137,7 @@ class StreamEventV3(SchemaBase):
     execution_id: str
     sequence: int = Field(ge=1)
     event_id: str
-    channel: Literal["messages", "tools", "values", "lifecycle", "interrupts", "errors"]
+    channel: Literal["messages", "values", "lifecycle", "interrupts", "errors"]
     namespace: tuple[str, ...] = ()
     attempt_id: str | None = None
     message_id: str | None = None

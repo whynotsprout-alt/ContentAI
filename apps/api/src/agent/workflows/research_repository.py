@@ -4,6 +4,8 @@ import hashlib
 from typing import Any
 
 from db.session import get_engine
+from models.chat import AgentExecution
+from models.enums import RunStatus
 from models.research import ResearchPackage
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -15,6 +17,28 @@ def topic_digest(topic: str) -> str:
 
 
 class ResearchPackageRepository:
+    @staticmethod
+    def latest_completed_for_session(
+        session: Session,
+        *,
+        session_id: str,
+        agent_version_id: str,
+    ) -> ResearchPackage | None:
+        """Load the newest durable package that came from a successful turn in this session."""
+        return session.exec(
+            select(ResearchPackage)
+            .join(AgentExecution, ResearchPackage.execution_id == AgentExecution.id)
+            .where(
+                ResearchPackage.session_id == session_id,
+                ResearchPackage.agent_version_id == agent_version_id,
+                AgentExecution.session_id == session_id,
+                AgentExecution.agent_version_id == agent_version_id,
+                AgentExecution.status == RunStatus.completed,
+            )
+            .order_by(ResearchPackage.created_at.desc(), ResearchPackage.id.desc())
+            .limit(1)
+        ).first()
+
     @staticmethod
     def for_execution(
         session: Session,

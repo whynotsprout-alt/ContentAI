@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import agent.runtime.execution_services as execution_services_module
 import agent.tools.research as research_tool_module
 import pytest
 from agent.runtime.checkpoint import (
@@ -24,6 +25,7 @@ from auth_helpers import auth_headers, default_test_auth_context, resolve_test_a
 from client import ApiClient as TestClient
 from core.config import Settings, get_settings
 from core.security import AuthContext, authenticate_request
+from database_helpers import get_test_database_url
 from db.session import get_engine
 from direct_dispatcher import DirectDispatcher
 from langchain_core.messages import AIMessage
@@ -53,6 +55,7 @@ from services.checkpoint_deletion import drain_checkpoint_deletion_outbox
 from services.conversation_service import ConversationService
 from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
 from services.execution_claim import claim_execution
+from services.tasks import recover_expired_executions
 from sqlalchemy import event, text
 from sqlmodel import Session, select
 
@@ -97,9 +100,7 @@ def auth_test_app():
     test_app = create_app(
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": get_test_database_url()},
         ),
         runtime=_TEST_RUNTIME,
         execution_dispatcher_factory=DirectDispatcher,
@@ -144,6 +145,9 @@ class FakeStructuredModel:
         if self.schema.__name__ == "MemoryExtractionResult":
             return self.schema(memories=self.memories)
 
+        if self.schema.__name__ == "ToolIntentDecision":
+            return self.schema(action="respond")
+
         return self.schema(title=self.title)
 
 
@@ -164,6 +168,21 @@ class FakeResearchFinalModel:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class FakeResearchPresentationModel:
+    def __init__(self) -> None:
+        self.calls: list[list[Any]] = []
+
+    def invoke(self, messages: list[Any], *, config: dict[str, Any]) -> dict[str, str]:
+        self.calls.append(messages)
+        assert config == {"callbacks": []}
+        return {
+            "content": (
+                "## 核心结论\n\n这是依据已核验资料整理的用户友好研究简报。\n\n"
+                "## 来源\n\n[证据来源](https://evidence.example/source)"
+            )
+        }
 
 
 class FakeGateway:
@@ -194,9 +213,13 @@ class FakeResearchFinalGateway(FakeGateway):
     def __init__(self, *, final_responses: Iterable[Any]) -> None:
         super().__init__()
         self.final_model = FakeResearchFinalModel(final_responses)
+        self.presentation_model = FakeResearchPresentationModel()
 
     def build_research_final_model(self) -> FakeResearchFinalModel:
         return self.final_model
+
+    def build_research_presentation_model(self) -> FakeResearchPresentationModel:
+        return self.presentation_model
 
 
 def install_fake_model(
@@ -1180,11 +1203,10 @@ def test_research_backed_final_persists_only_validated_answer(monkeypatch):
         terminal = wait_for_terminal_session(client, session_id)
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
-    )
+    assert terminal["messages"][-1]["content"].startswith("## 核心结论")
+    assert "S1" not in terminal["messages"][-1]["content"]
     assert gateway.final_model.calls
+    assert gateway.presentation_model.calls
 
 
 def test_research_turn_after_ordinary_chat_uses_only_its_current_tool_boundary(monkeypatch):
@@ -1218,10 +1240,7 @@ def test_research_turn_after_ordinary_chat_uses_only_its_current_tool_boundary(m
         terminal = wait_for_terminal_session(client, session["session_id"])
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
-    )
+    assert terminal["messages"][-1]["content"].startswith("## 核心结论")
     assert len(gateway.final_model.calls) == 1
 
 
@@ -1389,10 +1408,7 @@ def test_research_backed_final_repairs_once_with_supported_evidence_only(monkeyp
         terminal = wait_for_terminal_session(client, session_id)
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
-    )
+    assert terminal["messages"][-1]["content"].startswith("## 核心结论")
     assert len(gateway.final_model.calls) == 2
     repair_messages = gateway.final_model.calls[1]
     repair_content = "\n".join(str(message.content) for message in repair_messages)
@@ -1550,21 +1566,29 @@ def test_chat_session_title_is_generated_by_model():
 
         assert response.status_code == 202
 
+        execution_id = response.json()["execution_id"]
         wait_for_terminal_session(client, session["session_id"])
 
         expected_title = generated_title.replace(" ", "")[:15]
 
         sessions = wait_for_session_title(client, expected_title=expected_title)
+        events = client.get(f"/api/chat/runs/{execution_id}/events")
 
     assert sessions[0]["title"] != "New Session"
 
     assert sessions[0]["title"] == expected_title
 
     assert len(sessions[0]["title"]) <= 15
+    assert events.status_code == 200
+    assert '"name":"session_title_updated"' in events.text
+    assert f'"title":"{expected_title}"' in events.text
 
 
-def test_postprocess_failure_keeps_main_run_completed_and_schedules_retry():
+def test_title_model_failure_uses_fallback_without_retrying_postprocess(
+    monkeypatch: pytest.MonkeyPatch,
+):
     message = "Long fallback title message for testing title generation"
+    monkeypatch.setattr(app.state.settings.agent, "memory_after_turn_enabled", False)
 
     install_fake_model(
         FakeModel([AIMessage(content="plain reply")]),
@@ -1589,7 +1613,7 @@ def test_postprocess_failure_keeps_main_run_completed_and_schedules_retry():
         sessions = client.get("/api/chat/sessions").json()["items"]
 
     assert terminal["latest_execution"]["status"] == "completed"
-    assert sessions[0]["title"] == "New Session"
+    assert sessions[0]["title"] == message.replace(" ", "")[:15]
     with Session(get_engine()) as db_session:
         outbox = db_session.exec(
             select(ExecutionOutbox).where(
@@ -1598,8 +1622,141 @@ def test_postprocess_failure_keeps_main_run_completed_and_schedules_retry():
             )
         ).first()
         assert outbox is not None
-        assert outbox.status == "pending"
+        assert outbox.status == "completed"
         assert outbox.processing_attempts == 1
+        assert outbox.payload["postprocess_steps"]["title"]["status"] == "completed"
+
+
+def test_postprocess_steps_retry_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_model(FakeModel([AIMessage(content="plain reply")]), title="Independent title")
+
+    with TestClient(app) as client:
+        post_service = app.state.agent_service.runner.post_service
+        dispatcher = post_service.dispatcher
+        post_service.dispatcher = None
+        try:
+            session = client.post(
+                "/api/chat/sessions", json={"agent_id": "default-agent"}
+            ).json()
+            response = client.post(
+                f"/api/chat/sessions/{session['session_id']}/messages",
+                json={"message": "independent postprocess steps"},
+            )
+            assert response.status_code == 202
+            execution_id = response.json()["execution_id"]
+            wait_for_terminal_session(client, session["session_id"])
+        finally:
+            post_service.dispatcher = dispatcher
+
+    def fail_summary(**_kwargs: Any) -> None:
+        raise RuntimeError("summary failed")
+
+    monkeypatch.setattr(
+        execution_services_module,
+        "_refresh_short_summary_background",
+        fail_summary,
+    )
+    post_service.process(
+        execution_id=execution_id,
+        model_config_id=DEFAULT_MODEL_CONFIG_ID,
+    )
+
+    with Session(get_engine()) as db_session:
+        chat = db_session.get(ChatSession, session["session_id"])
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).one()
+        assert chat is not None
+        assert chat.title == "Independenttitle"[:15]
+        assert outbox.status == "pending"
+        assert outbox.payload["postprocess_steps"]["memory"]["status"] == "completed"
+        assert outbox.payload["postprocess_steps"]["summary"]["status"] == "failed"
+        assert outbox.payload["postprocess_steps"]["title"]["status"] == "completed"
+
+    monkeypatch.setattr(
+        execution_services_module,
+        "_refresh_short_summary_background",
+        lambda **_kwargs: None,
+    )
+    post_service.process(
+        execution_id=execution_id,
+        model_config_id=DEFAULT_MODEL_CONFIG_ID,
+    )
+
+    with Session(get_engine()) as db_session:
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).one()
+        steps = outbox.payload["postprocess_steps"]
+        assert outbox.status == "completed"
+        assert steps["summary"]["attempts"] == 2
+        assert steps["title"]["attempts"] == 1
+
+
+def test_failed_legacy_postprocess_outbox_is_compensated_once() -> None:
+    install_fake_model(FakeModel([AIMessage(content="plain reply")]))
+
+    with TestClient(app) as client:
+        session = client.post(
+            "/api/chat/sessions", json={"agent_id": "default-agent"}
+        ).json()
+        response = client.post(
+            f"/api/chat/sessions/{session['session_id']}/messages",
+            json={"message": "legacy failed outbox"},
+        )
+        assert response.status_code == 202
+        execution_id = response.json()["execution_id"]
+        wait_for_terminal_session(client, session["session_id"])
+
+    with Session(get_engine()) as db_session:
+        execution = db_session.get(AgentExecution, execution_id)
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).one()
+        assert execution is not None
+        execution.postprocess_completed_at = None
+        outbox.status = "failed"
+        outbox.processing_attempts = 3
+        outbox.payload = {}
+        db_session.add(execution)
+        db_session.add(outbox)
+        db_session.commit()
+
+    assert recover_expired_executions() >= 1
+    with Session(get_engine()) as db_session:
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).one()
+        assert outbox.status == "pending"
+        assert outbox.processing_attempts == 0
+        assert outbox.payload["postprocess_compensation_version"] == 1
+        outbox.status = "failed"
+        db_session.add(outbox)
+        db_session.commit()
+
+    recover_expired_executions()
+    with Session(get_engine()) as db_session:
+        outbox = db_session.exec(
+            select(ExecutionOutbox).where(
+                ExecutionOutbox.execution_id == execution_id,
+                ExecutionOutbox.kind == "postprocess",
+            )
+        ).one()
+        assert outbox.status == "failed"
 
 
 def test_message_stream_returns_runtime_events():
@@ -1638,7 +1795,6 @@ def test_v3_stream_channels_classify_semantic_terminal_events() -> None:
     assert _stream_channel("state", "run_finish") == "lifecycle"
     assert _stream_channel("error", "run_error") == "errors"
     assert _stream_channel("state", "run_interrupt") == "interrupts"
-    assert _stream_channel("tool_progress", "tool_progress") == "tools"
 
 
 def test_stream_recovery_errors_keep_stable_degradation_codes() -> None:
@@ -2694,6 +2850,7 @@ def test_wrong_interrupt_id_is_stale_and_status_interrupt_is_allowlisted():
 @pytest.mark.parametrize("tampered_hash", ["", "short", "g" * 64, "0" * 64])
 def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt(
     tampered_hash: str,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     install_fake_model(
         FakeModel(
@@ -2714,6 +2871,7 @@ def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt(
     )
 
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.rate_limiter, "check", lambda *_args: None)
         chat = client.post("/api/chat/sessions", json={"agent_id": "default-agent"}).json()
         started = client.post(
             f"/api/chat/sessions/{chat['session_id']}/messages",
@@ -3009,7 +3167,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
         execution_id=execution_id,
     ) == []
     event_names = [name for name, _payload in event_writer.events]
-    assert event_names.count("tool_end") == 1
+    assert "tool_end" not in event_names
     assert event_names.count("assistant_message") == 1
     assert event_names.count("message_finish") == 1
     assert event_names.count("run_finish") == 1

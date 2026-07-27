@@ -85,6 +85,50 @@ def test_remember_mutation_and_completed_receipt_commit_together() -> None:
         assert audit.result_digest == receipt.result_digest
 
 
+def test_public_hotspot_filter_failure_marks_tool_audit_failed_and_propagates() -> None:
+    execution_id = "execution-hotspot-filter-failed"
+    _seed_execution(execution_id)
+
+    class HotspotFilterFailed(RuntimeError):
+        code = "HOTSPOT_FILTER_FAILED"
+
+    runtime = ToolRuntimeContext(
+        execution_id=execution_id,
+        conversation_id=f"session-{execution_id}",
+        session_id=f"thread-{execution_id}",
+        agent_id="default-agent",
+        agent_version_id="default-agent-v1",
+        user_id="local-user",
+        permissions=["fetch_hotspots"],
+        tool_policies={
+            "fetch_hotspots": {
+                "version": "1",
+                "timeout_seconds": 1,
+                "max_output_chars": 1000,
+                "side_effecting": False,
+                "execution_mode": "cooperative",
+            }
+        },
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "fetch_hotspots", "id": "call-hotspots", "args": {}}
+    )
+
+    with tool_runtime_scope(runtime):
+        with pytest.raises(HotspotFilterFailed):
+            execute_tool_call(
+                request,
+                lambda _request: (_ for _ in ()).throw(HotspotFilterFailed()),
+            )
+
+    with Session(get_engine()) as session:
+        audit = session.exec(
+            select(ToolExecution).where(ToolExecution.execution_id == execution_id)
+        ).one()
+        assert audit.status == ToolExecutionStatus.failed
+        assert "热点评分模型" in audit.error
+
+
 def test_exception_before_commit_rolls_back_mutation_and_writes_safe_failure() -> None:
     execution_id = "execution-side-effect-rollback"
     _seed_audit(execution_id)

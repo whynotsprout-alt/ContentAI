@@ -43,6 +43,7 @@ _MODEL_ERROR_STATUS = {
     "MODEL_AUTH_FAILED": 422,
     "MODEL_NOT_FOUND": 422,
     "MODEL_PROVIDER_UNREACHABLE": 502,
+    "MODEL_CAPABILITIES_UNSUPPORTED": 422,
     "MODEL_PROBE_FAILED": 502,
     "MODEL_CONFIG_PERSISTENCE_FAILED": 503,
 }
@@ -55,6 +56,9 @@ _MODEL_ERROR_MESSAGES = {
     "MODEL_AUTH_FAILED": "The model provider rejected the credentials.",
     "MODEL_NOT_FOUND": "The requested model was not found.",
     "MODEL_PROVIDER_UNREACHABLE": "The model provider could not be reached.",
+    "MODEL_CAPABILITIES_UNSUPPORTED": (
+        "The model provider does not support native tool calls and JSON Schema output."
+    ),
     "MODEL_PROBE_FAILED": "The model provider probe failed.",
     "MODEL_CONFIG_PERSISTENCE_FAILED": "The model configuration could not be saved.",
 }
@@ -97,7 +101,7 @@ def _model_configuration_response(active) -> ModelConfigurationResponse:
 @router.get(
     "/model-config",
     response_model=ModelConfigurationResponse,
-    response_model_exclude_none=True,
+    response_model_exclude_unset=True,
 )
 def get_model_configuration(
     response: Response,
@@ -139,7 +143,7 @@ def probe_model_configuration(
 @router.put(
     "/model-config",
     response_model=ModelConfigurationResponse,
-    response_model_exclude_none=True,
+    response_model_exclude_unset=True,
 )
 def update_model_configuration(
     payload: ModelConfigurationUpdateRequest,

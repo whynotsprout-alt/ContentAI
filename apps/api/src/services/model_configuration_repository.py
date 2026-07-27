@@ -54,7 +54,7 @@ class ModelConfigurationRepository:
         request_id: str,
         base_url: str,
         model_name: str,
-        temperature: float,
+        temperature: float | None,
         context_window_tokens: int,
         chat_max_tokens: int,
         structured_max_tokens: int,

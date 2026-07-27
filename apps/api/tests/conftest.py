@@ -2,6 +2,7 @@ import base64
 from pathlib import Path
 
 import pytest
+from database_helpers import get_test_database_url
 from model_config_helpers import (
     DEFAULT_MODEL_RUNTIME_PARAMETERS,
     TEST_MODEL_CONFIG_API_KEY,
@@ -9,13 +10,11 @@ from model_config_helpers import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+TEST_DATABASE_URL = get_test_database_url()
 TEST_MODEL_CONFIG_ENCRYPTION_KEY = base64.urlsafe_b64encode(bytes([7]) * 32).decode("ascii")
 TEST_ENV_VARS = {
     "CONTENTAI_ENV": "test",
     "CONTENTAI_DATABASE__URL": TEST_DATABASE_URL,
-    "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY": "test-key",
-    "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL": "https://example.test/v1",
     "CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": TEST_MODEL_CONFIG_ENCRYPTION_KEY,
 }
 

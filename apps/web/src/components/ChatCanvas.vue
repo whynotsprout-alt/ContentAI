@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { Check, Copy, LoaderCircle, MessageSquareText, Play, Square, Sparkles } from '@lucide/vue';
+import { Bot, Check, Copy, LoaderCircle, MessageSquareText, Play, Square, Sparkles } from '@lucide/vue';
 import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
 import type { PublicInterrupt, ResumeDecision } from '../services/api';
@@ -10,11 +10,13 @@ import InterruptApproval from './InterruptApproval.vue';
 const props = defineProps<{
   messages: WorkbenchMessage[];
   lifecycle: RunLifecycle;
+  progressLabel?: string;
   canSubmit: boolean;
   canResume: boolean;
   pendingInterrupt: PublicInterrupt | null;
   hasAgent: boolean;
   switchingAgent: boolean;
+  userEmail?: string;
   submitMessage: (message: string) => Promise<boolean>;
   resumeRun: (decision: ResumeDecision) => Promise<boolean>;
   cancelRun: () => Promise<void>;
@@ -51,6 +53,7 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
 
 const isActive = computed(() => ['queued', 'running', 'reconnecting', 'cancelling', 'waiting_input'].includes(props.lifecycle));
 const sendDisabled = computed(() => !prompt.value.trim() || !props.canSubmit || props.switchingAgent);
+const userInitial = computed(() => props.userEmail?.trim().slice(0, 1).toUpperCase() || '我');
 const lastMessageContent = computed(() =>
   props.messages.length ? props.messages[props.messages.length - 1]?.content ?? '' : ''
 );
@@ -180,7 +183,13 @@ watch(() => props.lifecycle, (next, previous) => {
         :class="[message.role, { 'is-collapsed': isLong(message) && !expanded.has(index) }]"
       >
         <header class="message-header">
-          <span class="message-role">{{ message.role === 'user' ? '你' : 'ContentAI' }}</span>
+          <div class="message-identity">
+            <span class="message-avatar" :class="message.role === 'user' ? 'user' : 'assistant'" aria-hidden="true">
+              <span v-if="message.role === 'user'">{{ userInitial }}</span>
+              <Bot v-else :size="16" />
+            </span>
+            <span class="message-role">{{ message.role === 'user' ? '你' : 'ContentAI' }}</span>
+          </div>
           <button
             v-if="message.role === 'assistant' && message.content"
             class="message-copy"
@@ -200,7 +209,7 @@ watch(() => props.lifecycle, (next, previous) => {
             aria-hidden="true"
           >
             <LoaderCircle :size="14" class="spin" />
-            <span>{{ message.assistant_state === 'pending' ? '等待响应' : '正在生成' }}</span>
+            <span>{{ progressLabel || (message.assistant_state === 'pending' ? '等待响应' : '正在生成') }}</span>
           </div>
           <div v-if="message.content" class="message-renderer" v-html="renderMessage(message)"></div>
           <span v-else-if="message.role === 'assistant'" class="typing-placeholder" aria-hidden="true"><i></i><i></i><i></i></span>

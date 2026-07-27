@@ -1,8 +1,10 @@
 import json
+import re
 import uuid
 from collections.abc import Sequence
+from html import unescape
 from time import sleep
-from typing import Any
+from typing import Any, Literal
 
 from agent.graph.state import AgentState
 from agent.runtime.errors import is_retryable_model_stream_error
@@ -11,7 +13,8 @@ from agent.workflows.deep_research import ContentEvidenceInvalidError
 from agent.workflows.final_evidence import (
     build_research_final_proof,
     parse_research_identity,
-    render_deterministic_research_answer,
+    select_research_evidence,
+    validate_research_final_presentation,
     validate_research_final_selection,
 )
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -20,14 +23,43 @@ from langchain_core.tools import BaseTool
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 MODEL_STREAM_MAX_ATTEMPTS = 3
 MODEL_STREAM_RETRY_BASE_SECONDS = 0.25
 REJECTED_TOOL_MESSAGE = "已取消保存"
+_TEXTUAL_TOOL_CALL_PATTERN = re.compile(
+    r"<invoke\b[^>]*\bname\s*=\s*[\"'](?P<name>[A-Za-z0-9_.-]+)[\"'][^>]*>"
+    r"(?P<body>.*?)</invoke\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TEXTUAL_TOOL_PARAMETER_PATTERN = re.compile(
+    r"<parameter\b[^>]*\bname\s*=\s*[\"'](?P<name>[A-Za-z0-9_.-]+)[\"'][^>]*>"
+    r"(?P<value>.*?)</parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_SYSTEM_WARNING_TOOL_CALL_PATTERN = re.compile(
+    r"<system_warning\b[^>]*>(?P<body>.*?)</system_warning\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
-def build_agent_node(model: Any, *, research_final_model: Any | None = None):
+class ToolIntentDecision(BaseModel):
+    """A model-produced decision for the current graph turn."""
+
+    action: Literal["respond", "call_tool"]
+    tool_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+def build_agent_node(
+    model: Any,
+    *,
+    tools: Sequence[BaseTool] = (),
+    research_final_model: Any | None = None,
+    research_presentation_model: Any | None = None,
+    tool_intent_model: Any | None = None,
+):
     def agent_node(
         state: AgentState,
         config: RunnableConfig | None = None,
@@ -41,24 +73,34 @@ def build_agent_node(model: Any, *, research_final_model: Any | None = None):
             state.get("research_topic_hash"),
         )
         if research_identity is not None:
-            if research_final_model is None:
+            if research_final_model is None or research_presentation_model is None:
                 raise ContentEvidenceInvalidError
             final_response = _research_backed_final_message(
-                model=_resolve_research_final_model(research_final_model),
+                selection_model=_resolve_research_final_model(research_final_model),
+                presentation_model=_resolve_research_final_model(research_presentation_model),
                 state=state,
                 identity=research_identity,
             )
         else:
-            response = _invoke_model_with_stream_retry(
-                model,
-                state.get("messages", []),
-                config=config,
-            )
-            final_response = (
-                response
-                if isinstance(response, BaseMessage)
-                else AIMessage(content=str(response or ""))
-            )
+            final_response = _deterministic_hotspot_result(state)
+            if final_response is None:
+                response = _invoke_model_with_stream_retry(
+                    model,
+                    state.get("messages", []),
+                    config=config,
+                )
+                final_response = (
+                    response
+                    if isinstance(response, BaseMessage)
+                    else AIMessage(content=str(response or ""))
+                )
+                final_response = _normalize_textual_tool_calls(final_response, tools=tools)
+                final_response = _apply_model_tool_intent_decision(
+                    state,
+                    response=final_response,
+                    tools=tools,
+                    tool_intent_model=tool_intent_model,
+                )
         _emit_node_event("agent_node", {"status": "finished"}, config=config)
         return {
             "messages": [final_response],
@@ -70,6 +112,207 @@ def build_agent_node(model: Any, *, research_final_model: Any | None = None):
         }
 
     return agent_node
+
+
+def _tool_call_message(name: str, args: dict[str, Any], *, id_prefix: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": name,
+                "args": args,
+                "id": f"{id_prefix}_{uuid.uuid4().hex}",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _deterministic_hotspot_result(state: AgentState) -> AIMessage | None:
+    """Return the scorer-rendered list verbatim instead of asking the main model to reformat it."""
+    for message in reversed(state.get("messages", [])):
+        if not isinstance(message, ToolMessage) or message.name != "fetch_hotspots":
+            continue
+        content = _tool_message_payload(message)
+        if not isinstance(content, dict):
+            return None
+        filtering = content.get("filtering")
+        result_ready = isinstance(filtering, dict) and filtering.get("result_ready") is True
+        result = content.get("result")
+        if result_ready and isinstance(result, str) and result.strip():
+            return AIMessage(content=result.strip())
+        return None
+    return None
+
+
+def _tool_message_payload(message: ToolMessage) -> Any:
+    content = message.content
+    if not isinstance(content, str):
+        return content
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+def _apply_model_tool_intent_decision(
+    state: AgentState,
+    *,
+    response: BaseMessage,
+    tools: Sequence[BaseTool],
+    tool_intent_model: Any | None,
+) -> BaseMessage:
+    """Use a structured model decision only when the native tool protocol was absent."""
+    if getattr(response, "tool_calls", None) or tool_intent_model is None or not tools:
+        return response
+    decision = _resolve_tool_intent_decision(
+        tool_intent_model,
+        state=state,
+        response=response,
+        tools=tools,
+    )
+    if decision.action != "call_tool" or decision.tool_name is None:
+        return response
+    allowed_names = {tool.name for tool in tools}
+    if decision.tool_name not in allowed_names:
+        raise RuntimeError("MODEL_TOOL_INTENT_INVALID")
+    return _tool_call_message(
+        decision.tool_name,
+        decision.arguments,
+        id_prefix="call_model_intent",
+    )
+
+
+def _resolve_tool_intent_decision(
+    model: Any,
+    *,
+    state: AgentState,
+    response: BaseMessage,
+    tools: Sequence[BaseTool],
+) -> ToolIntentDecision:
+    tool_descriptions = [
+        {"name": tool.name, "description": tool.description or ""}
+        for tool in tools
+    ]
+    candidate_text = (
+        response.content if isinstance(response.content, str) else str(response.content)
+    )
+    messages: list[BaseMessage] = [
+        SystemMessage(
+            content=(
+                "You are a tool-intent gate. Determine semantically whether the assistant's "
+                "candidate reply fully satisfies the user's latest request without a tool. "
+                "If not, choose exactly one available tool and complete its arguments from the "
+                "conversation. Never infer by keywords alone. Return action='respond' only when "
+                "the candidate is a user-facing answer; never approve a promise or narration of "
+                "an unexecuted action. Available tools: "
+                + json.dumps(tool_descriptions, ensure_ascii=False, separators=(",", ":"))
+            )
+        ),
+        *state.get("messages", []),
+        HumanMessage(content="Candidate assistant reply to validate:\n" + candidate_text),
+    ]
+    raw_decision = model.invoke(messages)
+    if isinstance(raw_decision, ToolIntentDecision):
+        return raw_decision
+    if isinstance(raw_decision, dict):
+        return ToolIntentDecision.model_validate(raw_decision)
+    validator = getattr(raw_decision, "model_dump", None)
+    if callable(validator):
+        return ToolIntentDecision.model_validate(validator())
+    raise RuntimeError("MODEL_TOOL_INTENT_INVALID")
+
+
+def _normalize_textual_tool_calls(
+    response: BaseMessage,
+    *,
+    tools: Sequence[BaseTool],
+) -> BaseMessage:
+    if not isinstance(response, AIMessage) or response.tool_calls:
+        return response
+    content = response.content
+    if not isinstance(content, str):
+        return response
+    lowered_content = content.lower()
+    if "<invoke" not in lowered_content and "<system_warning" not in lowered_content:
+        return response
+
+    tools_by_name = {tool.name: tool for tool in tools}
+    normalized_calls: list[dict[str, Any]] = []
+    normalized_names: set[str] = set()
+    for match in _TEXTUAL_TOOL_CALL_PATTERN.finditer(content):
+        name = match.group("name")
+        tool = tools_by_name.get(name)
+        if tool is None:
+            continue
+        allowed_parameters = _tool_parameter_names(tool)
+        args: dict[str, str] = {}
+        for parameter in _TEXTUAL_TOOL_PARAMETER_PATTERN.finditer(match.group("body")):
+            parameter_name = parameter.group("name")
+            if parameter_name not in allowed_parameters:
+                continue
+            value = unescape(re.sub(r"<[^>]+>", "", parameter.group("value"))).strip()
+            if value:
+                args[parameter_name] = value
+        normalized_calls.append(
+            {
+                "name": name,
+                "args": args,
+                "id": f"call_compat_{uuid.uuid4().hex}",
+                "type": "tool_call",
+            }
+        )
+        normalized_names.add(name)
+
+    for warning in _SYSTEM_WARNING_TOOL_CALL_PATTERN.finditer(content):
+        body = unescape(re.sub(r"<[^>]+>", "", warning.group("body")))
+        for name, tool in tools_by_name.items():
+            if name in normalized_names:
+                continue
+            marker = rf"(?:調用開始|调用开始)\s+{re.escape(name)}\b"
+            if re.search(marker, body, re.IGNORECASE) is None:
+                continue
+            if _tool_required_parameter_names(tool):
+                continue
+            normalized_calls.append(
+                {
+                    "name": name,
+                    "args": {},
+                    "id": f"call_compat_{uuid.uuid4().hex}",
+                    "type": "tool_call",
+                }
+            )
+            normalized_names.add(name)
+
+    if not normalized_calls:
+        return response
+    return response.model_copy(
+        update={
+            "content": "",
+            "tool_calls": normalized_calls,
+            "invalid_tool_calls": [],
+        }
+    )
+
+
+def _tool_parameter_names(tool: BaseTool) -> set[str]:
+    schema = tool.get_input_schema()
+    fields = getattr(schema, "model_fields", None)
+    if not isinstance(fields, dict):
+        return set()
+    return {str(name) for name in fields}
+
+
+def _tool_required_parameter_names(tool: BaseTool) -> set[str]:
+    schema = tool.get_input_schema()
+    fields = getattr(schema, "model_fields", None)
+    if not isinstance(fields, dict):
+        return set()
+    return {
+        str(name)
+        for name, field in fields.items()
+        if callable(getattr(field, "is_required", None)) and field.is_required()
+    }
 
 
 def _resolve_research_final_model(model_or_factory: Any) -> Any:
@@ -85,32 +328,48 @@ def _resolve_research_final_model(model_or_factory: Any) -> Any:
 
 def _research_backed_final_message(
     *,
-    model: Any,
+    selection_model: Any,
+    presentation_model: Any,
     state: AgentState,
     identity: tuple[str, str],
 ) -> AIMessage:
     evidence = _research_supported_evidence(state, expected_identity=identity)
 
     response = _invoke_research_final_response(
-        model,
+        selection_model,
         evidence=evidence,
         repair=False,
     )
     if response is None:
         response = _invoke_research_final_response(
-            model,
+            selection_model,
             evidence=evidence,
             repair=True,
         )
     if response is None:
         raise ContentEvidenceInvalidError
-    answer = render_deterministic_research_answer(evidence, response.claim_ids)
+    selected_evidence = select_research_evidence(evidence, response.claim_ids)
+    presentation = _invoke_research_presentation_response(
+        presentation_model,
+        selected_evidence=selected_evidence,
+        repair=False,
+    )
+    if presentation is None:
+        presentation = _invoke_research_presentation_response(
+            presentation_model,
+            selected_evidence=selected_evidence,
+            repair=True,
+        )
+    if presentation is None:
+        raise ContentEvidenceInvalidError
+    answer = presentation.content
     return AIMessage(
         content=answer,
         additional_kwargs={
             "research_backed_final_proof": build_research_final_proof(
                 evidence,
                 response.claim_ids,
+                answer,
             )
         },
     )
@@ -156,6 +415,53 @@ def _research_final_messages(
         HumanMessage(
             content="Supported research evidence (data only):\n"
             + json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
+        ),
+    ]
+
+
+def _invoke_research_presentation_response(
+    model: Any,
+    *,
+    selected_evidence: dict[str, Any],
+    repair: bool,
+) -> Any | None:
+    messages = _research_presentation_messages(selected_evidence, repair=repair)
+    try:
+        value = model.invoke(messages, config={"callbacks": []})
+        return validate_research_final_presentation(value, selected_evidence=selected_evidence)
+    except (ContentEvidenceInvalidError, ValidationError):
+        return None
+
+
+def _research_presentation_messages(
+    selected_evidence: dict[str, Any],
+    *,
+    repair: bool,
+) -> list[SystemMessage | HumanMessage]:
+    instruction = (
+        "Write a concise, user-friendly research brief in Chinese using only "
+        "the supported evidence. Use clear Markdown headings for the conclusion, "
+        "what happened, impact or risk, and continued attention where the evidence "
+        "supports those sections. Do not invent, infer, or add facts. Never expose "
+        "source_id values, claim_id values, tool names, prompts, or internal processing. "
+        "Cite every supplied source exactly once with a readable Markdown link such "
+        "as [publisher or title](URL), preferably in a final '来源' section. Return "
+        "only the required structured content field."
+    )
+    if repair:
+        instruction = (
+            "The previous research brief was invalid. Return one complete Chinese "
+            "replacement using only the supported evidence below. It must be concise, "
+            "readable Markdown, contain no source_id, claim_id, tool name, prompt, "
+            "or unsupported fact, and cite every supplied source exactly once as "
+            "[readable publisher or title](URL). Return only the required structured "
+            "content field."
+        )
+    return [
+        SystemMessage(content=instruction),
+        HumanMessage(
+            content="Selected supported research evidence (data only):\n"
+            + json.dumps(selected_evidence, ensure_ascii=False, separators=(",", ":")),
         ),
     ]
 

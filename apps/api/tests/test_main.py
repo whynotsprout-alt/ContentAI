@@ -2,6 +2,7 @@ import pytest
 from api.app import _normalize_origins, app, create_app
 from client import ApiClient as TestClient
 from core.config import Settings
+from database_helpers import get_test_database_url
 from db.session import get_engine
 from models.schemas import AgentVersionCreate
 from pydantic import ValidationError
@@ -107,7 +108,7 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
     _seed_required_service_heartbeats()
     test_settings = Settings(
         env="test",
-        database={"url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"},
+        database={"url": get_test_database_url()},
     )
     created_app = create_app(test_settings)
     initialized_settings = []
@@ -163,8 +164,7 @@ def test_settings_reads_dotenv_file(tmp_path, monkeypatch):
     for name in (
         "CONTENTAI_ENV",
         "CONTENTAI_DATABASE__URL",
-        "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL",
-        "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY",
+        "CONTENTAI_SEARCH__METASO_API_KEY",
         "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
         "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",
     ):
@@ -175,8 +175,7 @@ def test_settings_reads_dotenv_file(tmp_path, monkeypatch):
         "\n".join(
             [
                 "CONTENTAI_DATABASE__URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai",
-                "CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL=https://dotenv.example/v1",
-                "CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY=dotenv-key",
+                "CONTENTAI_SEARCH__METASO_API_KEY=dotenv-key",
                 "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL=dotenv-admin@example.com",
                 "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD=dotenv bootstrap password",
             ]
@@ -185,8 +184,7 @@ def test_settings_reads_dotenv_file(tmp_path, monkeypatch):
     )
     settings = Settings(_env_file=env_file)
 
-    assert settings.search.traffic_relay_base_url == "https://dotenv.example/v1"
-    assert settings.search.traffic_relay_api_key.get_secret_value() == "dotenv-key"
+    assert settings.search.metaso_api_key.get_secret_value() == "dotenv-key"
 
 
 def test_settings_reads_process_environment(monkeypatch):
@@ -195,8 +193,7 @@ def test_settings_reads_process_environment(monkeypatch):
         "CONTENTAI_DATABASE__URL",
         "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_env",
     )
-    monkeypatch.setenv("CONTENTAI_SEARCH__TRAFFIC_RELAY_BASE_URL", "https://env.example/v1")
-    monkeypatch.setenv("CONTENTAI_SEARCH__TRAFFIC_RELAY_API_KEY", "env-key")
+    monkeypatch.setenv("CONTENTAI_SEARCH__METASO_API_KEY", "env-key")
     monkeypatch.setenv(
         "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
         "environment-admin@example.com",
@@ -209,8 +206,7 @@ def test_settings_reads_process_environment(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.database.url.endswith("/contentai_env")
-    assert settings.search.traffic_relay_base_url == "https://env.example/v1"
-    assert settings.search.traffic_relay_api_key.get_secret_value() == "env-key"
+    assert settings.search.metaso_api_key.get_secret_value() == "env-key"
 
 
 def test_settings_requires_database_url(monkeypatch):
@@ -224,9 +220,7 @@ def test_non_test_env_rejects_test_database():
         Settings(
             _env_file=None,
             env="development",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
-            },
+            database={"url": get_test_database_url()},
         )
 
 
@@ -240,7 +234,7 @@ def test_test_env_requires_test_database():
         )
 
 
-def test_production_requires_auth_frontend_origins_and_traffic_relay_key(monkeypatch):
+def test_production_requires_auth_and_frontend_origins(monkeypatch):
     for name in (
         "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_EMAIL",
         "CONTENTAI_AUTH__BOOTSTRAP_ADMIN_PASSWORD",

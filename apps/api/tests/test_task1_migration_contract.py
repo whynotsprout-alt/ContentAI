@@ -87,7 +87,7 @@ def _foreign_key_column_sets(
 
 def test_release_version_and_single_fresh_revision():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
-        assert tomllib.load(stream)["project"]["version"] == "0.5.0-rc.1"
+        assert tomllib.load(stream)["project"]["version"] == "0.6.0"
 
     revisions = sorted(VERSIONS_DIR.glob("*.py"))
     assert [revision.name for revision in revisions] == [
@@ -239,6 +239,10 @@ def test_tenant_and_execution_lineage_constraints_are_database_enforced():
         "chat_max_tokens",
         "structured_max_tokens",
     } <= _column_names(inspector, "modelconfiguration")
+    model_configuration_columns = {
+        column["name"]: column for column in inspector.get_columns("modelconfiguration")
+    }
+    assert model_configuration_columns["temperature"]["nullable"] is True
     model_configuration_checks = {
         constraint["name"] for constraint in inspector.get_check_constraints("modelconfiguration")
     }

@@ -328,6 +328,9 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
         def build_research_final_model(self) -> object:
             return object()
 
+        def build_research_presentation_model(self) -> object:
+            return object()
+
         def close(self) -> bool:
             return True
 

@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field
 MAX_FILTER_CANDIDATES = 200
 
 
+class HotspotFilterRuntimeError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class HotspotCandidateScore(BaseModel):
     candidate_id: str = Field(min_length=1, max_length=80)
     score: int = Field(ge=0, le=100)

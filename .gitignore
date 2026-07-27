@@ -4,6 +4,15 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.pytest-task*/
+.codex-logs/
+.impeccable/
+.playwright-cli/
+.superpowers/brainstorm/
+.superpowers/sdd/*
+!.superpowers/sdd/model-config-task-3-report.md
+!.superpowers/sdd/task-3a-report.md
+!.superpowers/sdd/task-3c-report.md
 .env
 *.log
 *.err
@@ -21,6 +30,7 @@ apps/web/vite.config.d.ts
 apps/web/vite.config.js
 output/
 dist/
+logs/
 node_modules/
 celerybeat-schedule*
 apps/api/src/celerybeat-schedule*

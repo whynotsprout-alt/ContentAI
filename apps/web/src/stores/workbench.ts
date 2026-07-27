@@ -28,11 +28,6 @@ const STREAM_DEGRADED_CODES = new Set([
 export type AssistantBubbleState = 'normal' | 'pending' | 'streaming';
 export type RunLifecycle = 'idle' | 'queued' | 'running' | 'reconnecting' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'waiting_input';
 
-export interface TimelineEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
-
 export type WorkbenchMessage = {
   id?: string;
   role: 'user' | 'assistant' | 'system';
@@ -124,13 +119,6 @@ function toRunLifecycle(status: string | null | undefined): RunLifecycle {
   return 'idle';
 }
 
-function queueStageNotice(execution: ChatExecutionInfo | null | undefined) {
-  if (execution?.queue_stage === 'dispatching') return '任务已入队，正在提交到执行队列…';
-  if (execution?.queue_stage === 'waiting_worker') return '任务已入队，正在等待 Worker…';
-  if (execution?.queue_stage === 'starting') return 'Worker 已领取任务，正在启动…';
-  return '';
-}
-
 function resolveSessionStatus(session: ChatSessionDetail, fallback: string = 'idle') {
   return typeof session.latest_execution?.status === 'string' && session.latest_execution.status
     ? session.latest_execution.status
@@ -189,7 +177,6 @@ export const useWorkbenchStore = defineStore('workbench', {
     activeSessionId: '',
     status: 'idle',
     messages: [] as WorkbenchMessage[],
-    events: [] as TimelineEvent[],
     sessionInfo: null as ChatSessionDetail | null,
     executionInfo: null as ChatExecutionInfo | null,
     pendingInterrupt: null as PublicInterrupt | null,
@@ -199,7 +186,7 @@ export const useWorkbenchStore = defineStore('workbench', {
     isStreamingAssistantMessage: false,
     streamingAssistantMessageIndex: -1,
     runLifecycle: 'idle' as RunLifecycle,
-    statusNotice: '',
+    runProgressLabel: '',
     ssePollTimer: null as number | null,
     eventSource: null as FetchEventStream | null,
     sseRecoveryAttempts: 0,
@@ -325,11 +312,10 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.eventSource = null;
       if (!this._isConversationContextCurrent(contextToken)) return;
       this.error = '';
-      this.statusNotice = '';
       this.status = 'idle';
       this.runLifecycle = 'idle';
+      this.runProgressLabel = '';
       this.messages = [];
-      this.events = [];
       this.sessionInfo = null;
       this.executionInfo = null;
       this.pendingInterrupt = null;
@@ -432,16 +418,15 @@ export const useWorkbenchStore = defineStore('workbench', {
       this.executionId = '';
       this.activeSessionId = '';
       this.messages = [];
-      this.events = [];
       this.sessionInfo = null;
       this.executionInfo = null;
       this.pendingInterrupt = null;
       this.messageNextCursor = null;
       this.error = '';
       this.lastErrorCode = '';
-      this.statusNotice = '';
       this.status = 'idle';
       this.runLifecycle = 'idle';
+      this.runProgressLabel = '';
       this.assistantStreamingState = 'normal';
       this.assistantStreamingBuffer = '';
       this.isStreamingAssistantMessage = false;
@@ -489,9 +474,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         this._removeActiveStreamingAssistantPlaceholder();
         this.processedSseEventIds = [];
         this.error = '';
-        this.statusNotice = '';
         this.messages = [];
-        this.events = [];
         this.sessionInfo = null;
         this.executionInfo = null;
         this.pendingInterrupt = null;
@@ -598,9 +581,9 @@ export const useWorkbenchStore = defineStore('workbench', {
       const requestIdempotencyKey = this._nextIdempotencyKey();
       this.error = '';
       this.lastErrorCode = '';
-      this.statusNotice = '';
       this.status = 'pending';
       this.runLifecycle = 'queued';
+      this.runProgressLabel = '正在排队';
       this.executionId = '';
       this.processedSseEventIds = [];
       this.lastEventSequence = 0;
@@ -641,9 +624,9 @@ export const useWorkbenchStore = defineStore('workbench', {
       const requestSessionId = this.sessionId;
       this.error = '';
       this.lastErrorCode = '';
-      this.statusNotice = '';
       this.status = 'pending';
       this.runLifecycle = 'queued';
+      this.runProgressLabel = '正在恢复执行';
       this._ensureAssistantPlaceholder();
       this.processedSseEventIds = [];
       this.lastEventSequence = 0;
@@ -685,7 +668,6 @@ export const useWorkbenchStore = defineStore('workbench', {
       const contextToken = this.sessionContextToken;
       const sessionId = this.sessionId;
       this._setRunLifecycle('cancelling');
-      this.statusNotice = '正在取消生成…';
       this.eventSource?.close();
       this.eventSource = null;
       this._stopSseRecoveryPoll();
@@ -713,19 +695,16 @@ export const useWorkbenchStore = defineStore('workbench', {
           const lifecycle = toRunLifecycle(latestExecution?.status);
           if (!['queued', 'running', 'reconnecting'].includes(lifecycle)) {
             this._setRunLifecycle(lifecycle);
-            this.statusNotice = lifecycle === 'cancelled' ? '已停止生成。' : '';
             this._preserveStreamingAssistantContent();
             await this.refreshSessions().catch(() => undefined);
             return;
           }
           await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
         }
-        this.statusNotice = '取消请求已发送，正在等待任务停止。';
       } catch (error) {
         if (!this._isConversationContextCurrent(contextToken)) return;
         this.lastErrorCode = error instanceof ApiError ? error.code : '';
         this.error = normalizeErrorMessage(error);
-        this.statusNotice = '';
         this._setRunLifecycle('running');
       }
     },
@@ -747,19 +726,19 @@ export const useWorkbenchStore = defineStore('workbench', {
       const source = sourceOverride;
       this.eventSource = source;
       let terminalEventReceived = false;
+      let mainRunCompleted = false;
 
       const completeRun = async () => {
-        if (terminalEventReceived || !isActiveContext()) return;
-        terminalEventReceived = true;
+        if (terminalEventReceived || mainRunCompleted || !isActiveContext()) return;
+        mainRunCompleted = true;
         this._stopSseRecoveryPoll();
         this._setRunLifecycle('completed');
+        this.runProgressLabel = '';
         await this.refreshSession();
         if (!isActiveContext()) return;
         await this.refreshSessions().catch(() => undefined);
         if (!isActiveContext()) return;
         this._removeActiveStreamingAssistantPlaceholder();
-        source.close();
-        this.eventSource = null;
       };
 
       const cancelRun = async () => {
@@ -767,6 +746,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         terminalEventReceived = true;
         this._stopSseRecoveryPoll();
         this._setRunLifecycle('cancelled');
+        this.runProgressLabel = '';
         this._preserveStreamingAssistantContent();
         await this.refreshSession(false);
         if (!isActiveContext()) return;
@@ -776,12 +756,12 @@ export const useWorkbenchStore = defineStore('workbench', {
         this.eventSource = null;
       };
 
-      const waitForInput = async (name: string, data: Record<string, unknown>) => {
+      const waitForInput = async () => {
         if (terminalEventReceived || !isActiveContext()) return;
         terminalEventReceived = true;
         this._stopSseRecoveryPoll();
         this._setRunLifecycle('waiting_input');
-        this._recordTimelineEvent(name || 'waiting_input', data);
+        this.runProgressLabel = '等待你的确认';
         await this.refreshSession();
         if (!isActiveContext()) return;
         await this.refreshSessions().catch(() => undefined);
@@ -796,7 +776,7 @@ export const useWorkbenchStore = defineStore('workbench', {
         terminalEventReceived = true;
         this._stopSseRecoveryPoll();
         this._setRunLifecycle('failed');
-        this._recordTimelineEvent('error', data);
+        this.runProgressLabel = '';
         const message = typeof data.message === 'string'
           ? data.message
           : typeof data.error === 'string'
@@ -833,16 +813,40 @@ export const useWorkbenchStore = defineStore('workbench', {
             data.message_type === 'json')
         ) ? data.message_type : undefined;
         const done = Boolean(data.done);
-        this.statusNotice = '';
         this._setRunLifecycle('running');
 
+        const progress = data.progress && typeof data.progress === 'object'
+          ? data.progress as Record<string, unknown>
+          : null;
+        const progressLabel = progress && typeof progress.label === 'string'
+          ? progress.label.trim()
+          : '';
+        const activeToolName = typeof data.tool_name === 'string' ? data.tool_name : '';
+        if (progressLabel) {
+          this.runProgressLabel = progressLabel;
+          return;
+        }
+        if (activeToolName) {
+          const toolStatus = typeof data.status === 'string' ? data.status : '';
+          this.runProgressLabel = ['completed', 'succeeded', 'failed'].includes(toolStatus)
+            ? '正在整理结果'
+            : activeToolName === 'prepare_topic_research'
+              ? '正在启动深度搜索'
+              : activeToolName === 'fetch_hotspots'
+                ? '正在采集热点'
+                : '正在调用工具';
+          return;
+        }
+
         if (name === 'assistant_message_delta') {
+          this.runProgressLabel = '正在生成回复';
           this._startStreamingAssistantMessage();
           this._appendAssistantMessageDelta(content || chunk, done, messageType || 'markdown');
           return;
         }
 
         if (name === 'assistant_message') {
+          this.runProgressLabel = '正在生成回复';
           this._startStreamingAssistantMessage();
           if (content) {
             if (this.isStreamingAssistantMessage && !chunk) {
@@ -854,7 +858,6 @@ export const useWorkbenchStore = defineStore('workbench', {
           return;
         }
 
-        this._recordTimelineEvent(name || 'messages', data);
       };
 
       const handleLifecycleEvent = async (event: MessageEvent) => {
@@ -871,13 +874,29 @@ export const useWorkbenchStore = defineStore('workbench', {
           name === 'attempt_start'
         ) {
           this._setRunLifecycle('running');
+          this.runProgressLabel = name === 'run_retry' ? '模型连接中断，正在重试' : '正在分析请求';
           this._startStreamingAssistantMessage();
-          this._recordTimelineEvent(name, data);
           return;
         }
 
         if (name === 'run_finish') {
           await completeRun();
+          return;
+        }
+
+        if (name === 'session_title_updated') {
+          const title = typeof data.title === 'string' ? data.title : '';
+          if (title && this.sessionInfo?.session_id === sessionId) {
+            this.sessionInfo = { ...this.sessionInfo, title };
+          }
+          if (title) {
+            this.sessions = this.sessions.map((session) =>
+              session.session_id === sessionId ? { ...session, title } : session
+            );
+          }
+          await this.refreshSession(false).catch(() => undefined);
+          if (!isActiveContext()) return;
+          await this.refreshSessions().catch(() => undefined);
           return;
         }
 
@@ -894,14 +913,13 @@ export const useWorkbenchStore = defineStore('workbench', {
         if (
           name === 'run_interrupt'
         ) {
-          await waitForInput(name, data);
+          await waitForInput();
           return;
         }
 
         if (['queued', 'reconnecting'].includes(this.runLifecycle)) {
           this._setRunLifecycle('running');
         }
-        this._recordTimelineEvent(name || 'lifecycle', data);
       };
 
       const handleErrorEvent = async (event: MessageEvent) => {
@@ -919,29 +937,14 @@ export const useWorkbenchStore = defineStore('workbench', {
           source.close();
           this.eventSource = null;
           this._setRunLifecycle('reconnecting');
-          this.statusNotice = '实时更新已降级，正在每 3 秒刷新任务状态…';
           this._startRunStatusPolling(sessionId, resolvedContextToken);
           return;
         }
         await failRun(data);
       };
 
-      const handleToolEvent = (event: MessageEvent) => {
-        if (!isActiveContext()) return;
-        if (this._hasSeenSseEvent(sessionId, event.type, event)) return;
-        const data = this._parseStreamEventData(event);
-        if (!data || !this._isActiveRunPayload(sessionId, data, resolvedContextToken)) return;
-        this._setRunLifecycle('running');
-        const name = typeof data.name === 'string' && data.name ? data.name : event.type;
-        this._recordTimelineEvent(name, data);
-      };
-
       source.addEventListener('messages', (event) => {
         void handleMessageEvent(event as MessageEvent);
-      });
-
-      source.addEventListener('tools', (event) => {
-        handleToolEvent(event as MessageEvent);
       });
 
       source.addEventListener('lifecycle', (event) => {
@@ -954,29 +957,26 @@ export const useWorkbenchStore = defineStore('workbench', {
         if (this._hasSeenSseEvent(sessionId, 'interrupts', messageEvent)) return;
         const data = this._parseStreamEventData(messageEvent);
         if (!data || !this._isActiveRunPayload(sessionId, data, resolvedContextToken)) return;
-        const name = typeof data.name === 'string' ? data.name : 'run_interrupt';
-        void waitForInput(name, data);
+        void waitForInput();
       });
 
       source.addEventListener('errors', (event) => {
         void handleErrorEvent(event as MessageEvent);
       });
 
-      source.addEventListener('values', (event) => {
-        const messageEvent = event as MessageEvent;
-        if (!isActiveContext()) return;
-        if (this._hasSeenSseEvent(sessionId, 'values', messageEvent)) return;
-        const data = this._parseStreamEventData(messageEvent);
-        if (!data || !this._isActiveRunPayload(sessionId, data, resolvedContextToken)) return;
-        const name = typeof data.name === 'string' ? data.name : 'values';
-        this._recordTimelineEvent(name, data);
-      });
-
       source.addEventListener('close', async () => {
         if (!isActiveContext()) return;
         if (!terminalEventReceived) {
           terminalEventReceived = true;
-          await this._recoverFromSseRunState(sessionId, true);
+          if (mainRunCompleted) {
+            await this.refreshSession(false).catch(() => undefined);
+            if (isActiveContext()) {
+              await this.refreshSessions().catch(() => undefined);
+              this._removeActiveStreamingAssistantPlaceholder();
+            }
+          } else {
+            await this._recoverFromSseRunState(sessionId, true);
+          }
         }
         source.close();
         this.eventSource = null;
@@ -988,7 +988,6 @@ export const useWorkbenchStore = defineStore('workbench', {
         source.close();
         this.eventSource = null;
         this._setRunLifecycle('reconnecting');
-        this.statusNotice = '实时连接中断，正在恢复运行状态…';
         this.lastErrorCode = error instanceof ApiError ? error.code : '';
         await this._recoverFromSseRunState(sessionId, true);
       };
@@ -1002,6 +1001,9 @@ export const useWorkbenchStore = defineStore('workbench', {
         this.status = 'running';
       } else {
         this.status = lifecycle;
+      }
+      if (['idle', 'completed', 'failed', 'cancelled'].includes(lifecycle)) {
+        this.runProgressLabel = '';
       }
     },
 
@@ -1168,7 +1170,6 @@ export const useWorkbenchStore = defineStore('workbench', {
       const latestStatus = resolveSessionStatus(this.sessionInfo, 'idle');
       this.status = latestStatus;
       this._setRunLifecycle(toRunLifecycle(latestStatus));
-      this.statusNotice = '';
       if (hydrateMessages) {
         await this._hydrateMessages(this.sessionInfo);
       }
@@ -1285,13 +1286,11 @@ export const useWorkbenchStore = defineStore('workbench', {
       if (runLifecycle === 'queued' || runLifecycle === 'running') {
         if (execution?.streaming_degraded) {
           this._setRunLifecycle('reconnecting');
-          this.statusNotice = '实时更新已降级，正在每 3 秒刷新任务状态…';
           this._startRunStatusPolling(sessionId, contextToken);
           return;
         }
         if (connectionError) {
           this._setRunLifecycle('reconnecting');
-          this.statusNotice = '实时连接中断，正在从上次位置恢复…';
           this._scheduleSseRecovery(sessionId, contextToken);
         } else {
           this._setRunLifecycle(runLifecycle);
@@ -1359,7 +1358,6 @@ export const useWorkbenchStore = defineStore('workbench', {
       const resolvedContextToken = contextToken ?? this.sessionContextToken;
       if (this.ssePollTimer) return;
       if (this.sseRecoveryAttempts >= SSE_RECOVERY_MAX_ATTEMPTS) {
-        this.statusNotice = '实时连接持续失败，已切换为每 3 秒刷新任务状态…';
         this._startRunStatusPolling(sessionId, resolvedContextToken);
         return;
       }
@@ -1393,12 +1391,10 @@ export const useWorkbenchStore = defineStore('workbench', {
             if (execution.streaming_degraded) {
               this.ssePollTimer = null;
               this._setRunLifecycle('reconnecting');
-              this.statusNotice = '实时更新已降级，正在每 3 秒刷新任务状态…';
               this._startRunStatusPolling(sessionId, resolvedContextToken);
               return;
             }
             this._setRunLifecycle(lifecycle);
-            this.statusNotice = queueStageNotice(execution);
           }
         }
         this.ssePollTimer = null;
@@ -1443,14 +1439,10 @@ export const useWorkbenchStore = defineStore('workbench', {
         const lifecycle = toRunLifecycle(execution.status);
         if (lifecycle === 'queued' || lifecycle === 'running') {
           this._setRunLifecycle(execution.streaming_degraded ? 'reconnecting' : lifecycle);
-          this.statusNotice = execution.streaming_degraded
-            ? '实时更新已降级，正在每 3 秒刷新任务状态…'
-            : queueStageNotice(execution);
           this.ssePollTimer = window.setTimeout(poll, RUN_STATUS_POLL_MS);
           return;
         }
         this._setRunLifecycle(lifecycle);
-        this.statusNotice = lifecycle === 'cancelled' ? '已停止生成。' : '';
         await this.refreshSession();
         if (!this._isConversationContextCurrent(resolvedContextToken) || this.sessionId !== sessionId) {
           return;
@@ -1459,11 +1451,6 @@ export const useWorkbenchStore = defineStore('workbench', {
         this._removeActiveStreamingAssistantPlaceholder();
       };
       void poll();
-    },
-
-    _recordTimelineEvent(eventName: string, data: Record<string, unknown>) {
-      this.events.push({ event: eventName, data });
-      this.events = this.events.slice(-200);
     },
 
     _nextIdempotencyKey() {

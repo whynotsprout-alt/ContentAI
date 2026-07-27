@@ -67,7 +67,7 @@ class AdminUsageResponse(SchemaBase):
 
 
 class ModelRuntimeParameters(BaseModel):
-    temperature: float = Field(ge=0, le=2)
+    temperature: float | None = Field(ge=0, le=2)
     context_window_tokens: int = Field(gt=0)
     chat_max_tokens: int = Field(gt=0)
     structured_max_tokens: int = Field(gt=0)

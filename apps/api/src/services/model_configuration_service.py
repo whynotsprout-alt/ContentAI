@@ -38,7 +38,7 @@ class RuntimeModelConfiguration:
     base_url: str
     model_name: str
     api_key: SecretStr
-    temperature: float
+    temperature: float | None
     context_window_tokens: int
     chat_max_tokens: int
     structured_max_tokens: int
@@ -101,7 +101,7 @@ class ModelConfigurationService:
         base_url: str,
         api_key: str | None,
         model_name: str,
-        temperature: float,
+        temperature: float | None,
         context_window_tokens: int,
         chat_max_tokens: int,
         structured_max_tokens: int,

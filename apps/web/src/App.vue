@@ -10,7 +10,7 @@ import AccessibleDialog from './components/AccessibleDialog.vue';
 import AgentManager from './components/AgentManager.vue';
 import ChatCanvas from './components/ChatCanvas.vue';
 import ChangePasswordForm from './components/ChangePasswordForm.vue';
-import RunActivityBar from './components/RunActivityBar.vue';
+import ConversationContextRail from './components/ConversationContextRail.vue';
 import SessionRail from './components/SessionRail.vue';
 import WorkbenchHeader from './components/WorkbenchHeader.vue';
 
@@ -261,26 +261,39 @@ onBeforeUnmount(() => {
         @delete="requestDeleteSession"
       />
 
-      <section
-        class="conversation-column"
+      <div
+        class="conversation-workspace"
         :inert="isMobileViewport && mobileSessionNavigationOpen ? true : undefined"
       >
-        <RunActivityBar :lifecycle="store.runLifecycle" :notice="store.statusNotice" :events="store.events" :error="store.error" />
-        <p v-if="store.error && store.runLifecycle !== 'failed'" class="workspace-alert" role="alert">{{ store.error }}</p>
-        <ChatCanvas
-          :messages="store.messages"
+        <section class="conversation-column">
+          <p v-if="store.error" class="workspace-alert" role="alert">{{ store.error }}</p>
+          <ChatCanvas
+            :messages="store.messages"
+            :lifecycle="store.runLifecycle"
+            :progress-label="store.runProgressLabel"
+            :can-submit="store.canSubmit"
+            :can-resume="store.canResume"
+            :pending-interrupt="store.pendingInterrupt"
+            :has-agent="Boolean(store.agentId)"
+            :switching-agent="store.isSwitchingAgent || store.isLoadingSession"
+            :user-email="auth.user?.email ?? ''"
+            :submit-message="submitMessage"
+            :resume-run="resumeRun"
+            :cancel-run="cancelRun"
+            @create-agent="openAgentManager"
+          />
+        </section>
+
+        <ConversationContextRail
+          :agent="store.selectedAgent"
+          :session="store.sessionInfo"
           :lifecycle="store.runLifecycle"
-          :can-submit="store.canSubmit"
-          :can-resume="store.canResume"
-          :pending-interrupt="store.pendingInterrupt"
-          :has-agent="Boolean(store.agentId)"
-          :switching-agent="store.isSwitchingAgent || store.isLoadingSession"
-          :submit-message="submitMessage"
-          :resume-run="resumeRun"
-          :cancel-run="cancelRun"
-          @create-agent="openAgentManager"
+          :message-count="store.messages.length"
+          :busy="store.isSwitchingAgent || store.isLoadingSession || store.isLoadingSessions"
+          @create-session="createSession"
+          @manage-agent="openAgentManager()"
         />
-      </section>
+      </div>
     </div>
 
     <AgentManager :open="agentManagerOpen" :initial-template="initialAgentTemplate" @close="closeAgentManager" />

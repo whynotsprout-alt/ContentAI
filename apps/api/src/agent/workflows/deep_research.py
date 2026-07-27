@@ -176,7 +176,7 @@ async def run_deep_research_package_workflow_async(
     ):
         repair_messages = [
             *messages,
-            SystemMessage(
+            HumanMessage(
                 content=(
                     "The previous structured response failed evidence validation. "
                     "Return one complete replacement object. Every core conclusion and finding "
@@ -418,7 +418,7 @@ def _bounded_provider_item(item: Any) -> dict[str, Any] | None:
 
     score = item.get("score")
     if score is not None and (
-        not isinstance(score, (int, float, str))
+        not isinstance(score, int | float | str)
         or (isinstance(score, str) and len(score) > _MAX_PROVIDER_SCORE_CHARS)
     ):
         return None

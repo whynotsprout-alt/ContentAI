@@ -111,7 +111,7 @@ describe('responsive administration workspace', () => {
       /@media \(max-width:\s*599px\)\s*\{[\s\S]*?\.model-runtime-grid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/
     );
     expect(styles).toMatch(/\.model-runtime-fieldset\s*\{[\s\S]*?border:\s*0;/);
-    expect(styles).toMatch(/\.model-field input\s*\{[\s\S]*?height:\s*46px;/);
+    expect(styles).toMatch(/\.model-field input,\s*\.model-field select\s*\{[\s\S]*?height:\s*46px;/);
     expect(styles).toContain('overflow-x: hidden');
   });
 });

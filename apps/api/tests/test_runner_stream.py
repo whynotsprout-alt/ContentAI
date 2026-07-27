@@ -90,6 +90,17 @@ def test_content_evidence_error_keeps_public_terminal_code():
     assert detail.retryable is False
 
 
+def test_hotspot_filter_error_keeps_public_terminal_code():
+    error = RuntimeError("provider details")
+    error.code = "HOTSPOT_FILTER_FAILED"  # type: ignore[attr-defined]
+
+    detail = classify_runtime_error(error)
+
+    assert detail.code == "HOTSPOT_FILTER_FAILED"
+    assert "热点评分模型" in detail.message
+    assert detail.retryable is False
+
+
 def test_build_graph_input_keeps_system_prompt_for_fresh_thread():
     engine = AgentExecutionEngine.__new__(AgentExecutionEngine)
 
@@ -153,6 +164,113 @@ def test_stream_graph_emits_assistant_delta_events():
     ]
     assert len(delta_payloads) >= 2
     assert all(isinstance(payload.get("chunk"), str) for payload in delta_payloads)
+
+
+def test_stream_graph_discards_chunks_from_failed_model_attempt():
+    class _RetriedStreamingGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(id="attempt-failed", content="失败尝试的半截回复"),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(id="attempt-success", content="最终完整回复"),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            yield (
+                "updates",
+                {"agent": {"messages": [AIMessage(id="attempt-success", content="最终完整回复")]}},
+            )
+
+    writer = _EventWriter()
+    _, streamed_text, _ = _run_stream_graph(
+        graph=_RetriedStreamingGraph(),
+        execution_id="exe-retried-stream",
+        event_writer=writer,
+    )
+
+    emitted = "".join(
+        str(payload.get("chunk") or "")
+        for event_name, payload in writer.events
+        if event_name == "assistant_message_delta"
+    )
+    assert emitted == "最终完整回复"
+    assert streamed_text == "最终完整回复"
+
+
+def test_stream_graph_never_emits_textual_tool_call_markup():
+    class _TextualToolStreamingGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content="Let me fetch that.\n<function_"),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content=(
+                            "calls><invoke name=\"fetch_hotspots\">"
+                            "<parameter name=\"source\">all</parameter>"
+                            "</invoke></function_calls>"
+                        )
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "fetch_hotspots",
+                                        "args": {"source": "all"},
+                                        "id": "call-compat",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "messages",
+                (AIMessageChunk(content="最终推荐结果"), {"langgraph_node": "agent"}),
+            )
+            yield (
+                "updates",
+                {"agent": {"messages": [AIMessage(content="最终推荐结果")]}},
+            )
+
+    writer = _EventWriter()
+    _, streamed_text, _ = _run_stream_graph(
+        graph=_TextualToolStreamingGraph(),
+        execution_id="exe-textual-tool-call",
+        event_writer=writer,
+    )
+
+    emitted = "".join(
+        str(payload.get("chunk") or "")
+        for event_name, payload in writer.events
+        if event_name == "assistant_message_delta"
+    )
+    assert emitted == "最终推荐结果"
+    assert streamed_text == "最终推荐结果"
+    assert "function_calls" not in emitted
 
 
 def test_stream_graph_stream_failure_is_not_fallbacked():

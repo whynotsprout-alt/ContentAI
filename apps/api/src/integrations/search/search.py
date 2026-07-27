@@ -135,7 +135,7 @@ async def _cached_provider_search(
     settings = get_settings()
     shared_cache = SharedJsonCache("search", settings)
     shared_key = shared_cache.key(cache_key)
-    shared = shared_cache.get(shared_key)
+    shared = await asyncio.to_thread(shared_cache.get, shared_key)
     if shared is not None:
         _cache_set(cache_key, shared, success_ttl)
         shared.setdefault("cache", {})["hit"] = True
@@ -146,7 +146,7 @@ async def _cached_provider_search(
     result.setdefault("cache", {})["hit"] = False
     ttl = success_ttl if result.get("items") else min(success_ttl, FAILURE_CACHE_TTL_SECONDS)
     _cache_set(cache_key, result, ttl)
-    shared_cache.set(shared_key, result, ttl)
+    await asyncio.to_thread(shared_cache.set, shared_key, result, ttl)
     return result
 
 
