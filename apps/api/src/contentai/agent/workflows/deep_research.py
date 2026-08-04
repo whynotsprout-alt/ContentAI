@@ -442,7 +442,7 @@ def _bounded_provider_item(item: Any) -> dict[str, Any] | None:
 
     score = item.get("score")
     if score is not None and (
-        not isinstance(score, (int, float, str))
+        not isinstance(score, int | float | str)
         or (isinstance(score, str) and len(score) > _MAX_PROVIDER_SCORE_CHARS)
     ):
         return None

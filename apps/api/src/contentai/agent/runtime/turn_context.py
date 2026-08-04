@@ -40,7 +40,7 @@ class TurnPromptInputs:
 
 
 def normalize_tool_permissions(values: Any) -> tuple[str, ...]:
-    if not isinstance(values, (list, tuple)):
+    if not isinstance(values, list | tuple):
         raise TurnContextSnapshotError
     normalized: list[str] = []
     for value in values:
@@ -264,8 +264,8 @@ def _is_valid_snapshot_memory(memory: Any) -> bool:
             and bool(_validated_text(memory.get("content"), max_chars=1_000))
             and not is_sensitive_memory(memory["content"])
             and not is_transient_task_memory(memory["content"])
-            and isinstance(memory.get("confidence"), (int, float))
-            and isinstance(memory.get("importance_score"), (int, float))
+            and isinstance(memory.get("confidence"), int | float)
+            and isinstance(memory.get("importance_score"), int | float)
         )
     except TurnContextSnapshotError:
         return False

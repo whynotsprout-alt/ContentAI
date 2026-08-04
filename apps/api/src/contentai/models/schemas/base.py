@@ -29,7 +29,7 @@ def _reject_naive_datetimes(value: Any) -> None:
     elif isinstance(value, dict):
         for item in value.values():
             _reject_naive_datetimes(item)
-    elif isinstance(value, (list, tuple, set)):
+    elif isinstance(value, list | tuple | set):
         for item in value:
             _reject_naive_datetimes(item)
 
