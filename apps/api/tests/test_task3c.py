@@ -5,13 +5,13 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from api.app import create_app
 from client import ApiClient as TestClient
-from core.client_ip import resolve_client_ip
-from core.config import Env, Settings
-from core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
-from db.session import get_engine
-from models.user import AuthSession
+from contentai.api.app import create_app
+from contentai.core.client_ip import resolve_client_ip
+from contentai.core.config import Env, Settings
+from contentai.core.rate_limit import RateLimitRule, RateLimitUnavailable, RedisRateLimiter
+from contentai.db.session import get_engine
+from contentai.models.user import AuthSession
 from pydantic import ValidationError
 from redis import Redis
 from sqlmodel import Session, select

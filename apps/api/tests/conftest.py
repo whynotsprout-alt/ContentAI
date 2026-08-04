@@ -2,7 +2,10 @@ import base64
 from pathlib import Path
 
 import pytest
-from model_config_helpers import TEST_MODEL_CONFIG_API_KEY
+from model_config_helpers import (
+    DEFAULT_MODEL_RUNTIME_PARAMETERS,
+    TEST_MODEL_CONFIG_API_KEY,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -21,8 +24,8 @@ def pytest_configure() -> None:
     import os
 
     from alembic import command
-    from core.alembic import build_alembic_config
-    from core.config import set_settings_env_file
+    from contentai.core.alembic import build_alembic_config
+    from contentai.core.config import set_settings_env_file
 
     test_env_file = PROJECT_ROOT / ".pytest_cache" / "contentai-test.env"
     test_env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -35,8 +38,8 @@ def pytest_configure() -> None:
     _ensure_test_database_exists()
     alembic_config = build_alembic_config()
     command.upgrade(alembic_config, "head")
-    from agent.runtime.checkpoint import RuntimePersistence
-    from core.config import get_settings
+    from contentai.agent.runtime.checkpoint import RuntimePersistence
+    from contentai.core.config import get_settings
 
     persistence = RuntimePersistence(get_settings())
     try:
@@ -74,9 +77,9 @@ def _ensure_test_database_exists() -> None:
 
 @pytest.fixture(autouse=True)
 def reset_database() -> None:
-    from core.config import get_settings
-    from core.model_config_crypto import ModelConfigurationSecretProtector
-    from db.session import get_engine
+    from contentai.core.config import get_settings
+    from contentai.core.model_config_crypto import ModelConfigurationSecretProtector
+    from contentai.db.session import get_engine
     from sqlalchemy import text
 
     protector = ModelConfigurationSecretProtector(
@@ -139,6 +142,8 @@ def reset_database() -> None:
                 """
                 INSERT INTO modelconfiguration (
                     id, version, provider, base_url, model_name,
+                    temperature, context_window_tokens,
+                    chat_max_tokens, structured_max_tokens,
                     api_key_ciphertext, api_key_fingerprint, api_key_hint,
                     is_active, validated_at, created_at, superseded_at,
                     created_by_user_id
@@ -146,6 +151,8 @@ def reset_database() -> None:
                 VALUES (
                     'default-model-config', 1, 'openai_compatible',
                     'https://models.test.invalid/v1', 'test-model',
+                    :temperature, :context_window_tokens,
+                    :chat_max_tokens, :structured_max_tokens,
                     :api_key_ciphertext, :api_key_fingerprint, :api_key_hint,
                     true, now(), now(), NULL, 'local-user'
                 )
@@ -155,6 +162,7 @@ def reset_database() -> None:
                 "api_key_ciphertext": api_key_ciphertext,
                 "api_key_fingerprint": api_key_fingerprint,
                 "api_key_hint": api_key_hint,
+                **DEFAULT_MODEL_RUNTIME_PARAMETERS,
             },
         )
         connection.execute(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import agent.workflows.deep_research as deep_research
+import contentai.agent.workflows.deep_research as deep_research
 import httpx
 import pytest
 
@@ -24,6 +24,16 @@ class StructuredModel:
 
     async def ainvoke(self, messages: Any, config: Any = None) -> Any:
         self.calls.append((messages, config))
+        return self.response
+
+
+class NoConfigStructuredModel:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls: list[Any] = []
+
+    async def ainvoke(self, messages: Any) -> Any:
+        self.calls.append(messages)
         return self.response
 
 
@@ -131,6 +141,40 @@ def test_research_uses_both_tools_without_fetching_pages(monkeypatch):
     evidence_message = model.calls[0][0][1].content
     assert "summary A" in evidence_message
     assert '"body"' not in evidence_message
+
+
+def test_research_synthesis_falls_back_for_models_without_config(monkeypatch):
+    source_a = source_id("https://a.example/a")
+    source_b = source_id("https://b.example/b")
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [{"title": "A", "url": "https://a.example/a", "summary": "summary A"}],
+        ),
+        provider_result(
+            "anspire",
+            [{"title": "B", "url": "https://b.example/b", "summary": "summary B"}],
+        ),
+    )
+    model = NoConfigStructuredModel(
+        deep_research.DeepResearchPackage(
+            core_conclusion=deep_research.ResearchConclusion(
+                text="Conclusion from search results.",
+                source_ids=[source_a, source_b],
+            ),
+            findings=[],
+        )
+    )
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Test topic",
+        model_gateway=Gateway(model),
+        callbacks=[object()],
+    )
+
+    assert result.valid_source_count == 2
+    assert len(model.calls) == 1
 
 
 @pytest.mark.parametrize(

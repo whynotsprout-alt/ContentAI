@@ -3,9 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from agent.runtime.errors import classify_runtime_error
-from agent.runtime.execution_services import AgentExecutionEngine, AgentRuntimeEventService
-from agent.workflows.deep_research import ContentEvidenceInvalidError
+from contentai.agent.runtime.errors import classify_runtime_error
+from contentai.agent.runtime.execution_services import (
+    AgentExecutionEngine,
+    AgentRuntimeEventService,
+)
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,

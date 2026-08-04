@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { ApiError, FetchEventStream, api } from '../src/services/api';
-import { useWorkbenchStore } from '../src/stores/workbench';
+import { ApiError, FetchEventStream, api } from '../src/shared/services/api';
+import { useWorkbenchStore } from '../src/features/workbench/stores/workbench.store';
 
 const apiState = (() => {
   const sessionState = new Map();

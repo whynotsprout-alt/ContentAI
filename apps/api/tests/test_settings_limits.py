@@ -1,5 +1,5 @@
-from core.config import Settings
-from core.config.llm import DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS
+from contentai.core.config import Settings
+from contentai.core.config.llm import DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def test_default_prompt_budget_and_recent_message_window():

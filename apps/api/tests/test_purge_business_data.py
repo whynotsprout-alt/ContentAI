@@ -1,11 +1,10 @@
 from datetime import timedelta
 
 import pytest
-from db.session import get_engine
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.agent import AgentProfile, AgentVersion
-from models.base import utcnow
-from models.chat import (
+from contentai.db.session import get_engine
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentExecutionAttempt,
     AgentInvocation,
@@ -15,9 +14,10 @@ from models.chat import (
     ServiceHeartbeat,
     ToolExecution,
 )
-from models.enums import MessageRole, RunStatus
-from models.memory import MemoryRecord
-from services.purge_business_data import MAX_BATCH_SIZE, purge_business_data
+from contentai.models.enums import MessageRole, RunStatus
+from contentai.models.memory import MemoryRecord
+from contentai.services.purge_business_data import MAX_BATCH_SIZE, purge_business_data
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from sqlalchemy import text
 from sqlmodel import Session, select
 

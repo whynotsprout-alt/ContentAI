@@ -1,4 +1,7 @@
-from agent.external_content import looks_like_instruction_injection, sanitize_external_text
+from contentai.agent.external_content import (
+    looks_like_instruction_injection,
+    sanitize_external_text,
+)
 
 
 def test_oversized_external_input_is_rejected_before_canonicalization_can_hide_a_suffix():

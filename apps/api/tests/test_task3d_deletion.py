@@ -2,19 +2,19 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
-from core.config import get_settings
-from core.security import AuthContext
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.base import utcnow
-from models.chat import (
+from contentai.core.config import get_settings
+from contentai.core.security import AuthContext
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
     ChatSession,
     CheckpointDeletionOutbox,
 )
-from models.enums import RunStatus
-from services.checkpoint_deletion import drain_checkpoint_deletion_outbox
-from services.conversation_service import ConversationService
+from contentai.models.enums import RunStatus
+from contentai.services.checkpoint_deletion import drain_checkpoint_deletion_outbox
+from contentai.services.conversation_service import ConversationService
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from sqlmodel import Session, select
 
 
@@ -31,7 +31,7 @@ class _Checkpointer:
 
 
 def test_drain_retries_failed_row_and_completes_after_checkpoint_success() -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     now = utcnow() - timedelta(seconds=1)
     with Session(get_engine()) as session:
@@ -83,7 +83,7 @@ def test_drain_retries_failed_row_and_completes_after_checkpoint_success() -> No
 
 
 def test_drain_missing_namespace_is_success() -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     with Session(get_engine()) as session:
         session.add(
@@ -114,7 +114,7 @@ def test_drain_missing_namespace_is_success() -> None:
 
 
 def test_drain_reclaims_available_failed_rows_with_a_bounded_claim() -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     available_at = utcnow() - timedelta(seconds=2)
     with Session(get_engine()) as session:
@@ -147,7 +147,7 @@ def test_drain_reclaims_available_failed_rows_with_a_bounded_claim() -> None:
 
 
 def test_stale_worker_cannot_overwrite_new_owner_completion() -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     with Session(get_engine()) as session:
         session.add(
@@ -196,7 +196,7 @@ def test_stale_worker_cannot_overwrite_new_owner_completion() -> None:
 def test_session_delete_rollback_does_not_touch_checkpoint_or_business_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     with Session(get_engine()) as seed:
         chat = ChatSession(
@@ -257,7 +257,7 @@ def test_session_delete_rollback_does_not_touch_checkpoint_or_business_rows(
 
 
 def test_session_delete_enqueues_one_namespace_per_execution_and_drain_is_idempotent() -> None:
-    from db.session import get_engine
+    from contentai.db.session import get_engine
 
     with Session(get_engine()) as session:
         chat = ChatSession(

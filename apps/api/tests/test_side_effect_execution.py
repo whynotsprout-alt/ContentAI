@@ -8,16 +8,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.runtime.tool_execution import execute_tool_call
 from celery.exceptions import Retry
-from db.session import get_engine
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.runtime.tool_execution import execute_tool_call
+from contentai.db.session import get_engine
+from contentai.models.base import utcnow
+from contentai.models.chat import ChatSession, SideEffectReceipt, ToolExecution
+from contentai.models.enums import ToolExecutionStatus
+from contentai.models.memory import MemoryRecord
+from contentai.services.execution_resume import stable_json_hash
 from langchain_core.messages import ToolMessage
-from models.base import utcnow
-from models.chat import ChatSession, SideEffectReceipt, ToolExecution
-from models.enums import ToolExecutionStatus
-from models.memory import MemoryRecord
-from services.execution_resume import stable_json_hash
 from sqlalchemy import event
 from sqlmodel import Session, select
 from test_tool_execution import _seed_execution
@@ -62,7 +62,7 @@ def _job(execution_id: str, *, content: str = "durable preference") -> dict[str,
 def test_remember_mutation_and_completed_receipt_commit_together() -> None:
     execution_id = "execution-side-effect-transaction"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
 
     outcome = side_effects.execute_side_effect_job(_job(execution_id))
 
@@ -88,7 +88,7 @@ def test_remember_mutation_and_completed_receipt_commit_together() -> None:
 def test_exception_before_commit_rolls_back_mutation_and_writes_safe_failure() -> None:
     execution_id = "execution-side-effect-rollback"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
 
     def crash_after_mutation(session: Session, _job_payload: dict[str, Any]) -> dict[str, str]:
         session.add(
@@ -122,7 +122,7 @@ def test_exception_before_commit_rolls_back_mutation_and_writes_safe_failure() -
 def test_failed_receipt_persistence_failure_propagates_for_safe_redelivery() -> None:
     execution_id = "execution-side-effect-failure-redelivery"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     runner_calls = 0
 
     def mutation_then_fail(session: Session, _job_payload: dict[str, Any]) -> dict[str, str]:
@@ -181,8 +181,8 @@ def test_side_effect_task_retries_raised_persistence_failure_then_converges(
 ) -> None:
     execution_id = "execution-side-effect-task-retry"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
-    tasks = importlib.import_module("services.tasks")
+    side_effects = importlib.import_module("contentai.services.side_effects")
+    tasks = importlib.import_module("contentai.services.tasks")
     job = _job(execution_id, content="OPENAI_API_KEY=task-retry-secret")
     real_persist_failed_receipt = side_effects._persist_failed_receipt
     retry_calls: list[dict[str, Any]] = []
@@ -241,10 +241,10 @@ def test_default_dispatcher_routes_stable_job_to_side_effect_worker(
         dispatched.append(
             {"name": name, "kwargs": kwargs, "queue": queue, "task_id": task_id}
         )
-        side_effects = importlib.import_module("services.side_effects")
+        side_effects = importlib.import_module("contentai.services.side_effects")
         side_effects.execute_side_effect_job(kwargs["job"])
 
-    celery_module = importlib.import_module("services.celery_app")
+    celery_module = importlib.import_module("contentai.services.celery_app")
     monkeypatch.setattr(celery_module.celery_app, "send_task", send_task)
     local_calls = 0
 
@@ -293,7 +293,7 @@ def test_default_dispatcher_routes_stable_job_to_side_effect_worker(
 def test_duplicate_deliveries_commit_one_mutation_and_return_one_receipt() -> None:
     execution_id = "execution-side-effect-duplicate"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     runner_calls = 0
     runner_lock = threading.Lock()
     start = threading.Barrier(2)
@@ -332,7 +332,7 @@ def test_duplicate_deliveries_commit_one_mutation_and_return_one_receipt() -> No
 def test_worker_rejects_changed_arguments_hash_without_mutation() -> None:
     execution_id = "execution-side-effect-worker-mismatch"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     calls = 0
 
     def operation_runner(_session: Session, _job_payload: dict[str, Any]) -> dict[str, str]:
@@ -361,7 +361,7 @@ def test_sensitive_remember_failure_does_not_persist_secret_in_receipt_or_log(
 ) -> None:
     execution_id = "execution-side-effect-sensitive"
     _seed_audit(execution_id)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     secret = "OPENAI_API_KEY=opaque-side-effect-secret"
 
     outcome = side_effects.execute_side_effect_job(_job(execution_id, content=secret))
@@ -377,7 +377,7 @@ def test_sensitive_remember_failure_does_not_persist_secret_in_receipt_or_log(
 def test_stale_reconciler_converges_from_receipts_and_marks_unknown_without_replay(
     monkeypatch: Any,
 ) -> None:
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     failed_execution = "execution-reconcile-failed"
     completed_execution = "execution-reconcile-completed"
     unknown_execution = "execution-reconcile-unknown"
@@ -433,7 +433,7 @@ def test_stale_reconciler_converges_from_receipts_and_marks_unknown_without_repl
 
 
 def test_stale_reconciler_is_bounded() -> None:
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     for index in range(3):
         _seed_audit(f"execution-reconcile-bounded-{index}")
     with Session(get_engine()) as session:
@@ -475,7 +475,7 @@ def test_stale_reconciler_ignores_non_database_side_effect_audits() -> None:
         )
         session.commit()
 
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     assert side_effects.reconcile_stale_side_effects(older_than_seconds=60) == 1
 
     with Session(get_engine()) as session:
@@ -493,7 +493,7 @@ def test_unknown_outcome_fences_delayed_delivery_and_agent_retry() -> None:
     arguments = {"content": "durable preference", "kind": "preference"}
     arguments_hash = stable_json_hash(arguments)
     _seed_audit(execution_id, arguments_hash=arguments_hash)
-    side_effects = importlib.import_module("services.side_effects")
+    side_effects = importlib.import_module("contentai.services.side_effects")
     with Session(get_engine()) as session:
         audit = session.exec(select(ToolExecution)).one()
         audit.updated_at = utcnow() - timedelta(minutes=10)

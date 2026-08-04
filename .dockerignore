@@ -6,6 +6,7 @@
 apps/web/node_modules
 apps/web/dist
 dist
+backups
 apps/web/.vite
 apps/web/*.tsbuildinfo
 __pycache__

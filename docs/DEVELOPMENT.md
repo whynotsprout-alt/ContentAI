@@ -68,8 +68,8 @@ Pop-Location
 
 ## 代码组织约定
 
-- Python import 根为 `apps/api/src`；应用入口是 `api.app:app`。
+- Python import 根为 `apps/api/src`；应用入口是 `contentai.api.app:app`。
 - Web 源码、构建配置和测试都位于 `apps/web`；不要把生成的 `dist/` 或 `node_modules/` 加入版本控制。
-- 当前只保留 `apps/api/src/contentai_migrations/versions/202607210001_v050_initial_schema.py` 单一初始迁移；LangGraph checkpoint/store 不进入 Alembic 自动生成结果。
+- 当前 Alembic 迁移链从 `202607210001_v050_initial_schema.py` 延伸到模型定价/用量成本和运行参数迁移；LangGraph checkpoint/store 不进入 Alembic 自动生成结果。新数据库必须升级到 head。
 - 面向用户的内容只能通过 Assistant 消息交付，不新增研究包、稿件或工作流阶段模型。
 - 文件修改后优先运行与改动范围相符的检查；涉及构建、路径或容器时运行 `tools/review.ps1` 与 `docker compose config --quiet`。

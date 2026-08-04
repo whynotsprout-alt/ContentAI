@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import uuid4
 
-from db.session import get_engine
-from models.chat import AgentExecution
-from services.agent_service import AgentService
-from services.execution_claim import claim_execution
-from services.side_effects import execute_side_effect_job, read_side_effect_receipt
+from contentai.db.session import get_engine
+from contentai.models.chat import AgentExecution
+from contentai.services.agent_service import AgentService
+from contentai.services.execution_claim import claim_execution
+from contentai.services.side_effects import execute_side_effect_job, read_side_effect_receipt
 from sqlmodel import Session
 
 

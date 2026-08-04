@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.tools.research import prepare_topic_research
-from agent.workflows.deep_research import DeepResearchResult
-from agent.workflows.research_repository import topic_digest
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.tools.research import prepare_topic_research
+from contentai.agent.workflows.deep_research import DeepResearchResult
+from contentai.agent.workflows.research_repository import topic_digest
 
 
 def test_research_pack_returns_as_a_normal_tool_result(monkeypatch):
@@ -24,7 +24,7 @@ def test_research_pack_returns_as_a_normal_tool_result(monkeypatch):
         }
     ]
     monkeypatch.setattr(
-        "agent.tools.research.run_deep_research_package_workflow",
+        "contentai.agent.tools.research.run_deep_research_package_workflow",
         lambda **_: DeepResearchResult(
             content=f"## 深度搜索资料包：{topic}",
             package_data=package_data,
@@ -39,7 +39,7 @@ def test_research_pack_returns_as_a_normal_tool_result(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "agent.tools.research.ResearchPackageRepository.persist",
+        "contentai.agent.tools.research.ResearchPackageRepository.persist",
         lambda **_: SimpleNamespace(
             id="rsp_1",
             topic=topic,

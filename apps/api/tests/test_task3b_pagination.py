@@ -5,17 +5,17 @@ import json
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
-from api.app import create_app
 from client import ApiClient as TestClient
-from core.config import Settings
-from db.session import get_engine
-from models.agent import AgentProfile, AgentVersion
-from models.chat import ChatMessage, ChatSession
-from models.enums import MessageRole
-from models.user import AppUser
-from services.admin_service import AdminService
-from services.auth_service import AuthService
-from services.pagination import CursorSigner, apply_descending_cursor, encode_cursor
+from contentai.api.app import create_app
+from contentai.core.config import Settings
+from contentai.db.session import get_engine
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.chat import ChatMessage, ChatSession
+from contentai.models.enums import MessageRole
+from contentai.models.user import AppUser
+from contentai.services.admin_service import AdminService
+from contentai.services.auth_service import AuthService
+from contentai.services.pagination import CursorSigner, apply_descending_cursor, encode_cursor
 from sqlalchemy import event, text
 from sqlalchemy import select as sa_select
 from sqlalchemy.dialects import postgresql

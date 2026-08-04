@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.celery_app import celery_app, worker_pool_options
+from contentai.services.celery_app import celery_app, worker_pool_options
 
 
 def test_windows_workers_use_solo_pool() -> None:

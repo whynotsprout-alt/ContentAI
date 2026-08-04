@@ -78,7 +78,7 @@ bash infra/ubuntu/upgrade.sh
 tools/package-ubuntu.ps1
 ```
 
-输出为 `dist/contentai-<version>-ubuntu.tar.gz`，只包含运行源码、Compose、镜像配置、环境模板、单一迁移、Ubuntu 脚本、锁定依赖和必要文档；不包含 `.env`、测试、缓存、依赖目录、日志或开发产物。
+输出为 `dist/contentai-<version>-ubuntu.tar.gz`，只包含运行源码、Compose、镜像配置、环境模板、完整 Alembic 迁移链、Ubuntu 脚本、锁定依赖和必要文档；不包含 `.env`、测试、缓存、依赖目录、日志或开发产物。
 
 ## 本地开发 override
 

@@ -6,15 +6,13 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from agent.runtime.execution_services import AgentPostExecutionService
-from core.config import Settings, get_settings
-from db.session import get_engine
-from langchain_core.messages import HumanMessage, message_to_dict
-from memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.agent import AgentProfile, AgentVersion
-from models.base import utcnow
-from models.chat import (
+from contentai.agent.runtime.execution_services import AgentPostExecutionService
+from contentai.core.config import Settings, get_settings
+from contentai.db.session import get_engine
+from contentai.memory.execution_state import ExecutionLeaseLost, ExecutionStateManager
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentExecutionAttempt,
     AgentInvocation,
@@ -23,11 +21,13 @@ from models.chat import (
     ExecutionOutbox,
     ExecutionResumeRequest,
 )
-from models.enums import ExecutionAttemptStatus, MessageRole, RunStatus
-from models.user import AppUser
-from services import dispatcher as dispatcher_module
-from services import tasks as tasks_module
-from services.execution_claim import claim_execution
+from contentai.models.enums import ExecutionAttemptStatus, MessageRole, RunStatus
+from contentai.models.user import AppUser
+from contentai.services import dispatcher as dispatcher_module
+from contentai.services import tasks as tasks_module
+from contentai.services.execution_claim import claim_execution
+from langchain_core.messages import HumanMessage, message_to_dict
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from sqlmodel import Session, select
 
 

@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from api.app import create_app
 from client import ApiClient as TestClient
-from core.config import Settings
-from db.session import get_engine
+from contentai.api.app import create_app
+from contentai.core.config import Settings
+from contentai.db.session import get_engine
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.chat import ChatMessage, ChatSession
+from contentai.models.enums import MessageRole
+from contentai.models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
+from contentai.services.auth_service import AuthService
+from contentai.services.usage_service import ModelUsageCallback, UsageContext, calculate_usage_cost
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
-from models.agent import AgentProfile, AgentVersion
-from models.chat import ChatMessage, ChatSession
-from models.enums import MessageRole
-from models.user import AdminAuditLog, AppUser, AuthSession, ModelUsage
 from pydantic import ValidationError
-from services.auth_service import AuthService
-from services.usage_service import ModelUsageCallback, UsageContext
 from sqlmodel import Session, select
 
 
@@ -202,19 +203,58 @@ def test_admin_user_listing_usage_and_disable():
             member = session.exec(
                 select(AppUser).where(AppUser.email_normalized == "member@example.com")
             ).one()
-            session.add(
-                ModelUsage(
-                    call_id="usage-test-call",
-                    user_id=member.id,
-                    session_id="session-test",
-                    execution_id="execution-test",
-                    category="chat_agent",
-                    model_name="test-model",
-                    input_tokens=120,
-                    output_tokens=30,
-                    total_tokens=150,
-                    usage_available=True,
-                )
+            session.add_all(
+                [
+                    ModelUsage(
+                        call_id="usage-chat-completed",
+                        user_id=member.id,
+                        session_id="session-test",
+                        execution_id="execution-test",
+                        category="chat_agent",
+                        model_name="test-model",
+                        input_tokens=120,
+                        output_tokens=30,
+                        total_tokens=150,
+                        input_cost_usd=Decimal("0.0006000000"),
+                        output_cost_usd=Decimal("0.0007500000"),
+                        total_cost_usd=Decimal("0.0013500000"),
+                        usage_available=True,
+                    ),
+                    ModelUsage(
+                        call_id="usage-chat-missing",
+                        user_id=member.id,
+                        session_id="session-test",
+                        execution_id="execution-test",
+                        category="chat_agent",
+                        model_name="test-model",
+                        usage_available=False,
+                    ),
+                    ModelUsage(
+                        call_id="usage-background-completed",
+                        user_id=member.id,
+                        session_id="session-test",
+                        execution_id="execution-test",
+                        category="session_title",
+                        model_name="test-model",
+                        input_tokens=50,
+                        output_tokens=10,
+                        total_tokens=60,
+                        input_cost_usd=Decimal("0.0002500000"),
+                        output_cost_usd=Decimal("0.0002500000"),
+                        total_cost_usd=Decimal("0.0005000000"),
+                        usage_available=True,
+                    ),
+                    ModelUsage(
+                        call_id="usage-chat-failed",
+                        user_id=member.id,
+                        session_id="session-test",
+                        execution_id="execution-test",
+                        category="chat_agent",
+                        model_name="test-model",
+                        status="failed",
+                        usage_available=False,
+                    ),
+                ]
             )
             session.commit()
             member_id = member.id
@@ -222,7 +262,25 @@ def test_admin_user_listing_usage_and_disable():
         listing = client.get("/api/admin/users?search=member")
         assert listing.status_code == 200
         item = listing.json()["items"][0]
-        assert item["total_tokens"] == 150
+        assert item["input_tokens"] == 170
+        assert item["output_tokens"] == 40
+        assert item["total_tokens"] == 210
+        assert item["input_cost_usd"] == pytest.approx(0.00085)
+        assert item["output_cost_usd"] == pytest.approx(0.001)
+        assert item["total_cost_usd"] == pytest.approx(0.00185)
+        assert item["chat_input_tokens"] == 120
+        assert item["chat_output_tokens"] == 30
+        assert item["chat_total_tokens"] == 150
+        assert item["chat_total_cost_usd"] == pytest.approx(0.00135)
+        assert item["background_input_tokens"] == 50
+        assert item["background_output_tokens"] == 10
+        assert item["background_total_tokens"] == 60
+        assert item["background_total_cost_usd"] == pytest.approx(0.0005)
+        assert item["usage_call_count"] == 4
+        assert item["completed_usage_call_count"] == 3
+        assert item["missing_usage_call_count"] == 1
+        assert item["failed_usage_call_count"] == 1
+        assert item["usage_coverage"] == pytest.approx(2 / 3)
         assert "password_hash" not in item
 
         assert (
@@ -586,3 +644,132 @@ def test_model_usage_callback_is_exact_and_idempotent():
             assert len(rows) == 1
             assert rows[0].total_tokens == 50
             assert rows[0].usage_available is True
+
+
+def test_claude_opus_48_standard_price_conversion_is_exact():
+    input_cost, output_cost, total_cost = calculate_usage_cost(
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        input_price_per_million_usd=Decimal("5"),
+        output_price_per_million_usd=Decimal("25"),
+    )
+
+    assert input_cost == Decimal("5.0000000000")
+    assert output_cost == Decimal("25.0000000000")
+    assert total_cost == Decimal("30.0000000000")
+
+
+def test_model_usage_callback_reads_standard_response_usage_without_duplicate_choices():
+    app = auth_app()
+    with TestClient(app):
+        with Session(get_engine(app.state.settings)) as session:
+            user = AppUser(
+                email="response-usage@example.com",
+                email_normalized="response-usage@example.com",
+                password_hash="test-hash",
+                status="active",
+            )
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            user_id = user.id
+
+        callback = ModelUsageCallback(
+            app.state.settings,
+            UsageContext(
+                user_id=user_id,
+                session_id="session-response-usage",
+                execution_id="execution-response-usage",
+                category="chat_agent",
+            ),
+        )
+        callback.on_llm_end(
+            LLMResult(
+                generations=[
+                    [
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="first choice",
+                                response_metadata={
+                                    "model_name": "response-level-model",
+                                    "token_usage": {
+                                        "prompt_tokens": 999,
+                                        "completion_tokens": 999,
+                                        "total_tokens": 1998,
+                                    },
+                                },
+                            )
+                        ),
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="second choice",
+                                response_metadata={
+                                    "model_name": "response-level-model",
+                                    "token_usage": {
+                                        "prompt_tokens": 999,
+                                        "completion_tokens": 999,
+                                        "total_tokens": 1998,
+                                    },
+                                },
+                            )
+                        ),
+                    ]
+                ],
+                llm_output={
+                    "model_name": "response-level-model",
+                    "token_usage": {
+                        "prompt_tokens": 40,
+                        "completion_tokens": 10,
+                        "total_tokens": 50,
+                    },
+                },
+            ),
+            run_id=uuid4(),
+        )
+        callback.on_llm_end(
+            LLMResult(
+                generations=[
+                    [
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="first choice",
+                                response_metadata={
+                                    "model_name": "message-level-model",
+                                    "token_usage": {
+                                        "prompt_tokens": 30,
+                                        "completion_tokens": 5,
+                                        "total_tokens": 35,
+                                    },
+                                },
+                            )
+                        ),
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="second choice",
+                                response_metadata={
+                                    "model_name": "message-level-model",
+                                    "token_usage": {
+                                        "prompt_tokens": 30,
+                                        "completion_tokens": 5,
+                                        "total_tokens": 35,
+                                    },
+                                },
+                            )
+                        ),
+                    ]
+                ]
+            ),
+            run_id=uuid4(),
+        )
+
+        with Session(get_engine(app.state.settings)) as session:
+            rows = session.exec(select(ModelUsage).where(ModelUsage.user_id == user_id)).all()
+
+    usage_by_model = {
+        row.model_name: (row.input_tokens, row.output_tokens, row.total_tokens)
+        for row in rows
+    }
+    assert usage_by_model == {
+        "response-level-model": (40, 10, 50),
+        "message-level-model": (30, 5, 35),
+    }

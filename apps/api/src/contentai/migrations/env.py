@@ -1,0 +1,87 @@
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+from sqlmodel import SQLModel
+
+import contentai.models.database  # noqa: F401 - register SQLModel metadata
+from contentai.core.config import get_settings
+
+config = context.config
+
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = SQLModel.metadata
+LANGGRAPH_OWNED_TABLES = {
+    "checkpoint_blobs",
+    "checkpoint_migrations",
+    "checkpoint_writes",
+    "checkpoints",
+    "store",
+    "store_migrations",
+}
+
+
+def _include_name(name: str | None, type_: str, _parent_names: dict[str, str]) -> bool:
+    return not (type_ == "table" and name in LANGGRAPH_OWNED_TABLES)
+
+
+def _include_object(
+    _object,
+    name: str | None,
+    type_: str,
+    _reflected: bool,
+    _compare_to,
+) -> bool:
+    return not (type_ == "table" and name in LANGGRAPH_OWNED_TABLES)
+
+
+def _database_url() -> str:
+    database_url = get_settings().database.url
+    if database_url is None:
+        raise RuntimeError("Database URL is not configured.")
+    return database_url
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        include_name=_include_name,
+        include_object=_include_object,
+        compare_type=False,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    configuration = config.get_section(config.config_ini_section, {})
+    configuration["sqlalchemy.url"] = _database_url()
+    connectable = engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_name=_include_name,
+            include_object=_include_object,
+            include_schemas=False,
+            compare_type=False,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()

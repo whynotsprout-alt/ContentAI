@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
-import agent.workflows.final_evidence as final_evidence
+import contentai.agent.workflows.final_evidence as final_evidence
 import pytest
-from agent.workflows.deep_research import ContentEvidenceInvalidError
-from agent.workflows.final_evidence import (
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
+from contentai.agent.workflows.final_evidence import (
     build_research_final_proof,
     build_supported_research_evidence,
     render_deterministic_research_answer,

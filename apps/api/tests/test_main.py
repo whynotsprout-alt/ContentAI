@@ -1,14 +1,14 @@
 import asyncio
 
 import pytest
-from api.app import _normalize_origins, _shutdown, app, create_app
 from client import ApiClient as TestClient
-from core.config import Settings
-from db.session import get_engine
-from models.schemas import AgentVersionCreate
+from contentai.api.app import _normalize_origins, _shutdown, app, create_app
+from contentai.core.config import Settings
+from contentai.db.session import get_engine
+from contentai.models.schemas import AgentVersionCreate
+from contentai.services.agent_service import AgentService
+from contentai.services.service_heartbeat import REQUIRED_WORKER_QUEUES, upsert_service_heartbeat
 from pydantic import ValidationError
-from services.agent_service import AgentService
-from services.service_heartbeat import REQUIRED_WORKER_QUEUES, upsert_service_heartbeat
 from sqlalchemy import inspect
 from sqlmodel import Session
 
@@ -51,8 +51,8 @@ def test_ready_endpoint_reflects_lifespan_state():
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "database": True,
-        "alembic_version": "202607210001",
-        "alembic_head": "202607210001",
+        "alembic_version": "202608030002",
+        "alembic_head": "202608030002",
         "database_revision_current": True,
         "checkpoint": True,
         "checkpoint_tables": {
@@ -131,17 +131,17 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
         def start(self):
             pass
 
-    monkeypatch.setattr("api.app.AgentService", DummyAgentService)
+    monkeypatch.setattr("contentai.api.app.AgentService", DummyAgentService)
     monkeypatch.setattr(
-        "api.app.init_database",
+        "contentai.api.app.init_database",
         lambda settings: initialized_settings.append(settings),
     )
-    monkeypatch.setattr("api.app.close_database", lambda: None)
+    monkeypatch.setattr("contentai.api.app.close_database", lambda: None)
 
     def fail_get_settings():
         raise AssertionError("lifespan should use app.state.settings")
 
-    monkeypatch.setattr("api.app.get_settings", fail_get_settings)
+    monkeypatch.setattr("contentai.api.app.get_settings", fail_get_settings)
 
     with TestClient(created_app) as client:
         response = client.get("/api/ready")
@@ -169,9 +169,9 @@ def test_lifespan_awaits_agent_service_async_close(monkeypatch):
             await asyncio.sleep(0)
             close_order.append("agent")
 
-    monkeypatch.setattr("api.app.AgentService", DummyAgentService)
-    monkeypatch.setattr("api.app.init_database", lambda _settings: None)
-    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+    monkeypatch.setattr("contentai.api.app.AgentService", DummyAgentService)
+    monkeypatch.setattr("contentai.api.app.init_database", lambda _settings: None)
+    monkeypatch.setattr("contentai.api.app.close_database", lambda: close_order.append("database"))
 
     with TestClient(create_app()):
         pass
@@ -219,7 +219,7 @@ def test_shutdown_awaits_agent_runtime_after_runner_close_failure(monkeypatch):
     created_app = create_app()
     created_app.state.agent_service = service
     created_app.state.ready = True
-    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+    monkeypatch.setattr("contentai.api.app.close_database", lambda: close_order.append("database"))
 
     asyncio.run(_shutdown(created_app))
 
@@ -270,7 +270,7 @@ def test_shutdown_continues_after_async_hook_failure(monkeypatch):
     created_app.state.conversation_service = FailingConversationService()
     created_app.state.agent_service = DummyAgentService()
     created_app.state.ready = True
-    monkeypatch.setattr("api.app.close_database", lambda: close_order.append("database"))
+    monkeypatch.setattr("contentai.api.app.close_database", lambda: close_order.append("database"))
 
     asyncio.run(_shutdown(created_app))
 

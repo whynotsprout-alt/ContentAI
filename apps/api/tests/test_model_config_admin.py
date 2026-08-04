@@ -5,18 +5,15 @@ from dataclasses import dataclass
 from importlib import import_module
 
 import pytest
-from api.app import create_app
 from client import ApiClient
-from core.config import get_settings
-from core.model_config_crypto import ModelConfigurationSecretProtector
-from core.security import AuthContext, authenticate_request
-from db.session import get_engine
-from fastapi import HTTPException, Request
-from fastapi.exception_handlers import http_exception_handler
-from model_config_helpers import TEST_MODEL_CONFIG_API_KEY
-from models.model_configuration import ModelConfiguration
-from models.user import AdminAuditLog
-from services.model_config_network import (
+from contentai.api.app import create_app
+from contentai.core.config import get_settings
+from contentai.core.model_config_crypto import ModelConfigurationSecretProtector
+from contentai.core.security import AuthContext, authenticate_request
+from contentai.db.session import get_engine
+from contentai.models.model_configuration import ModelConfiguration
+from contentai.models.user import AdminAuditLog
+from contentai.services.model_config_network import (
     ModelAuthenticationFailed,
     ModelEndpointForbidden,
     ModelNotFound,
@@ -24,13 +21,23 @@ from services.model_config_network import (
     ModelProbeResult,
     ModelProviderUnreachable,
 )
+from fastapi import HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from model_config_helpers import TEST_MODEL_CONFIG_API_KEY, model_runtime_parameters
 from sqlalchemy import text
 from sqlmodel import Session, select
+
+RUNTIME_PAYLOAD = model_runtime_parameters(
+    temperature=0.35,
+    context_window_tokens=200_000,
+    chat_max_tokens=12_000,
+    structured_max_tokens=6_000,
+)
 
 
 def _service_module():
     try:
-        return import_module("services.model_configuration_service")
+        return import_module("contentai.services.model_configuration_service")
     except ModuleNotFoundError:
         pytest.fail("model configuration service module is missing")
 
@@ -98,6 +105,7 @@ def test_all_model_configuration_routes_require_admin(admin_client: ApiClient) -
                 "base_url": "https://api.example.test/v1",
                 "api_key": "new-secret",
                 "model_name": "a-model",
+                **RUNTIME_PAYLOAD,
                 "expected_version": 1,
             },
         ),
@@ -119,6 +127,12 @@ def test_admin_get_returns_no_store_safe_active_metadata(admin_client: ApiClient
         "provider": "openai_compatible",
         "base_url": "https://models.test.invalid/v1",
         "model_name": "test-model",
+        "input_price_per_million_usd": 5.0,
+        "output_price_per_million_usd": 25.0,
+        "temperature": 0.2,
+        "context_window_tokens": 32_000,
+        "chat_max_tokens": 8_000,
+        "structured_max_tokens": 8_000,
         "api_key_hint": "...7890",
         "validated_at": response.json()["validated_at"],
         "created_at": response.json()["created_at"],
@@ -195,6 +209,7 @@ def test_first_probe_and_save_require_api_key(admin_client: ApiClient) -> None:
         json={
             "base_url": "https://api.example.test/v1",
             "model_name": "a-model",
+            **RUNTIME_PAYLOAD,
             "expected_version": 0,
         },
     )
@@ -219,6 +234,9 @@ def test_save_creates_new_immutable_version_and_secret_free_audit(
             "base_url": "https://new.example.test/v1/",
             "api_key": new_key,
             "model_name": "custom-model",
+            "input_price_per_million_usd": 7.5,
+            "output_price_per_million_usd": 31.25,
+            **RUNTIME_PAYLOAD,
             "expected_version": 1,
         },
     )
@@ -226,6 +244,9 @@ def test_save_creates_new_immutable_version_and_secret_free_audit(
     assert response.status_code == 200
     assert response.json()["version"] == 2
     assert response.json()["base_url"] == "https://new.example.test/v1"
+    assert response.json()["input_price_per_million_usd"] == 7.5
+    assert response.json()["output_price_per_million_usd"] == 31.25
+    assert RUNTIME_PAYLOAD.items() <= response.json().items()
     assert new_key not in response.text
     with Session(get_engine()) as session:
         versions = session.exec(
@@ -238,11 +259,17 @@ def test_save_creates_new_immutable_version_and_secret_free_audit(
     assert versions[0].superseded_at is not None
     protector = ModelConfigurationSecretProtector(get_settings().model_config_encryption_key)
     assert protector.decrypt(versions[1].api_key_ciphertext) == new_key
+    assert float(versions[1].input_price_per_million_usd) == 7.5
+    assert float(versions[1].output_price_per_million_usd) == 31.25
+    assert all(getattr(versions[1], name) == value for name, value in RUNTIME_PAYLOAD.items())
     assert len(audits) == 1
     audit_text = repr(audits[0].detail)
     assert new_key not in audit_text
     assert versions[1].api_key_ciphertext not in audit_text
     assert "Authorization" not in audit_text
+    assert audits[0].detail["input_price_per_million_usd"] == "7.500000"
+    assert audits[0].detail["output_price_per_million_usd"] == "31.250000"
+    assert RUNTIME_PAYLOAD.items() <= audits[0].detail.items()
 
 
 def test_blank_key_reuses_active_secret_for_probe_and_new_version(
@@ -258,6 +285,7 @@ def test_blank_key_reuses_active_secret_for_probe_and_new_version(
             "base_url": "https://new.example.test/v1",
             "api_key": "   ",
             "model_name": "custom-model",
+            **RUNTIME_PAYLOAD,
             "expected_version": 1,
         },
     )
@@ -282,6 +310,7 @@ def test_failed_save_probe_leaves_active_version_unchanged(admin_client: ApiClie
             "base_url": "https://new.example.test/v1",
             "api_key": "failed-new-key",
             "model_name": "custom-model",
+            **RUNTIME_PAYLOAD,
             "expected_version": 1,
         },
     )
@@ -306,6 +335,7 @@ def test_optimistic_version_conflict_does_not_probe_or_switch(admin_client: ApiC
             "base_url": "https://new.example.test/v1",
             "api_key": "new-key",
             "model_name": "custom-model",
+            **RUNTIME_PAYLOAD,
             "expected_version": 0,
         },
     )
@@ -388,6 +418,66 @@ def test_api_key_length_is_bounded_without_echoing_oversized_secret(
     assert response.status_code == 422
     assert oversized_secret not in response.text
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "runtime_overrides",
+    [
+        {"temperature": -0.01},
+        {"temperature": 2.01},
+        {"context_window_tokens": 0},
+        {"chat_max_tokens": 0},
+        {"structured_max_tokens": 0},
+        {"chat_max_tokens": 200_000},
+        {"chat_max_tokens": 200_001},
+        {"structured_max_tokens": 200_000},
+        {"structured_max_tokens": 200_001},
+    ],
+)
+def test_model_config_update_rejects_invalid_runtime_parameters_without_echo(
+    admin_client: ApiClient,
+    runtime_overrides: dict[str, int | float],
+) -> None:
+    secret = "invalid-runtime-secret-must-not-escape"
+    payload = {
+        "base_url": "https://invalid-runtime.example.test/v1",
+        "api_key": secret,
+        "model_name": "invalid-runtime-model",
+        "expected_version": 1,
+        **RUNTIME_PAYLOAD,
+        **runtime_overrides,
+    }
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    assert all(error.get("input") == "[REDACTED]" for error in response.json()["detail"])
+    assert secret not in response.text
+    assert payload["base_url"] not in response.text
+    assert payload["model_name"] not in response.text
+
+
+def test_probe_rejects_runtime_parameters_as_non_connection_input(
+    admin_client: ApiClient,
+) -> None:
+    response = admin_client.post(
+        "/api/admin/model-config/probe",
+        headers=_admin_headers(),
+        json={
+            "base_url": "https://api.example.test/v1",
+            "api_key": "probe-runtime-secret",
+            **RUNTIME_PAYLOAD,
+        },
+    )
+
+    assert response.status_code == 422
+    assert all(error.get("input") == "[REDACTED]" for error in response.json()["detail"])
+    assert "probe-runtime-secret" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -499,6 +589,7 @@ def test_advisory_lock_allows_only_one_concurrent_expected_version_switch() -> N
                     base_url="https://new.example.test/v1",
                     api_key="new-concurrent-key",
                     model_name=model_name,
+                    **RUNTIME_PAYLOAD,
                     expected_version=1,
                 )
             outcome: tuple[str, object] = ("ok", configuration.version)

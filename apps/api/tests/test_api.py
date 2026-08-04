@@ -7,32 +7,29 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-import agent.tools.research as research_tool_module
+import contentai.agent.tools.research as research_tool_module
 import pytest
-from agent.runtime.checkpoint import (
+from auth_helpers import auth_headers, default_test_auth_context, resolve_test_auth_context
+from client import ApiClient as TestClient
+from contentai.agent.runtime.checkpoint import (
     RuntimePersistence,
     checkpoint_interrupts,
     checkpoint_messages,
 )
-from agent.runtime.container import RuntimeContainer
-from agent.workflows.deep_research import DeepResearchResult
-from agent.workflows.final_evidence import build_supported_research_evidence
-from api.app import create_app
-from api.chat import _stream_channel, _stream_exception_payload
-from api.chat import router as chat_router
-from auth_helpers import auth_headers, default_test_auth_context, resolve_test_auth_context
-from client import ApiClient as TestClient
-from core.config import Settings, get_settings
-from core.security import AuthContext, authenticate_request
-from db.session import get_engine
-from direct_dispatcher import DirectDispatcher
-from langchain_core.messages import AIMessage
-from memory.message_persister import MessagePersister
-from memory.repository import MemoryRepository
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.agent import AgentProfile, AgentVersion
-from models.base import utcnow
-from models.chat import (
+from contentai.agent.runtime.container import RuntimeContainer
+from contentai.agent.workflows.deep_research import DeepResearchResult
+from contentai.agent.workflows.final_evidence import build_supported_research_evidence
+from contentai.api.app import create_app
+from contentai.api.chat import _stream_channel, _stream_exception_payload
+from contentai.api.chat import router as chat_router
+from contentai.core.config import Settings, get_settings
+from contentai.core.security import AuthContext, authenticate_request
+from contentai.db.session import get_engine
+from contentai.memory.message_persister import MessagePersister
+from contentai.memory.repository import MemoryRepository
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentExecutionAttempt,
     AgentInvocation,
@@ -43,15 +40,23 @@ from models.chat import (
     ExecutionResumeRequest,
     ToolExecution,
 )
-from models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunStatus
-from models.memory import MemoryRecord
-from models.schemas.chat import AgentMessageRequest
-from models.user import AdminAuditLog, AppUser
-from services.agent_service import AgentService
-from services.checkpoint_deletion import drain_checkpoint_deletion_outbox
-from services.conversation_service import ConversationService
-from services.errors import StreamingDegradedError, StreamReplayExpiredError, StreamReplayGapError
-from services.execution_claim import claim_execution
+from contentai.models.enums import ExecutionAttemptStatus, MessageRole, MessageType, RunStatus
+from contentai.models.memory import MemoryRecord
+from contentai.models.model_configuration import ModelConfiguration
+from contentai.models.schemas.chat import AgentMessageRequest
+from contentai.models.user import AdminAuditLog, AppUser
+from contentai.services.agent_service import AgentService
+from contentai.services.checkpoint_deletion import drain_checkpoint_deletion_outbox
+from contentai.services.conversation_service import ConversationService
+from contentai.services.errors import (
+    StreamingDegradedError,
+    StreamReplayExpiredError,
+    StreamReplayGapError,
+)
+from contentai.services.execution_claim import claim_execution
+from direct_dispatcher import DirectDispatcher
+from langchain_core.messages import AIMessage
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from sqlalchemy import event, text
 from sqlmodel import Session, select
 
@@ -75,6 +80,21 @@ def account_payload(
         "content_prompt": creation_prompt,
         "hotspot_sources": ["douyin", "weibo"] if hotspot_sources is None else hotspot_sources,
     }
+
+
+def set_active_model_token_budget(
+    *,
+    context_window_tokens: int,
+    chat_max_tokens: int,
+) -> None:
+    with Session(get_engine()) as session:
+        configuration = session.get(ModelConfiguration, DEFAULT_MODEL_CONFIG_ID)
+        assert configuration is not None
+        configuration.context_window_tokens = context_window_tokens
+        configuration.chat_max_tokens = chat_max_tokens
+        configuration.structured_max_tokens = chat_max_tokens
+        session.add(configuration)
+        session.commit()
 
 
 def auth_test_app():
@@ -143,7 +163,7 @@ class FakeResearchFinalModel:
 
     def invoke(self, messages: list[Any], *, config: dict[str, Any]) -> Any:
         self.calls.append(messages)
-        assert config == {"callbacks": []}
+        assert isinstance(config.get("callbacks"), list)
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
@@ -844,19 +864,11 @@ def test_oversized_current_input_returns_413_before_turn_is_persisted(
             "/api/chat/sessions",
             json={"agent_id": "default-agent"},
         ).json()
-        settings = app.state.conversation_service.agent_service.settings
-        original_window = settings.llm.context_window_tokens
-        original_output = settings.llm.chat_max_tokens
-        settings.llm.context_window_tokens = 12
-        settings.llm.chat_max_tokens = 8
-        try:
-            response = client.post(
-                f"/api/chat/sessions/{chat['session_id']}/messages",
-                json={"message": "你好"},
-            )
-        finally:
-            settings.llm.context_window_tokens = original_window
-            settings.llm.chat_max_tokens = original_output
+        set_active_model_token_budget(context_window_tokens=12, chat_max_tokens=8)
+        response = client.post(
+            f"/api/chat/sessions/{chat['session_id']}/messages",
+            json={"message": "你好"},
+        )
 
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "CURRENT_INPUT_TOO_LARGE"
@@ -879,12 +891,8 @@ def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn(
             json={"agent_id": "default-agent"},
         ).json()
         conversation_service = app.state.conversation_service
-        settings = conversation_service.agent_service.settings
-        original_window = settings.llm.context_window_tokens
-        original_output = settings.llm.chat_max_tokens
         dispatcher = conversation_service.execution_dispatcher
-        settings.llm.context_window_tokens = 1024
-        settings.llm.chat_max_tokens = 24
+        set_active_model_token_budget(context_window_tokens=1024, chat_max_tokens=24)
         conversation_service.execution_dispatcher = None
         try:
             response = client.post(
@@ -893,8 +901,6 @@ def test_preflight_counts_fixed_context_and_tool_schemas_before_persisting_turn(
             )
         finally:
             conversation_service.execution_dispatcher = dispatcher
-            settings.llm.context_window_tokens = original_window
-            settings.llm.chat_max_tokens = original_output
 
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "CURRENT_INPUT_TOO_LARGE"
@@ -929,12 +935,8 @@ def test_preflight_uses_existing_summary_before_creating_a_turn():
             )
 
         conversation_service = app.state.conversation_service
-        settings = conversation_service.agent_service.settings
-        original_window = settings.llm.context_window_tokens
-        original_output = settings.llm.chat_max_tokens
         dispatcher = conversation_service.execution_dispatcher
-        settings.llm.context_window_tokens = 12000
-        settings.llm.chat_max_tokens = 24
+        set_active_model_token_budget(context_window_tokens=12000, chat_max_tokens=24)
         conversation_service.execution_dispatcher = None
         try:
             response = client.post(
@@ -944,8 +946,6 @@ def test_preflight_uses_existing_summary_before_creating_a_turn():
             )
         finally:
             conversation_service.execution_dispatcher = dispatcher
-            settings.llm.context_window_tokens = original_window
-            settings.llm.chat_max_tokens = original_output
             monkeypatch.undo()
 
     assert response.status_code == 413
@@ -984,12 +984,8 @@ def test_preflight_uses_the_request_tool_permissions_not_the_wildcard_set():
                 original_get_tools(permissions),
             )[1],
         )
-        settings = conversation_service.agent_service.settings
-        original_window = settings.llm.context_window_tokens
-        original_output = settings.llm.chat_max_tokens
         dispatcher = conversation_service.execution_dispatcher
-        settings.llm.context_window_tokens = 6000
-        settings.llm.chat_max_tokens = 24
+        set_active_model_token_budget(context_window_tokens=6000, chat_max_tokens=24)
         conversation_service.execution_dispatcher = None
         try:
             response = client.post(
@@ -999,8 +995,6 @@ def test_preflight_uses_the_request_tool_permissions_not_the_wildcard_set():
             )
         finally:
             conversation_service.execution_dispatcher = dispatcher
-            settings.llm.context_window_tokens = original_window
-            settings.llm.chat_max_tokens = original_output
             monkeypatch.undo()
 
     assert response.status_code == 202

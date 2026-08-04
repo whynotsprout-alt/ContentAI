@@ -9,19 +9,19 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
-from core.alembic import build_alembic_config
-from db.session import get_engine
-from models.base import utcnow
-from models.schemas.auth import CurrentUserResponse
-from models.schemas.base import InputSchemaBase
-from models.schemas.chat import MessageListRequest
+from contentai.core.alembic import build_alembic_config
+from contentai.db.session import get_engine
+from contentai.models.base import utcnow
+from contentai.models.schemas.auth import CurrentUserResponse
+from contentai.models.schemas.base import InputSchemaBase
+from contentai.models.schemas.chat import MessageListRequest
+from contentai.services.conversation_service import ConversationService, InvalidCursorError
+from contentai.services.pagination import CursorSigner, encode_cursor
 from pydantic import ValidationError
-from services.conversation_service import ConversationService, InvalidCursorError
-from services.pagination import CursorSigner, encode_cursor
 from sqlalchemy import inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-VERSIONS_DIR = PROJECT_ROOT / "apps" / "api" / "src" / "contentai_migrations" / "versions"
+VERSIONS_DIR = PROJECT_ROOT / "apps" / "api" / "src" / "contentai" / "migrations" / "versions"
 
 EXPECTED_BUSINESS_TABLES = {
     "adminauditlog",
@@ -85,19 +85,27 @@ def _foreign_key_column_sets(
     }
 
 
-def test_release_version_and_single_fresh_revision():
+def test_release_version_and_expected_revision_chain():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
         assert tomllib.load(stream)["project"]["version"] == "0.5.0-rc.1"
 
     revisions = sorted(VERSIONS_DIR.glob("*.py"))
     assert [revision.name for revision in revisions] == [
-        "202607210001_v050_initial_schema.py"
+        "202607210001_v050_initial_schema.py",
+        "202608030001_model_pricing_and_usage_cost.py",
+        "202608030002_restore_model_runtime_parameters.py",
     ]
     script = ScriptDirectory.from_config(build_alembic_config())
-    assert script.get_heads() == ["202607210001"]
+    assert script.get_heads() == ["202608030002"]
     revision = script.get_revision("202607210001")
     assert revision is not None
     assert revision.down_revision is None
+    pricing_revision = script.get_revision("202608030001")
+    assert pricing_revision is not None
+    assert pricing_revision.down_revision == "202607210001"
+    runtime_revision = script.get_revision("202608030002")
+    assert runtime_revision is not None
+    assert runtime_revision.down_revision == "202608030001"
 
 
 def test_fresh_baseline_roundtrip_preserves_langgraph_owned_tables():

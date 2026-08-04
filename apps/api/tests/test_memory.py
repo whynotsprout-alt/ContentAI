@@ -1,9 +1,9 @@
 import pytest
-from db.session import get_engine
-from memory import LongTermMemory, MemoryRepository, extract_memory_candidates
-from memory.long_term import is_transient_task_memory
-from models.agent import AgentProfile
-from models.enums import MemorySourceType
+from contentai.db.session import get_engine
+from contentai.memory import LongTermMemory, MemoryRepository, extract_memory_candidates
+from contentai.memory.long_term import is_transient_task_memory
+from contentai.models.agent import AgentProfile
+from contentai.models.enums import MemorySourceType
 from sqlmodel import Session
 
 

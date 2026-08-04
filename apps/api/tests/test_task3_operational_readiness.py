@@ -4,32 +4,32 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from core.config import Settings
-from db.session import (
+from contentai.core.config import Settings
+from contentai.db.session import (
     calculate_connection_budget,
     engine_options_for_role,
     get_engine,
 )
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.base import utcnow
-from models.chat import (
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
     ChatSession,
     ExecutionOutbox,
     ServiceHeartbeat,
 )
-from models.enums import RunStatus
-from pydantic import ValidationError
-from services.agent_service import AgentService
-from services.dispatcher import OutboxDispatcher
-from services.readiness import check_api_readiness
-from services.service_heartbeat import (
+from contentai.models.enums import RunStatus
+from contentai.services.agent_service import AgentService
+from contentai.services.dispatcher import OutboxDispatcher
+from contentai.services.readiness import check_api_readiness
+from contentai.services.service_heartbeat import (
     REQUIRED_WORKER_QUEUES,
     service_heartbeats_ready,
     service_instance_id,
     upsert_service_heartbeat,
 )
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from pydantic import ValidationError
 from sqlalchemy import delete, text
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, select
@@ -69,6 +69,7 @@ def _seed_published_outbox(
     published_at: datetime,
     claimed_at: datetime | None = None,
     status: str = "published",
+    execution_status: RunStatus | None = None,
 ) -> None:
     with Session(get_engine(settings)) as session:
         chat = ChatSession(
@@ -94,7 +95,7 @@ def _seed_published_outbox(
             agent_version_id=chat.agent_version_id,
             model_config_id=DEFAULT_MODEL_CONFIG_ID,
             claimed_at=claimed_at,
-            status=RunStatus.completed if claimed_at else RunStatus.pending,
+            status=execution_status or (RunStatus.completed if claimed_at else RunStatus.pending),
         )
         session.add(execution)
         session.flush()
@@ -394,6 +395,23 @@ def test_readiness_rejects_unclaimed_published_outbox_older_than_thirty_seconds(
     assert not checks["outbox_within_threshold"]
 
 
+def test_readiness_ignores_published_outbox_for_failed_unclaimed_execution() -> None:
+    settings = _settings()
+    _seed_ready_service_heartbeats(settings)
+    _seed_published_outbox(
+        settings,
+        suffix="failed-unclaimed",
+        published_at=utcnow() - timedelta(minutes=5),
+        execution_status=RunStatus.failed,
+    )
+
+    ready, checks = check_api_readiness(settings)
+
+    assert ready
+    assert checks["outbox_unclaimed_published"] == 0
+    assert checks["outbox_within_threshold"]
+
+
 def test_readiness_outbox_age_boundary_preserves_microseconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,7 +423,7 @@ def test_readiness_outbox_age_boundary_preserves_microseconds(
         suffix="age-boundary",
         published_at=now - timedelta(seconds=30),
     )
-    monkeypatch.setattr("services.readiness.utcnow", lambda: now)
+    monkeypatch.setattr("contentai.services.readiness.utcnow", lambda: now)
 
     ready, checks = check_api_readiness(settings)
 

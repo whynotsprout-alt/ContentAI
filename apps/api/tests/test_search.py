@@ -4,11 +4,11 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-import integrations.search.search as search
+import contentai.integrations.search.search as search
 import pytest
-from agent.tools.registry import build_tool_set, tool_names
-from core.config import Env
-from integrations.search import search_integration
+from contentai.agent.tools.registry import build_tool_set, tool_names
+from contentai.core.config import Env
+from contentai.integrations.search import search_integration
 from pydantic import SecretStr
 
 

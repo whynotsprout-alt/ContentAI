@@ -6,9 +6,13 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
-from core.config import Settings, get_settings
-from db.session import build_engine, get_engine
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, TEST_MODEL_CONFIG_API_KEY
+from contentai.core.config import Settings, get_settings
+from contentai.db.session import build_engine, get_engine
+from model_config_helpers import (
+    DEFAULT_MODEL_CONFIG_ID,
+    TEST_MODEL_CONFIG_API_KEY,
+    model_runtime_parameters,
+)
 from pydantic import ValidationError
 from sqlalchemy import func, inspect, text
 from sqlalchemy.exc import IntegrityError, StatementError
@@ -21,14 +25,14 @@ def _fernet_key(seed: int) -> str:
 
 def _crypto_module():
     try:
-        return import_module("core.model_config_crypto")
+        return import_module("contentai.core.model_config_crypto")
     except ModuleNotFoundError:
         pytest.fail("model configuration secret protection module is missing")
 
 
 def _model_class():
     try:
-        return import_module("models.model_configuration").ModelConfiguration
+        return import_module("contentai.models.model_configuration").ModelConfiguration
     except ModuleNotFoundError:
         pytest.fail("model configuration ORM model is missing")
 
@@ -183,7 +187,7 @@ def test_application_engine_hides_bound_parameters_in_database_errors() -> None:
 
 
 def test_model_configuration_persistence_failure_rolls_back_and_hides_parameters() -> None:
-    service_module = import_module("services.model_configuration_service")
+    service_module = import_module("contentai.services.model_configuration_service")
     ciphertext_marker = "gAAAA-test-ciphertext-must-not-escape"
 
     class Repository:
@@ -221,6 +225,7 @@ def test_model_configuration_persistence_failure_rolls_back_and_hides_parameters
             base_url="https://models.example.test/v1",
             api_key="test-only-key",
             model_name="test-model",
+            **model_runtime_parameters(),
             expected_version=0,
         )
 
@@ -258,6 +263,12 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
         "provider",
         "base_url",
         "model_name",
+        "input_price_per_million_usd",
+        "output_price_per_million_usd",
+        "temperature",
+        "context_window_tokens",
+        "chat_max_tokens",
+        "structured_max_tokens",
         "api_key_ciphertext",
         "api_key_fingerprint",
         "api_key_hint",
@@ -270,6 +281,17 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
     assert not columns["version"]["nullable"]
     assert not columns["api_key_ciphertext"]["nullable"]
     assert not columns["created_by_user_id"]["nullable"]
+    assert not columns["input_price_per_million_usd"]["nullable"]
+    assert not columns["output_price_per_million_usd"]["nullable"]
+    assert columns["temperature"]["nullable"]
+    assert not columns["context_window_tokens"]["nullable"]
+    assert not columns["chat_max_tokens"]["nullable"]
+    assert not columns["structured_max_tokens"]["nullable"]
+
+    usage_columns = {column["name"]: column for column in inspector.get_columns("modelusage")}
+    for name in ("input_cost_usd", "output_cost_usd", "total_cost_usd"):
+        assert name in usage_columns
+        assert not usage_columns[name]["nullable"]
 
     execution_columns = {
         column["name"]: column for column in inspector.get_columns("agentexecution")
@@ -291,7 +313,7 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
 
 def test_execution_outbox_model_configuration_mismatch_is_rejected() -> None:
     model_class = _model_class()
-    from models.chat import AgentExecution, AgentInvocation, ChatSession, ExecutionOutbox
+    from contentai.models.chat import AgentExecution, AgentInvocation, ChatSession, ExecutionOutbox
 
     with Session(get_engine()) as session:
         session.add_all(
@@ -413,6 +435,27 @@ def test_postgres_allows_multiple_inactive_model_configurations() -> None:
         ({"id": "invalid-provider", "provider": "unsupported"}, "provider"),
         ({"id": "invalid-fingerprint", "api_key_fingerprint": "short"}, "fingerprint"),
         ({"id": "invalid-creator", "created_by_user_id": "missing-user"}, "creator"),
+        ({"id": "temperature-low", "temperature": -0.01}, "temperature"),
+        ({"id": "temperature-high", "temperature": 2.01}, "temperature"),
+        ({"id": "context-zero", "context_window_tokens": 0}, "context"),
+        ({"id": "chat-zero", "chat_max_tokens": 0}, "chat"),
+        (
+            {
+                "id": "chat-exceeds-context",
+                "context_window_tokens": 8_000,
+                "chat_max_tokens": 8_000,
+            },
+            "chat",
+        ),
+        ({"id": "structured-zero", "structured_max_tokens": 0}, "structured"),
+        (
+            {
+                "id": "structured-exceeds-context",
+                "context_window_tokens": 8_000,
+                "structured_max_tokens": 8_000,
+            },
+            "structured",
+        ),
     ],
 )
 def test_postgres_rejects_invalid_model_configuration_rows_without_poisoning_session(

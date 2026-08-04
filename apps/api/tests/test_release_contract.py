@@ -92,15 +92,15 @@ def test_maintained_docs_match_current_authentication_and_compose_topology() -> 
     assert "410 Gone" not in design
     for document in (design, operations, architecture):
         assert "side-effect-worker" in document
-        assert "十个" in document
+        assert "十个服务" in document
         assert "三个 Worker" in document or "三个 worker" in document
 
 
 def test_release_diff_files_have_one_canonical_eof_newline() -> None:
     for relative_path in (
-        "apps/api/src/core/client_ip.py",
-        "docs/superpowers/plans/2026-07-17-bootstrap-admin-and-env-cleanup.md",
-        "docs/superpowers/specs/2026-07-17-bootstrap-admin-design.md",
+        "apps/api/src/contentai/core/client_ip.py",
+        "apps/api/src/contentai/migrations/versions/202608030001_model_pricing_and_usage_cost.py",
+        "apps/api/src/contentai/migrations/versions/202608030002_restore_model_runtime_parameters.py",
     ):
         content = (ROOT / relative_path).read_bytes()
         assert content.endswith(b"\n"), relative_path
@@ -126,8 +126,8 @@ def test_release_package_is_deterministic_and_uses_the_fixed_head_tree(
     )
     required_files = {
         "apps/api/src/tracked.py": "from-tree\n",
-        "apps/api/src/contentai_migrations/env.py": "\n",
-        "apps/api/src/contentai_migrations/versions/202607210001_v050_initial_schema.py": "\n",
+        "apps/api/src/contentai/migrations/env.py": "\n",
+        "apps/api/src/contentai/migrations/versions/202607210001_v050_initial_schema.py": "\n",
         "apps/web/src/main.ts": "\n",
         "apps/web/index.html": "<main></main>\n",
         "apps/web/package.json": "{}\n",

@@ -7,11 +7,11 @@ from threading import Event
 from time import monotonic
 
 import pytest
-from core.config import get_settings
-from db.session import get_engine
-from models.user import AppUser, AuthSession
-from services.admin_service import AdminService
-from services.auth_service import AuthService, AuthServiceError
+from contentai.core.config import get_settings
+from contentai.db.session import get_engine
+from contentai.models.user import AppUser, AuthSession
+from contentai.services.admin_service import AdminService
+from contentai.services.auth_service import AuthService, AuthServiceError
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
@@ -288,7 +288,7 @@ def test_login_rechecks_temporary_password_expiry_after_hash_verification(monkey
         return before_expiry
 
     monkeypatch.setattr(service.password_hash, "verify", controlled_verify)
-    monkeypatch.setattr("services.auth_service.utcnow", controlled_now)
+    monkeypatch.setattr("contentai.services.auth_service.utcnow", controlled_now)
 
     with Session(get_engine()) as session:
         with pytest.raises(AuthServiceError, match="expired") as caught:
@@ -324,7 +324,7 @@ def test_change_password_rechecks_expiry_after_waiting_for_user_lock(monkeypatch
         session.commit()
 
     monkeypatch.setattr(
-        "services.auth_service.utcnow",
+        "contentai.services.auth_service.utcnow",
         lambda: before_expiry + timedelta(seconds=2)
         if crossed_expiry.is_set()
         else before_expiry,

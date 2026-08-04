@@ -1,11 +1,12 @@
 import json
 
-import agent.graph.nodes as graph_nodes
+import contentai.agent.graph.nodes as graph_nodes
 import httpx
 import pytest
-from agent.graph.factory import AgentGraphBuilder
-from agent.graph.nodes import build_agent_node, build_tool_error_node
-from agent.workflows.deep_research import ContentEvidenceInvalidError
+from contentai.agent.graph.factory import AgentGraphBuilder
+from contentai.agent.graph.nodes import build_agent_node, build_tool_error_node
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
 from langchain_core.messages import AIMessage, ToolMessage
 
 
@@ -194,6 +195,36 @@ def test_research_final_node_renders_only_deterministic_claim_selection_with_iso
         "clm_node_claim"
     ]
     assert final_model.calls[0][1] == {"callbacks": []}
+
+
+def test_research_final_node_uses_only_the_isolated_research_final_callback():
+    callback = object()
+    final_model = _SelectionModel([{"claim_ids": ["clm_node_claim"]}])
+    runtime = ToolRuntimeContext(
+        execution_id="exe-node",
+        conversation_id="conv-node",
+        session_id="session-node",
+        agent_id="agent-node",
+        user_id="user-node",
+        model_usage_callback_factory=lambda category: [(category, callback)],
+    )
+
+    with tool_runtime_scope(runtime):
+        build_agent_node(_Model(), research_final_model=final_model)(_research_final_state())
+
+    assert final_model.calls[0][1] == {"callbacks": [("research_final", callback)]}
+
+
+def test_research_final_node_falls_back_for_models_without_config():
+    class NoConfigSelectionModel:
+        def invoke(self, _messages: list[object]) -> object:
+            return {"claim_ids": ["clm_node_claim"]}
+
+    result = build_agent_node(
+        _Model(), research_final_model=NoConfigSelectionModel()
+    )(_research_final_state())
+
+    assert result["messages"][0].content.startswith("Research-backed findings:")
 
 
 def test_research_final_model_factory_is_not_built_for_plain_chat():

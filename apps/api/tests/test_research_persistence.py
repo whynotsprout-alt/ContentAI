@@ -3,20 +3,20 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import agent.runtime.execution_services as execution_services
-import agent.tools.research as research_tool_module
+import contentai.agent.runtime.execution_services as execution_services
+import contentai.agent.tools.research as research_tool_module
 import pytest
-from agent.context.assembler import ContextAssembler
-from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.tools.research import prepare_topic_research
-from agent.workflows.deep_research import ContentEvidenceInvalidError, DeepResearchResult
-from agent.workflows.research_repository import ResearchPackageRepository, topic_digest
-from db.session import get_engine
+from contentai.agent.context.assembler import ContextAssembler
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.tools.research import prepare_topic_research
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError, DeepResearchResult
+from contentai.agent.workflows.research_repository import ResearchPackageRepository, topic_digest
+from contentai.db.session import get_engine
+from contentai.models.agent import AgentProfile, AgentVersion
+from contentai.models.chat import AgentExecution, AgentInvocation, ChatSession
+from contentai.models.research import ResearchPackage
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.agent import AgentProfile, AgentVersion
-from models.chat import AgentExecution, AgentInvocation, ChatSession
-from models.research import ResearchPackage
 from sqlmodel import Session, select
 
 
@@ -289,7 +289,7 @@ def test_execution_research_identity_rejects_partial_checkpoint_state(values):
 
 
 def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelope():
-    from agent.workflows.final_evidence import (
+    from contentai.agent.workflows.final_evidence import (
         build_research_final_proof,
         build_supported_research_evidence,
         render_deterministic_research_answer,
@@ -325,7 +325,7 @@ def test_runner_reloads_durable_evidence_and_rejects_model_authored_final_envelo
 
 
 def _research_tool_boundary(package: SimpleNamespace) -> ToolMessage:
-    from agent.workflows.final_evidence import build_supported_research_evidence
+    from contentai.agent.workflows.final_evidence import build_supported_research_evidence
 
     evidence = build_supported_research_evidence(package)
     return ToolMessage(
@@ -342,7 +342,7 @@ def _research_tool_boundary(package: SimpleNamespace) -> ToolMessage:
 
 
 def _research_final_proof_message(package: SimpleNamespace) -> AIMessage:
-    from agent.workflows.final_evidence import (
+    from contentai.agent.workflows.final_evidence import (
         build_research_final_proof,
         build_supported_research_evidence,
         render_deterministic_research_answer,
@@ -495,6 +495,8 @@ def test_generation_context_exposes_only_supported_claims_and_sources():
         version = session.get(AgentVersion, "default-agent-v1")
         assert profile is not None and version is not None
         context = ContextAssembler().assemble(
+            context_window_tokens=32_000,
+            chat_max_tokens=8_000,
             agent_profile=profile,
             agent_version=version,
             messages=[HumanMessage(content="write from supported evidence")],
@@ -543,6 +545,8 @@ def test_generation_context_rejects_zero_supported_claims():
         assert profile is not None and version is not None
         with pytest.raises(ContentEvidenceInvalidError):
             ContextAssembler().assemble(
+                context_window_tokens=32_000,
+                chat_max_tokens=8_000,
                 agent_profile=profile,
                 agent_version=version,
                 messages=[HumanMessage(content="write")],

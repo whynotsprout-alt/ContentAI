@@ -117,9 +117,26 @@ const targetUser = {
   input_tokens: 47667,
   output_tokens: 4728,
   total_tokens: 52395,
+  input_cost_usd: 0.238335,
+  output_cost_usd: 0.1182,
+  total_cost_usd: 0.356535,
+  chat_input_tokens: 42000,
+  chat_output_tokens: 4000,
+  chat_total_tokens: 46000,
+  chat_input_cost_usd: 0.21,
+  chat_output_cost_usd: 0.1,
+  chat_total_cost_usd: 0.31,
+  background_input_tokens: 5667,
+  background_output_tokens: 728,
+  background_total_tokens: 6395,
+  background_input_cost_usd: 0.028335,
+  background_output_cost_usd: 0.0182,
+  background_total_cost_usd: 0.046535,
   usage_call_count: 12,
+  completed_usage_call_count: 11,
   missing_usage_call_count: 1,
-  usage_coverage: 0.92
+  failed_usage_call_count: 1,
+  usage_coverage: 10 / 11
 };
 
 const adminSessionSummary = {
@@ -160,6 +177,12 @@ const modelConfiguration = {
   provider: 'openai_compatible',
   base_url: 'https://gateway.example.test/v1',
   model_name: 'gpt-4.1-mini',
+  input_price_per_million_usd: 5,
+  output_price_per_million_usd: 25,
+  temperature: null,
+  context_window_tokens: 32000,
+  chat_max_tokens: 8000,
+  structured_max_tokens: 8000,
   api_key_hint: 'sk-…9X2Q',
   validated_at: fixedNow,
   created_at: fixedNow,
@@ -173,7 +196,12 @@ const usageBuckets = [
     input_tokens: 7900,
     output_tokens: 909,
     total_tokens: 8809,
+    input_cost_usd: 0.0395,
+    output_cost_usd: 0.022725,
+    total_cost_usd: 0.062225,
     call_count: 3,
+    completed_call_count: 3,
+    missing_usage_call_count: 0,
     failed_call_count: 0,
     average_latency_ms: 1280
   },
@@ -182,8 +210,13 @@ const usageBuckets = [
     input_tokens: 39767,
     output_tokens: 3819,
     total_tokens: 43586,
+    input_cost_usd: 0.198835,
+    output_cost_usd: 0.095475,
+    total_cost_usd: 0.29431,
     call_count: 9,
-    failed_call_count: 0,
+    completed_call_count: 8,
+    missing_usage_call_count: 1,
+    failed_call_count: 1,
     average_latency_ms: 1450
   }
 ];
@@ -238,7 +271,7 @@ async function waitForVite(server, timeoutMs = 30000) {
       const response = await fetch(baseUrl, { signal: AbortSignal.timeout(1200) });
       if (response.ok) {
         const html = await response.text();
-        if (html.includes('/src/main.ts')) return;
+        if (html.includes('/src/app/main.ts') && /ready in/i.test(server.output.join(''))) return;
         originMismatchCount += 1;
         lastError = new Error(`${baseUrl} 返回了其他站点，而不是当前 Vite 源码入口`);
         if (originMismatchCount >= 3 && /ready in/i.test(server.output.join(''))) {
@@ -410,8 +443,9 @@ async function installApiMocks(page, state) {
 }
 
 async function expectVisible(locator, label) {
-  await locator.waitFor({ state: 'visible' });
-  assert.equal(await locator.isVisible(), true, `${label} 应可见`);
+  const visibleLocator = locator.filter({ visible: true });
+  await visibleLocator.first().waitFor({ state: 'visible' });
+  assert.equal(await visibleLocator.first().isVisible(), true, `${label} 应可见`);
 }
 
 async function expectHidden(locator, label) {
@@ -461,7 +495,12 @@ async function runDesktopAcceptance(browser) {
   const screenshots = [];
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
   page.on('console', (message) => {
-    if (message.type() === 'error') state.consoleErrors.push(message.text());
+    if (
+      message.type() === 'error'
+      && !/Failed to load resource: the server responded with a status of (401 \(Unauthorized\)|409 \(Conflict\)|502 \(Bad Gateway\))/.test(message.text())
+    ) {
+      state.consoleErrors.push(message.text());
+    }
   });
   page.on('response', (response) => {
     const expectedAnonymousMe = !state.authenticated && response.url().includes('/api/auth/me') && response.status() === 401;
@@ -493,7 +532,7 @@ async function runDesktopAcceptance(browser) {
     await page.waitForURL('**/app');
 
     await expectVisible(page.locator('.workbench-shell'), '工作台');
-    await expectVisible(page.getByText(agent.name, { exact: true }).first(), '当前内容账号');
+    await expectVisible(page.getByText(agent.name, { exact: true }), '当前内容账号');
     await expectVisible(page.getByText('平台补贴与消费趋势', { exact: true }), '会话条目');
     await expectVisible(page.getByText('你以为平台又在撒钱，其实它们真正争夺的，是你下一次消费时第一个打开谁。', { exact: true }), '对话消息');
     await capture(page, '02-workbench-1440x900.png', screenshots);
@@ -537,16 +576,25 @@ async function runDesktopAcceptance(browser) {
     await page.getByRole('button', { name: '管理后台', exact: true }).click();
     await page.waitForURL('**/admin/users');
     await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '管理后台标题');
+    await expectVisible(page.getByRole('columnheader', { name: '全部 Token', exact: true }), '全部 Token 列表口径');
     const userRow = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
     await expectVisible(userRow, '用户表格行');
     await userRow.click();
     await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), '用户详情');
+    const tokenBreakdown = page.getByLabel('Token 用量');
+    const costBreakdown = page.getByLabel('费用 (USD)');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '全部模型', exact: true }), '全部模型 Token 明细');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '对话', exact: true }), '对话 Token 明细');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '后台处理', exact: true }), '后台处理 Token 明细');
+    await expectVisible(costBreakdown.getByText('$0.356535', { exact: true }), '全部模型费用明细');
+    await expectVisible(page.getByText('成功调用 11 次 · 缺失 1 次 · 失败 1 次', { exact: true }), 'Token 统计完整度明细');
+    await expectVisible(page.getByText('全部调用 12 次', { exact: true }), '全部模型调用次数');
     await expectVisible(page.getByRole('button', { name: /查看会话记录/ }), '会话审计入口');
     await capture(page, '04-admin-detail-1440x900.png', screenshots);
 
     await page.getByRole('button', { name: /查看会话记录/ }).click();
     await expectVisible(page.getByRole('heading', { name: `${targetUser.email} 的会话记录`, exact: true }), '会话审计窗口');
-    await expectVisible(page.getByText(adminSessionSummary.title, { exact: true }).first(), '审计会话标题');
+    await expectVisible(page.getByText(adminSessionSummary.title, { exact: true }), '审计会话标题');
     await expectVisible(page.getByText('今天值得跟进的是平台补贴、消费品牌财报和 AI 搜索产品更新。', { exact: true }), '审计消息');
     await page.getByRole('button', { name: '加载更多会话', exact: true }).click();
     await expectVisible(page.getByText(olderAdminSession.title, { exact: true }), '追加的审计会话');
@@ -556,7 +604,7 @@ async function runDesktopAcceptance(browser) {
 
     await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
     await expectVisible(page.getByRole('heading', { name: '模型管理', exact: true }), '模型管理标题');
-    await expectVisible(page.getByText('gpt-4.1-mini', { exact: true }).first(), '当前模型');
+    await expectVisible(page.getByText('gpt-4.1-mini', { exact: true }), '当前模型');
     await page.getByRole('button', { name: '刷新模型', exact: true }).click();
     await expectVisible(page.getByText('已刷新 3 个可用模型。', { exact: true }), '模型刷新反馈');
     await capture(page, '06-admin-models-1440x900.png', screenshots);
@@ -571,10 +619,16 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByText(/配置已被其他管理员更新/), '并发冲突反馈');
     assert.equal(await modelBaseUrl.inputValue(), 'https://draft.example.test/v1', '冲突后应保留 Base URL 草稿');
     assert.equal(await modelName.inputValue(), 'custom-model-draft', '冲突后应保留模型草稿');
-    await expectVisible(page.getByText('v8', { exact: true }).first(), '冲突后同步的配置版本');
+    await expectVisible(page.getByText('v8', { exact: true }), '冲突后同步的配置版本');
     assert.deepEqual(state.modelPutPayloads, [{
       base_url: 'https://draft.example.test/v1',
       model_name: 'custom-model-draft',
+      input_price_per_million_usd: 5,
+      output_price_per_million_usd: 25,
+      temperature: null,
+      context_window_tokens: 32000,
+      chat_max_tokens: 8000,
+      structured_max_tokens: 8000,
       expected_version: 7
     }], '更新已有配置时空 Key 不应进入请求');
 
@@ -594,6 +648,7 @@ async function runDesktopAcceptance(browser) {
 
     assert.deepEqual(state.unexpectedApiCalls, [], `存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `页面脚本错误：${state.pageErrors.join(' | ')}`);
+    assert.deepEqual(state.consoleErrors, [], `控制台错误：${state.consoleErrors.join(' | ')}`);
     assert.deepEqual(state.failedResponses, [], `存在失败响应：${state.failedResponses.join(' | ')}`);
     assert.deepEqual(state.failedRequests, [], `存在失败请求：${state.failedRequests.join(' | ')}`);
     assert.ok(state.apiCalls.some((call) => call === 'POST /api/auth/login'), '未覆盖登录 API');
@@ -658,7 +713,12 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
-    await browser?.close();
+    if (browser) {
+      await Promise.race([
+        browser.close(),
+        new Promise((resolve) => setTimeout(resolve, 5000))
+      ]);
+    }
   } finally {
     await stopVite(server?.child);
   }
@@ -695,4 +755,5 @@ try {
   if (server?.output.length) console.error(server.output.join('').trim());
 } finally {
   await shutdown();
+  process.exit(process.exitCode ?? 0);
 }

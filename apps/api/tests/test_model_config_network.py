@@ -14,7 +14,7 @@ import pytest
 
 def _network_module():
     try:
-        return import_module("services.model_config_network")
+        return import_module("contentai.services.model_config_network")
     except ModuleNotFoundError:
         pytest.fail("model configuration network safety module is missing")
 

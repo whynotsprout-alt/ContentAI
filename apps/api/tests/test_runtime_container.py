@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent.runtime.container import RuntimeContainer, _GatewayOwner
-from core.config import get_settings
+from contentai.agent.runtime.container import RuntimeContainer, _GatewayOwner
+from contentai.core.config import get_settings
 from pydantic import SecretStr
 
 
@@ -82,6 +82,24 @@ class _UsageTrackingGateway(_ClosableGateway):
         return _UsageTrackingModel(self)
 
 
+def _runtime_configuration(
+    model_config_id: str,
+    **overrides: Any,
+) -> SimpleNamespace:
+    values = {
+        "id": model_config_id,
+        "base_url": "https://models.example.test/v1",
+        "api_key": SecretStr("test-secret"),
+        "model_name": "test-model",
+        "temperature": 0.2,
+        "context_window_tokens": 32_000,
+        "chat_max_tokens": 8_000,
+        "structured_max_tokens": 8_000,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
     gateway = _Gateway()
     compiled_graph = object()
@@ -91,7 +109,7 @@ def test_runtime_cache_ignores_execution_identity(monkeypatch) -> None:
         compile_calls.append(kwargs)
         return compiled_graph
 
-    monkeypatch.setattr("agent.runtime.container.build_agent_graph", build_graph)
+    monkeypatch.setattr("contentai.agent.runtime.container.build_agent_graph", build_graph)
     container = RuntimeContainer(
         settings=get_settings(),
         model_gateway=gateway,
@@ -126,7 +144,7 @@ def test_runtime_model_and_graph_caches_are_lru_bounded(monkeypatch) -> None:
     settings = get_settings().model_copy(deep=True)
     settings.agent.runtime_cache_capacity = 2
     monkeypatch.setattr(
-        "agent.runtime.container.build_agent_graph",
+        "contentai.agent.runtime.container.build_agent_graph",
         lambda **kwargs: object(),
     )
     container = RuntimeContainer(
@@ -163,7 +181,7 @@ def test_runtime_model_and_graph_caches_are_lru_bounded(monkeypatch) -> None:
 def test_runtime_cache_isolates_model_configuration_versions(monkeypatch) -> None:
     gateway = _Gateway()
     monkeypatch.setattr(
-        "agent.runtime.container.build_agent_graph",
+        "contentai.agent.runtime.container.build_agent_graph",
         lambda **kwargs: object(),
     )
     container = RuntimeContainer(
@@ -208,7 +226,7 @@ def test_runtime_cache_single_flights_concurrent_same_key_builds(monkeypatch) ->
             compile_count += 1
         return object()
 
-    monkeypatch.setattr("agent.runtime.container.build_agent_graph", build_graph)
+    monkeypatch.setattr("contentai.agent.runtime.container.build_agent_graph", build_graph)
     container = RuntimeContainer(
         settings=get_settings(),
         model_gateway=gateway,
@@ -245,15 +263,10 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
         time.sleep(0.03)
         with calls_lock:
             calls += 1
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
         get_runtime_by_id,
     )
     container = RuntimeContainer(settings=get_settings(), checkpointer=object())
@@ -270,18 +283,49 @@ def test_gateway_cache_single_flights_concurrent_same_configuration(
     assert calls == 1
 
 
+def test_gateway_receives_complete_execution_configuration(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(
+            model_config_id,
+            temperature=0.7,
+            context_window_tokens=200_000,
+            chat_max_tokens=12_000,
+            structured_max_tokens=6_000,
+        ),
+    )
+
+    def build_gateway(**kwargs: Any) -> _ClosableGateway:
+        observed.update(kwargs)
+        return _ClosableGateway(**kwargs)
+
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
+
+    RuntimeContainer(
+        settings=get_settings(),
+        checkpointer=object(),
+    ).gateway_for_model_config("model-config-v2")
+
+    assert observed["model_config_id"] == "model-config-v2"
+    assert observed["base_url"] == "https://models.example.test/v1"
+    assert observed["api_key"].get_secret_value() == "test-secret"
+    assert observed["model_name"] == "test-model"
+    assert observed["temperature"] == 0.7
+    assert observed["context_window_tokens"] == 200_000
+    assert observed["chat_max_tokens"] == 12_000
+    assert observed["structured_max_tokens"] == 6_000
+    assert "settings" not in observed
+
+
 def test_gateway_cache_closes_retired_gateways_after_last_handle_once(monkeypatch) -> None:
     settings = get_settings().model_copy(deep=True)
     settings.agent.runtime_cache_capacity = 1
     created: dict[str, _ClosableGateway] = {}
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> _ClosableGateway:
         gateway = _ClosableGateway(**kwargs)
@@ -289,10 +333,10 @@ def test_gateway_cache_closes_retired_gateways_after_last_handle_once(monkeypatc
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
         get_runtime_by_id,
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     container = RuntimeContainer(settings=settings, checkpointer=object())
 
     first = container.gateway_for_model_config("model-config-v1")
@@ -331,15 +375,10 @@ def test_retired_owner_registry_shrinks_after_last_handle_closes_gateway(
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
-        lambda _service, _session, model_config_id: SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        ),
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(model_config_id),
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     container = RuntimeContainer(settings=settings, checkpointer=object())
 
     first = container.gateway_for_model_config("model-config-v1")
@@ -361,15 +400,10 @@ def test_retired_owner_registry_stays_bounded_across_repeated_evictions(
     settings.agent.runtime_cache_capacity = 1
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
-        lambda _service, _session, model_config_id: SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        ),
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(model_config_id),
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", _ClosableGateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", _ClosableGateway)
     container = RuntimeContainer(settings=settings, checkpointer=object())
     current = container.gateway_for_model_config("model-config-v0")
 
@@ -419,15 +453,10 @@ def test_running_loop_evictions_close_and_discard_retired_owners(monkeypatch) ->
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
-        lambda _service, _session, model_config_id: SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        ),
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(model_config_id),
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     container = RuntimeContainer(settings=settings, checkpointer=object())
 
     async def exercise() -> None:
@@ -747,15 +776,10 @@ def test_async_container_shutdown_retries_failed_evicted_gateway_close(monkeypat
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
-        lambda _service, _session, model_config_id: SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        ),
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(model_config_id),
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     container = RuntimeContainer(settings=settings, checkpointer=object())
 
     first = container.gateway_for_model_config("model-config-v1")
@@ -779,15 +803,10 @@ def test_explicit_container_close_propagates_failure_and_remains_retryable(
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
-        lambda _service, _session, model_config_id: SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        ),
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        lambda _service, _session, model_config_id: _runtime_configuration(model_config_id),
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     container = RuntimeContainer(settings=get_settings(), checkpointer=object())
     container.gateway_for_model_config("model-config-v1")
 
@@ -859,12 +878,7 @@ def test_runtime_reference_keeps_gateway_alive_after_capacity_eviction(monkeypat
     created: dict[str, _UsageTrackingGateway] = {}
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> _UsageTrackingGateway:
         gateway = _UsageTrackingGateway(**kwargs)
@@ -872,12 +886,12 @@ def test_runtime_reference_keeps_gateway_alive_after_capacity_eviction(monkeypat
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
         get_runtime_by_id,
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     monkeypatch.setattr(
-        "agent.runtime.container.build_agent_graph",
+        "contentai.agent.runtime.container.build_agent_graph",
         lambda **kwargs: kwargs["model"],
     )
     container = RuntimeContainer(settings=settings, checkpointer=object())
@@ -922,12 +936,7 @@ def test_in_flight_graph_keeps_gateway_alive_during_capacity_eviction(monkeypatc
             return BlockingModel(self)
 
     def get_runtime_by_id(_service, _session, model_config_id: str):
-        return SimpleNamespace(
-            id=model_config_id,
-            base_url="https://models.example.test/v1",
-            api_key=SecretStr("test-secret"),
-            model_name="test-model",
-        )
+        return _runtime_configuration(model_config_id)
 
     def build_gateway(**kwargs: Any) -> BlockingGateway:
         gateway = BlockingGateway(**kwargs)
@@ -935,12 +944,12 @@ def test_in_flight_graph_keeps_gateway_alive_during_capacity_eviction(monkeypatc
         return gateway
 
     monkeypatch.setattr(
-        "agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
+        "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
         get_runtime_by_id,
     )
-    monkeypatch.setattr("agent.runtime.container.ModelGateway", build_gateway)
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     monkeypatch.setattr(
-        "agent.runtime.container.build_agent_graph",
+        "contentai.agent.runtime.container.build_agent_graph",
         lambda **kwargs: kwargs["model"],
     )
     container = RuntimeContainer(settings=settings, checkpointer=object())

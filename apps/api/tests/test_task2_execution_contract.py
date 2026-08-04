@@ -6,11 +6,11 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import contentai.services.errors as service_errors
+import contentai.services.execution_resume as execution_resume_module
 import pytest
-import services.errors as service_errors
-import services.execution_resume as execution_resume_module
-from agent.graph import nodes as graph_nodes
-from agent.runtime.checkpoint import (
+from contentai.agent.graph import nodes as graph_nodes
+from contentai.agent.runtime.checkpoint import (
     ExecutionScopedCheckpointer,
     RuntimePersistence,
     checkpoint_interrupts,
@@ -18,21 +18,16 @@ from agent.runtime.checkpoint import (
     clear_execution_persistence,
     execution_checkpoint_config,
 )
-from agent.runtime.container import RuntimeContainer
-from agent.tools.memory import normalize_remember_input, remember
-from api.chat import _encode_sse_event, _public_stream_data, _to_stream_event_v3
-from core.config import get_settings
-from core.security import AuthContext
-from db.session import get_engine
-from langchain_core.messages import AIMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.types import interrupt
-from memory.long_term import is_sensitive_memory
-from memory.message_persister import MessagePersister
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.base import utcnow
-from models.chat import (
+from contentai.agent.runtime.container import RuntimeContainer
+from contentai.agent.tools.memory import normalize_remember_input, remember
+from contentai.api.chat import _encode_sse_event, _public_stream_data, _to_stream_event_v3
+from contentai.core.config import get_settings
+from contentai.core.security import AuthContext
+from contentai.db.session import get_engine
+from contentai.memory.long_term import is_sensitive_memory
+from contentai.memory.message_persister import MessagePersister
+from contentai.models.base import utcnow
+from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
     ChatMessage,
@@ -40,20 +35,25 @@ from models.chat import (
     ExecutionOutbox,
     ExecutionResumeRequest,
 )
-from models.enums import MessageRole, RunStatus
-from models.schemas.chat import AgentMessageRequest, ChatRequest, UserReplyRequest
-from pydantic import ValidationError
-from services import tasks as tasks_module
-from services.agent_service import AgentService
-from services.conversation_service import ConversationService
-from services.errors import (
+from contentai.models.enums import MessageRole, RunStatus
+from contentai.models.schemas.chat import AgentMessageRequest, ChatRequest, UserReplyRequest
+from contentai.services import tasks as tasks_module
+from contentai.services.agent_service import AgentService
+from contentai.services.conversation_service import ConversationService
+from contentai.services.errors import (
     ChatSessionNotFoundError,
     IdempotencyPayloadMismatchError,
     RunInterruptStaleError,
 )
-from services.execution_claim import claim_execution
-from services.execution_lineage import ExecutionLineage
-from services.execution_resume import public_interrupt
+from contentai.services.execution_claim import claim_execution
+from contentai.services.execution_lineage import ExecutionLineage
+from contentai.services.execution_resume import public_interrupt
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import interrupt
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from pydantic import ValidationError
 from sqlalchemy import inspect, text
 from sqlmodel import Session, select
 

@@ -9,17 +9,19 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import httpx
+import openai
 import pytest
-from agent.infrastructure.llm import client as client_module
-from agent.infrastructure.llm.client import LangChainChatClient
-from agent.infrastructure.llm.gateway import ModelGateway
-from agent.runtime.errors import (
+from contentai.agent.infrastructure.llm import client as client_module
+from contentai.agent.infrastructure.llm.client import LangChainChatClient
+from contentai.agent.infrastructure.llm.gateway import ModelGateway
+from contentai.agent.runtime.errors import (
     MODEL_STREAM_INTERRUPTED_CODE,
     MODEL_STREAM_INTERRUPTED_MESSAGE,
     classify_runtime_error,
 )
-from core.config import Settings
-from langchain_core.messages import HumanMessage
+from contentai.core.config import Settings
+from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.tools import tool
 from pydantic import SecretStr
 
@@ -34,11 +36,14 @@ def _settings() -> Settings:
 
 def _gateway(*, client: Any | None = None) -> ModelGateway:
     return ModelGateway(
-        settings=_settings(),
         model_config_id="model-config-v7",
         base_url="https://models.example.test/custom-root",
         api_key=SecretStr("runtime-secret-key"),
         model_name="selected-model-v7",
+        temperature=0.7,
+        context_window_tokens=200_000,
+        chat_max_tokens=12_000,
+        structured_max_tokens=6_000,
         client=client,
     )
 
@@ -51,7 +56,9 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
             observed.update(kwargs)
             self.disable_streaming = kwargs["disable_streaming"]
 
-    monkeypatch.setattr("agent.infrastructure.llm.client.ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(
+        "contentai.agent.infrastructure.llm.client._UsageAwareChatOpenAI", FakeChatOpenAI
+    )
     client = LangChainChatClient(
         base_url="https://models.example.test/custom-root",
         api_key=SecretStr("runtime-secret-key"),
@@ -70,6 +77,7 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert observed["api_key"].get_secret_value() == "runtime-secret-key"
     assert observed["temperature"] == 0.37
     assert observed["max_tokens"] == 321
+    assert observed["stream_usage"] is True
     assert isinstance(observed["http_client"], httpx.Client)
     assert isinstance(observed["http_async_client"], httpx.AsyncClient)
     assert observed["http_client"].follow_redirects is False
@@ -79,6 +87,172 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert "default_headers" not in observed
     assert "Authorization" not in repr(observed)
     assert "runtime-secret-key" not in repr(observed)
+
+
+def test_openai_client_omits_temperature_in_auto_mode(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            observed.update(kwargs)
+
+    monkeypatch.setattr(
+        "contentai.agent.infrastructure.llm.client._UsageAwareChatOpenAI", FakeChatOpenAI
+    )
+    client = LangChainChatClient(
+        base_url="https://models.example.test/custom-root",
+        api_key=SecretStr("runtime-secret-key"),
+        model_name="selected-model-v7",
+    )
+
+    client.build_chat_model(temperature=None, max_tokens=128)
+
+    assert "temperature" not in observed
+
+
+def test_stream_usage_falls_back_once_when_endpoint_rejects_stream_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[bool | None] = []
+
+    def fake_stream(
+        _self: Any,
+        *_args: Any,
+        stream_usage: bool | None = None,
+        **_kwargs: Any,
+    ):
+        attempts.append(stream_usage)
+        if stream_usage:
+            request = httpx.Request("POST", "https://models.example.test/v1/chat/completions")
+            response = httpx.Response(400, request=request)
+            raise openai.BadRequestError(
+                "Unsupported parameter: stream_options",
+                response=response,
+                body={"error": {"message": "stream_options is not supported"}},
+            )
+        yield ChatGenerationChunk(message=AIMessageChunk(content="fallback"))
+
+    monkeypatch.setattr(client_module.ChatOpenAI, "_stream", fake_stream)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+    try:
+        model = client.build_chat_model(temperature=0, max_tokens=128)
+        first = [chunk.message.content for chunk in model._stream([HumanMessage(content="ping")])]
+        second = [chunk.message.content for chunk in model._stream([HumanMessage(content="again")])]
+        assert first == ["fallback"]
+        assert second == ["fallback"]
+    finally:
+        client.close()
+
+    assert attempts == [True, False, False]
+
+
+def test_async_stream_usage_falls_back_once_when_endpoint_rejects_stream_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[bool | None] = []
+
+    async def fake_astream(
+        _self: Any,
+        *_args: Any,
+        stream_usage: bool | None = None,
+        **_kwargs: Any,
+    ):
+        attempts.append(stream_usage)
+        if stream_usage:
+            request = httpx.Request("POST", "https://models.example.test/v1/chat/completions")
+            response = httpx.Response(422, request=request)
+            raise openai.UnprocessableEntityError(
+                "Unsupported parameter: include_usage",
+                response=response,
+                body={"error": {"message": "include_usage is not supported"}},
+            )
+        yield ChatGenerationChunk(message=AIMessageChunk(content="fallback"))
+
+    async def collect(model: Any, content: str) -> list[str | list[str | dict[str, Any]]]:
+        return [
+            chunk.message.content
+            async for chunk in model._astream([HumanMessage(content=content)])
+        ]
+
+    monkeypatch.setattr(client_module.ChatOpenAI, "_astream", fake_astream)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+    try:
+        model = client.build_chat_model(temperature=0, max_tokens=128)
+        first = asyncio.run(collect(model, "ping"))
+        second = asyncio.run(collect(model, "again"))
+    finally:
+        client.close()
+
+    assert first == ["fallback"]
+    assert second == ["fallback"]
+    assert attempts == [True, False, False]
+
+
+def test_responses_api_sync_stream_does_not_receive_chat_completion_stream_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[dict[str, Any]] = []
+
+    def fake_stream(_self: Any, *_args: Any, **kwargs: Any):
+        observed.append(kwargs)
+        yield ChatGenerationChunk(message=AIMessageChunk(content="response"))
+
+    monkeypatch.setattr(client_module.ChatOpenAI, "_stream", fake_stream)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="gpt-5.4-pro",
+    )
+    try:
+        model = client.build_chat_model(temperature=0, max_tokens=128)
+        chunks = [
+            chunk.message.content
+            for chunk in model._stream([HumanMessage(content="ping")])
+        ]
+    finally:
+        client.close()
+
+    assert chunks == ["response"]
+    assert observed == [{}]
+
+
+def test_responses_api_async_stream_does_not_receive_chat_completion_stream_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[dict[str, Any]] = []
+
+    async def fake_astream(_self: Any, *_args: Any, **kwargs: Any):
+        observed.append(kwargs)
+        yield ChatGenerationChunk(message=AIMessageChunk(content="response"))
+
+    async def collect(model: Any) -> list[str | list[str | dict[str, Any]]]:
+        return [
+            chunk.message.content
+            async for chunk in model._astream([HumanMessage(content="ping")])
+        ]
+
+    monkeypatch.setattr(client_module.ChatOpenAI, "_astream", fake_astream)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="gpt-5.4-pro",
+    )
+    try:
+        model = client.build_chat_model(temperature=0, max_tokens=128)
+        chunks = asyncio.run(collect(model))
+    finally:
+        client.close()
+
+    assert chunks == ["response"]
+    assert observed == [{}]
 
 
 def test_langchain_client_closes_owned_http_clients_once(monkeypatch) -> None:
@@ -482,9 +656,46 @@ def test_every_gateway_scenario_uses_execution_selected_model_and_tuning():
 
     assert len(observed) == 5
     assert {call["model"] for call in observed} == {"selected-model-v7"}
-    assert observed[0]["temperature"] == _settings().llm.temperature
-    assert observed[0]["max_tokens"] == _settings().llm.chat_max_tokens
-    assert all(call["max_tokens"] > 0 for call in observed)
+    assert observed[0]["temperature"] == 0.7
+    assert observed[0]["max_tokens"] == 12_000
+    assert all(call["temperature"] == 0.7 for call in observed[1:4])
+    assert all(call["max_tokens"] == 6_000 for call in observed[1:4])
+    assert observed[4]["temperature"] == 0.7
+    assert observed[4]["max_tokens"] == 1
+
+
+def test_auto_temperature_is_used_by_every_gateway_scenario():
+    observed: list[dict[str, Any]] = []
+
+    class Client:
+        def build_chat_model(self, **kwargs: Any) -> Any:
+            observed.append(kwargs)
+            return object()
+
+        def build_structured_output_model(self, **kwargs: Any) -> Any:
+            observed.append(kwargs)
+            return object()
+
+    gateway = ModelGateway(
+        model_config_id="model-config-auto",
+        base_url="https://models.example.test/custom-root",
+        api_key=SecretStr("runtime-secret-key"),
+        model_name="selected-model-v7",
+        temperature=None,
+        context_window_tokens=200_000,
+        chat_max_tokens=12_000,
+        structured_max_tokens=6_000,
+        client=Client(),
+    )
+
+    gateway.build_agent_model()
+    gateway.build_hotspot_filter_model()
+    gateway.build_research_final_model()
+    gateway.build_structured_output_model(dict)
+    gateway.build_token_counter()
+
+    assert len(observed) == 5
+    assert all(call["temperature"] is None for call in observed)
 
 
 def test_research_final_gateway_builds_selection_schema_with_streaming_disabled():
@@ -533,6 +744,32 @@ def test_model_gateway_combines_provider_message_count_with_local_tool_schemas()
     expected_tool_tokens = math.ceil(len(encoded_schema) / 4)
     assert counter.count_messages(messages) == 11 + expected_tool_tokens
     assert observed == [messages]
+
+
+def test_model_gateway_reuses_token_counter_for_same_tool_instances() -> None:
+    observed: list[dict[str, Any]] = []
+
+    class ProviderModel:
+        def get_num_tokens_from_messages(self, _messages):
+            return 11
+
+    class Client:
+        def build_chat_model(self, **kwargs: Any) -> ProviderModel:
+            observed.append(kwargs)
+            return ProviderModel()
+
+    tool_schema = {
+        "name": "search",
+        "description": "Search for a source.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }
+    gateway = _gateway(client=Client())
+
+    first = gateway.build_token_counter(tools=[tool_schema])
+    second = gateway.build_token_counter(tools=[tool_schema])
+
+    assert second is first
+    assert len(observed) == 1
 
 
 def test_gateway_fallback_token_counter_includes_bound_tool_schemas():

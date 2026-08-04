@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.tools.system import current_datetime
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.tools.system import current_datetime
 
 
 def test_current_datetime_is_always_shanghai_time() -> None:

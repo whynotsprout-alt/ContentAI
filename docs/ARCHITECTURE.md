@@ -1,61 +1,72 @@
-# 架构与目录
+# 项目架构
 
-## 服务拓扑
+## 目录边界
 
-```mermaid
-flowchart LR
-  Browser["浏览器"] --> Web["Web / Nginx :5180"]
-  Web -->|"/api/ 反向代理"| API["FastAPI :8000"]
-  API --> PG[("PostgreSQL")]
-  API --> Redis[("Redis")]
-  Dispatcher["Outbox Dispatcher"] --> PG
-  Dispatcher --> Redis
-  Agent["Agent Worker"] --> PG
-  Agent --> Redis
-  Background["Background Worker"] --> PG
-  SideEffect["Side-effect Worker"] --> PG
-  SideEffect --> Redis
-  Beat["Celery Beat / Watchdog"] --> PG
-  Migration["一次性 Migration"] --> PG
+```text
+ContentAI/
+├── apps/
+│   ├── api/
+│   │   ├── src/contentai/
+│   │   │   ├── api/              HTTP 路由、认证依赖、SSE 边界
+│   │   │   ├── agent/            LangGraph、运行时、工具和研究工作流
+│   │   │   ├── core/             配置、安全、日志、基础设施策略
+│   │   │   ├── db/               数据库引擎和会话管理
+│   │   │   ├── integrations/     搜索、热点等外部系统适配器
+│   │   │   ├── memory/           短期/长期记忆与持久化
+│   │   │   ├── models/            数据库模型和 API Schema
+│   │   │   ├── services/         会话、执行、outbox、任务和运维服务
+│   │   │   └── migrations/       Alembic 业务迁移
+│   │   └── tests/                后端单元、集成和契约测试
+│   └── web/
+│       ├── src/app/              应用壳、启动入口和路由
+│       ├── src/features/auth/    登录、注册和认证状态
+│       ├── src/features/admin/   管理员用户与模型配置
+│       ├── src/features/workbench/ 会话工作台、SSE 和执行状态
+│       ├── src/shared/           API 客户端、共享组件和样式
+│       └── src/assets/           字体、背景等静态资源
+├── infra/                        Dockerfile、Nginx 和发布配置
+├── tools/                        本地开发、测试、验收和发布脚本
+├── docs/                         产品、设计、架构和运维文档
+└── compose*.yaml                 本地/生产服务编排
 ```
 
-`compose.yaml` 负责启动 PostgreSQL、Redis、迁移服务、API、Dispatcher、三个 Worker（`agent-worker`、`background-worker`、`side-effect-worker`）、Beat 与 Web，共十个服务。迁移成功是 API 和后台服务的启动前提；Web 仅在 API 就绪后启动。`compose.dev.yaml` 只为本地开发在 loopback 暴露数据库、Redis 和 API。
+## 后端依赖方向
 
-全局 OpenAI-compatible 模型配置保存在 PostgreSQL：唯一 active 配置及保留的历史版本都由 `model_config_id` 关联到 execution/outbox。`CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 通过 Compose 的共享应用环境传入 migration、API、dispatcher、worker 和 beat；这些服务必须使用同一 Fernet key 才能读取加密的模型 API Key。
+后端源码统一使用 `contentai.*` 命名空间，`apps/api/src` 只是 Python 源码根目录，不承载业务模块。
 
-## 目录职责
+```text
+api -> services -> agent / memory / integrations
+api -> models / core
+services -> models / db / core
+agent -> models / memory / integrations / core
+memory -> models / db / core
+integrations -> core
+models -> core
+```
 
-| 路径 | 职责 |
+`models` 不依赖 `api` 或 `services`；`integrations` 只负责外部协议适配；跨领域编排放在 `services` 或 `agent`，避免路由直接操作数据库细节。
+
+## 运行入口
+
+| 运行角色 | 入口 |
 | --- | --- |
-| `apps/api/src/api` | HTTP 路由、认证依赖与 SSE 边界 |
-| `apps/api/src/agent` | LangGraph 组装、执行恢复、工具与提示词 |
-| `apps/api/src/services` | 会话、执行、outbox、任务、迁移和运维服务 |
-| `apps/api/src/models` | SQLAlchemy 实体与 API Schema |
-| `apps/api/src/contentai_migrations` | 可随 wheel 安装的单一业务初始迁移；不管理 LangGraph checkpoint/store 表 |
-| `apps/api/tests` | 后端单元、集成与可靠性测试 |
-| `apps/web/src` | Vue 页面、状态管理和 API 客户端 |
-| `infra` | API/Web Dockerfile 与 Web Nginx 反向代理 |
-| `tools` | Windows 开发、测试、评审和 Ubuntu 发布打包入口 |
-| `infra/ubuntu` | Ubuntu 部署、健康检查、备份、恢复和升级脚本 |
+| API | `python -m uvicorn contentai.api.app:app` |
+| 数据库迁移 | `python -m contentai.services.migrate` |
+| Dispatcher | `python -m contentai.services.dispatcher` |
+| Celery Worker / Beat | `contentai.services.celery_app:celery_app` |
+| Alembic | `apps/api/src/contentai/migrations` |
 
-## 对话执行链路
+前端通过 `@/*` 指向 `apps/web/src/*`，业务代码禁止使用跨层级 `../../` 访问其他 feature；跨 feature 共享能力放入 `shared`。
 
-1. Web 创建或加载一个明确绑定 Agent 的会话。
-2. 发送消息必须携带 `agent_id`；API 校验它与会话的 Agent 一致后，在一个数据库事务内写入消息、执行记录和 outbox。
-3. Dispatcher 将已提交的 outbox 发布至 Redis/Celery；Agent Worker 领取任务时再次校验用户、会话、Agent 和执行关系。
-4. Agent 使用 PostgreSQL 中的 LangGraph checkpoint 执行或恢复，并把用户可见结果保存为 Assistant 消息。
-5. 事件先写入 Redis 流，SSE 可按执行 ID 和序号重放；标题、累积摘要和长期记忆等后处理继续经 outbox 投递。
+## 执行链路
 
-人工确认不会直接丢给某个进程内状态：恢复请求先持久化，Worker 再与 checkpoint 中的 interrupt 对照并消费。副作用工具以 `(execution_id, tool_call_id)` 去重。
+1. Web 创建或加载绑定 Agent 的会话。
+2. API 在事务中写入消息、执行记录和 outbox。
+3. Dispatcher 将 outbox 投递到 Redis/Celery。
+4. Agent Worker 使用 LangGraph checkpoint 执行或恢复，并将可见结果写回 Assistant 消息。
+5. Redis 事件流由 API 通过 SSE 重放；标题、摘要和记忆等后处理继续走 outbox 重试。
 
-## 内容与数据边界
+数据库迁移只管理 ContentAI 业务表；LangGraph checkpoint/store 表由其自身迁移机制管理。
 
-内容流程保持自然对话，不建立工作流阶段。热点、选题判断、研究结论和最终稿件都以 Assistant 消息交付；`ResearchPackage` 额外保存下一轮写稿所需的完整只读研究依据。
-
-- 研究编排层并发调用 Metaso 与 Anspire 两个固定搜索 API，把清理后的结果交给研究子模型按模板归纳；不抓取搜索结果网页。
-- 会话创建时固定 `agent_version_id`，所有后续 execution 沿用该版本。
-- PostgreSQL 业务表保存用户、Agent、会话、消息、执行、outbox 和安全审计所需元数据。
-- LangGraph checkpoint/store 仅保存跨 Worker 和重启恢复所需的技术状态。
-- 工具审计只记录可追溯的元数据与哈希，避免复制热点、研究或稿件正文。
-
-详细边界以 [PRODUCT.md](PRODUCT.md) 为准；可靠性实现以 [DESIGN.md](DESIGN.md) 为准。
+Compose 服务拓扑共十个服务：PostgreSQL、Redis、migration、api、dispatcher、三个 Worker
+（`agent-worker`、`background-worker`、`side-effect-worker`）、beat 和 web；所有应用服务共用同一模型配置加密密钥。

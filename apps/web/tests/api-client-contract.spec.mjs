@@ -9,8 +9,7 @@ const groups = {
     'executionEvents', 'runStatus', 'cancelRun', 'resumeRun'
   ],
   authApi: [
-    'register', 'login', 'logout', 'me',
-    'forgotPassword', 'resetPassword', 'changePassword'
+    'register', 'login', 'logout', 'me', 'changePassword'
   ],
   adminApi: [
     'users', 'user', 'disable', 'enable', 'temporaryPassword', 'updateUser', 'sessions',
@@ -24,7 +23,7 @@ async function sourceCorpus(directory) {
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) return [sourceCorpus(path)];
     if (!['.ts', '.vue', '.mjs'].includes(extname(entry.name))) return [];
-    if (path.endsWith(resolve('src/services/api.ts'))) return [];
+    if (path.endsWith(resolve('src/shared/services/api.ts'))) return [];
     return [readFile(path, 'utf8')];
   }));
   return contents.join('\n');

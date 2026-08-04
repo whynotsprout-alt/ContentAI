@@ -1,9 +1,10 @@
 import pytest
-from agent.context.window import (
+from contentai.agent.context.window import (
     CurrentInputTooLargeError,
     TokenCounter,
     estimate_message_tokens,
     trim_context_window,
+    trim_context_window_with_count,
 )
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -88,6 +89,26 @@ def test_full_input_budget_trims_only_older_history():
     )
 
     assert selected == [current]
+
+
+def test_full_input_budget_returns_the_verified_token_count() -> None:
+    counter = TokenCounter(
+        provider_count=lambda messages: sum(len(str(message.content)) for message in messages)
+    )
+    system = SystemMessage(content="system")
+    current = HumanMessage(content="current")
+
+    selected, token_count = trim_context_window_with_count(
+        [current],
+        limit=10,
+        min_focused_retain=1,
+        max_tokens=100,
+        token_counter=counter,
+        fixed_messages=[system],
+    )
+
+    assert selected == [current]
+    assert token_count == len("system") + len("current")
 
 
 def test_oversized_current_input_is_not_trimmed():

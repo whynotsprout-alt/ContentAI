@@ -90,7 +90,7 @@ flowchart LR
 
 ## 数据库与部署
 
-- `202607210001_v050_initial_schema.py` 是与当前最终模型一致的唯一初始迁移，`down_revision=None`；只面向空数据库，不含历史数据回填。
+- `202607210001_v050_initial_schema.py` 是空数据库基线，后续迁移补充模型定价/用量成本和运行参数；当前 head 为 `202608030002`，不含历史版本原地兼容回填。
 - LangGraph checkpoint/store 表由 `PostgresSaver.setup()` 初始化，并从 Alembic autogenerate 比较中明确排除。
 - Alembic 配置从显式环境变量、当前工作目录或 wheel 包资源定位，不依赖仓库根目录。
 - 容器启动顺序为 PostgreSQL 健康 → 一次性 migration 成功 → API、Dispatcher、Worker 和 Beat 启动。

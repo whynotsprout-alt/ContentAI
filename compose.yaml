@@ -61,7 +61,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: migration
-    command: ["python", "-m", "services.migrate"]
+    command: ["python", "-m", "contentai.services.migrate"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,7 +74,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: api
-    command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "-m", "uvicorn", "contentai.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,7 +95,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: dispatcher
-    command: ["python", "-m", "services.dispatcher"]
+    command: ["python", "-m", "contentai.services.dispatcher"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,7 +116,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: agent-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--concurrency=${CONTENTAI_AGENT__WORKER_CONCURRENCY:-4}", "--hostname=agent@%h"]
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--concurrency=${CONTENTAI_AGENT__WORKER_CONCURRENCY:-4}", "--hostname=agent@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,7 +126,7 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35m
     healthcheck:
-      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d agent@$$HOSTNAME --timeout=3"]
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d agent@$$HOSTNAME --timeout=3"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -138,7 +138,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: background-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=${CONTENTAI_DATABASE__BACKGROUND_WORKER_CONCURRENCY:-2}", "--hostname=background@%h"]
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=${CONTENTAI_DATABASE__BACKGROUND_WORKER_CONCURRENCY:-2}", "--hostname=background@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +148,7 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 10m
     healthcheck:
-      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d background@$$HOSTNAME --timeout=3"]
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d background@$$HOSTNAME --timeout=3"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -160,7 +160,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: side-effect-worker
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-side-effects", "--concurrency=${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_CONCURRENCY:-1}", "--hostname=side-effects@%h"]
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-side-effects", "--concurrency=${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_CONCURRENCY:-1}", "--hostname=side-effects@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -170,7 +170,7 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 10m
     healthcheck:
-      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d side-effects@$$HOSTNAME --timeout=3"]
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d side-effects@$$HOSTNAME --timeout=3"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -182,7 +182,7 @@ services:
     environment:
       <<: *app-environment
       CONTENTAI_DATABASE__RUNTIME_ROLE: beat
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/contentai-celerybeat-schedule"]
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/contentai-celerybeat-schedule"]
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,4 +1,4 @@
-from api.app import app
+from contentai.api.app import app
 
 EXPECTED_API_OPERATIONS = {
     ("GET", "/api/health"),

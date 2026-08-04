@@ -4,29 +4,29 @@ import inspect
 from types import SimpleNamespace
 from typing import Any
 
-import agent.runtime.execution_services as execution_services_module
-from agent.context.window import TokenCounter
-from agent.runtime.container import RuntimeContainer
-from agent.runtime.execution_services import AgentPostExecutionService
-from api.app import create_app
+import contentai.agent.runtime.execution_services as execution_services_module
 from auth_helpers import default_test_auth_context
 from client import ApiClient
-from core.config import get_settings
-from core.model_config_crypto import ModelConfigurationSecretProtector
-from core.security import authenticate_request
-from db.session import get_engine
-from langchain_core.messages import AIMessage
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
-from models.chat import (
+from contentai.agent.context.window import TokenCounter
+from contentai.agent.runtime.container import RuntimeContainer
+from contentai.agent.runtime.execution_services import AgentPostExecutionService
+from contentai.api.app import create_app
+from contentai.core.config import get_settings
+from contentai.core.model_config_crypto import ModelConfigurationSecretProtector
+from contentai.core.security import authenticate_request
+from contentai.db.session import get_engine
+from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
     ChatMessage,
     ChatSession,
     ExecutionOutbox,
 )
-from models.enums import MessageRole, RunStatus
-from models.model_configuration import ModelConfiguration
-from services import tasks as tasks_module
+from contentai.models.enums import MessageRole, RunStatus
+from contentai.models.model_configuration import ModelConfiguration
+from contentai.services import tasks as tasks_module
+from langchain_core.messages import AIMessage
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, model_runtime_parameters
 from sqlalchemy import text
 from sqlmodel import Session, select
 
@@ -148,6 +148,12 @@ def test_runtime_resolves_inactive_execution_snapshot_after_active_switch() -> N
                 version=2,
                 base_url="https://active-v2.test.invalid/root",
                 model_name="active-v2-model",
+                **model_runtime_parameters(
+                    temperature=0.7,
+                    context_window_tokens=200_000,
+                    chat_max_tokens=12_000,
+                    structured_max_tokens=6_000,
+                ),
                 api_key_ciphertext=protector.encrypt("active-v2-key"),
                 api_key_fingerprint=protector.fingerprint("active-v2-key"),
                 api_key_hint=protector.hint("active-v2-key"),
@@ -164,9 +170,17 @@ def test_runtime_resolves_inactive_execution_snapshot_after_active_switch() -> N
     assert old_gateway.model_config_id == DEFAULT_MODEL_CONFIG_ID
     assert old_gateway.model_name == "test-model"
     assert old_gateway.base_url == "https://models.test.invalid/v1"
+    assert old_gateway.temperature == 0.2
+    assert old_gateway.context_window_tokens == 32_000
+    assert old_gateway.chat_max_tokens == 8_000
+    assert old_gateway.structured_max_tokens == 8_000
     assert new_gateway.model_config_id == "model-config-active-v2"
     assert new_gateway.model_name == "active-v2-model"
     assert new_gateway.base_url == "https://active-v2.test.invalid/root"
+    assert new_gateway.temperature == 0.7
+    assert new_gateway.context_window_tokens == 200_000
+    assert new_gateway.chat_max_tokens == 12_000
+    assert new_gateway.structured_max_tokens == 6_000
     assert old_gateway is container.gateway_for_model_config(DEFAULT_MODEL_CONFIG_ID)
     assert old_gateway is not new_gateway
     assert "active-v2-key" not in repr(new_gateway)
@@ -311,6 +325,9 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
         def build_research_final_model(self) -> object:
             return object()
 
+        def close(self) -> bool:
+            return True
+
     old_gateway = RecordingGateway(
         [
             AIMessage(
@@ -332,14 +349,15 @@ def test_queued_worker_resume_retry_keep_snapshot_after_active_switch(
     selected_ids: list[str] = []
     container = RuntimeContainer(settings=get_settings())
 
-    def select_gateway(model_config_id: str):
+    def build_gateway(**kwargs: Any):
+        model_config_id = str(kwargs["model_config_id"])
         selected_ids.append(model_config_id)
         return {
             DEFAULT_MODEL_CONFIG_ID: old_gateway,
             "model-config-worker-v2": new_gateway,
         }[model_config_id]
 
-    container.gateway_for_model_config = select_gateway  # type: ignore[method-assign]
+    monkeypatch.setattr("contentai.agent.runtime.container.ModelGateway", build_gateway)
     app = create_app(settings=get_settings(), runtime=container)
     app.dependency_overrides[authenticate_request] = default_test_auth_context
     _seed_chat("session-worker-old-config")
