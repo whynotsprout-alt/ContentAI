@@ -128,6 +128,25 @@
   box-shadow: 0 20px 60px rgb(72 104 78 / 0.16), inset 0 1px rgb(255 255 255 / 0.88);
 }
 
+/* Expanding a message is a local reading control, not the primary send action. */
+.workbench-shell .message-expand {
+  color: #365c44;
+  background: rgb(230 241 231 / 0.78);
+  border: 1px solid rgb(54 92 68 / 0.22);
+}
+
+.workbench-shell .message-expand:hover:not(:disabled) {
+  color: #294a35;
+  background: rgb(218 235 219 / 0.88);
+  border-color: rgb(54 92 68 / 0.34);
+}
+
+.workbench-shell .message-expand[aria-expanded='true'] {
+  color: var(--wb-text);
+  background: rgb(255 255 252 / 0.62);
+  border-color: rgb(54 92 68 / 0.18);
+}
+
 .workbench-shell :is(.send-button, .resume-controls button.primary, .composer .primary-action) {
   color: #fff;
   background: var(--wb-accent);

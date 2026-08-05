@@ -9,8 +9,8 @@
 ## 首次部署
 
 ```bash
-tar -xzf contentai-0.7.0-ubuntu.tar.gz
-cd contentai-0.7.0-ubuntu
+tar -xzf contentai-0.7.1-ubuntu.tar.gz
+cd contentai-0.7.1-ubuntu
 cp .env.example .env
 chmod 600 .env
 # 编辑 .env：数据库密码、搜索密钥与默认管理员初始密码

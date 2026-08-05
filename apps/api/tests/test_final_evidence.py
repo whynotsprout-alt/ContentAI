@@ -80,10 +80,14 @@ def test_research_final_answer_and_proof_are_deterministic_from_durable_selectio
     proof = build_research_final_proof(evidence, selection.claim_ids)
 
     assert answer == (
-        "Research-backed findings:\n"
-        "1. The durable conclusion. [S1](https://one.example/source), "
-        "[S2](https://two.example/source)"
+        "## 选题研究摘要\n\n"
+        "### 核心结论\n"
+        "The durable conclusion.\n"
+        "   - 参考资料：[one.example](https://one.example/source)、"
+        "[two.example](https://two.example/source)"
     )
+    assert "[S1]" not in answer
+    assert "[S2]" not in answer
     assert proof == {
         "package_id": "rsp-evidence",
         "topic_hash": "topic-hash",

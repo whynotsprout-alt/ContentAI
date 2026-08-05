@@ -1198,8 +1198,11 @@ def test_research_backed_final_persists_only_validated_answer(monkeypatch):
 
     assert terminal["latest_execution"]["status"] == "completed"
     assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
+        "## 选题研究摘要\n\n"
+        "### 关键事实\n"
+        "1. Supported finding\n"
+        "   Supported evidence\n"
+        "   - 参考资料：[Supported source](https://evidence.example/source)"
     )
     assert gateway.final_model.calls
 
@@ -1236,8 +1239,11 @@ def test_research_turn_after_ordinary_chat_uses_only_its_current_tool_boundary(m
 
     assert terminal["latest_execution"]["status"] == "completed"
     assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
+        "## 选题研究摘要\n\n"
+        "### 关键事实\n"
+        "1. Supported finding\n"
+        "   Supported evidence\n"
+        "   - 参考资料：[Supported source](https://evidence.example/source)"
     )
     assert len(gateway.final_model.calls) == 1
 
@@ -1407,8 +1413,11 @@ def test_research_backed_final_repairs_once_with_supported_evidence_only(monkeyp
 
     assert terminal["latest_execution"]["status"] == "completed"
     assert terminal["messages"][-1]["content"] == (
-        "Research-backed findings:\n"
-        "1. Supported finding [S1](https://evidence.example/source)"
+        "## 选题研究摘要\n\n"
+        "### 关键事实\n"
+        "1. Supported finding\n"
+        "   Supported evidence\n"
+        "   - 参考资料：[Supported source](https://evidence.example/source)"
     )
     assert len(gateway.final_model.calls) == 2
     repair_messages = gateway.final_model.calls[1]

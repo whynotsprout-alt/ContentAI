@@ -1,6 +1,6 @@
 [project]
 name = "contentai"
-version = "0.7.0"
+version = "0.7.1"
 description = "Content creation agent with source research, durable execution and review workflows."
 requires-python = ">=3.12"
 dependencies = [

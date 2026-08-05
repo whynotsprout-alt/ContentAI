@@ -90,7 +90,7 @@ def _foreign_key_column_sets(
 
 def test_release_version_and_expected_revision_chain():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
-        assert tomllib.load(stream)["project"]["version"] == "0.7.0"
+        assert tomllib.load(stream)["project"]["version"] == "0.7.1"
 
     revisions = sorted(VERSIONS_DIR.glob("*.py"))
     assert [revision.name for revision in revisions] == [

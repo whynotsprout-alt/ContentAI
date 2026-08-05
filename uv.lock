@@ -355,7 +355,7 @@ wheels = [
 
 [[package]]
 name = "contentai"
-version = "0.5.0rc1"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

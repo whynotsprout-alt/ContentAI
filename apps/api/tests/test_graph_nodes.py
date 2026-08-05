@@ -361,8 +361,11 @@ def test_research_final_node_renders_only_deterministic_claim_selection_with_iso
 
     message = result["messages"][0]
     assert message.content == (
-        "Research-backed findings:\n"
-        "1. Durable node finding. [S1](https://node.example/source)"
+        "## 选题研究摘要\n\n"
+        "### 关键事实\n"
+        "1. Durable node finding.\n"
+        "   Durable node evidence.\n"
+        "   - 参考资料：[Node source](https://node.example/source)"
     )
     assert set(message.additional_kwargs) == {"research_backed_final_proof"}
     assert message.additional_kwargs["research_backed_final_proof"]["claim_ids"] == [
@@ -397,7 +400,7 @@ def test_research_final_repair_uses_only_the_shared_deadline_remaining(monkeypat
         _research_final_state()
     )
 
-    assert result["messages"][0].content.startswith("Research-backed findings:")
+    assert result["messages"][0].content.startswith("## 选题研究摘要")
     assert final_model.timeouts == [240.0, 100.0]
 
 
@@ -428,7 +431,7 @@ def test_research_final_node_falls_back_for_models_without_config():
         _Model(), research_final_model=NoConfigSelectionModel()
     )(_research_final_state())
 
-    assert result["messages"][0].content.startswith("Research-backed findings:")
+    assert result["messages"][0].content.startswith("## 选题研究摘要")
 
 
 def test_research_final_model_factory_is_not_built_for_plain_chat():
@@ -446,7 +449,7 @@ def test_research_final_model_factory_is_not_built_for_plain_chat():
     )
 
     assert plain_result["messages"][0].content == "Hello world"
-    assert research_result["messages"][0].content.startswith("Research-backed findings:")
+    assert research_result["messages"][0].content.startswith("## 选题研究摘要")
     assert calls == ["built"]
 
 

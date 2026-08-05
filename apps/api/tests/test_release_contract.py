@@ -37,7 +37,7 @@ def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> No
         for path in ("docs/OPERATIONS.md", "docs/UBUNTU_FROM_SCRATCH.md")
     )
 
-    assert version == "0.7.0"
+    assert version == "0.7.1"
     assert web_package["version"] == version
     assert web_lock["version"] == version
     assert web_lock["packages"][""]["version"] == version

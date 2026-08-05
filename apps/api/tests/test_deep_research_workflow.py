@@ -275,7 +275,7 @@ def test_oversized_provider_item_is_dropped_before_dedupe_and_model_input(
     assert str(oversized) not in model.calls[0][0][1].content
 
 
-def test_unknown_reference_claims_get_one_repair_before_generation(monkeypatch):
+def test_unknown_reference_findings_are_removed_without_blocking_generation(monkeypatch):
     known_source = source_id("https://a.example/a")
     install_search_tools(
         monkeypatch,
@@ -296,7 +296,7 @@ def test_unknown_reference_claims_get_one_repair_before_generation(monkeypatch):
         [
             deep_research.DeepResearchPackage(
                 core_conclusion=deep_research.ResearchConclusion(
-                    text="Unsupported conclusion",
+                    text="Supported conclusion",
                     source_ids=[known_source, "UNKNOWN"],
                 ),
                 findings=[
@@ -306,20 +306,7 @@ def test_unknown_reference_claims_get_one_repair_before_generation(monkeypatch):
                         source_ids=["UNKNOWN"],
                     )
                 ],
-            ),
-            deep_research.DeepResearchPackage(
-                core_conclusion=deep_research.ResearchConclusion(
-                    text="Supported conclusion",
-                    source_ids=[known_source],
-                ),
-                findings=[
-                    deep_research.ResearchFinding(
-                        claim="Supported finding",
-                        evidence="Evidence from the known source",
-                        source_ids=[known_source],
-                    )
-                ],
-            ),
+            )
         ]
     )
 
@@ -328,19 +315,11 @@ def test_unknown_reference_claims_get_one_repair_before_generation(monkeypatch):
         model_gateway=Gateway(model),
     )
 
-    assert len(model.calls) == 2
+    assert len(model.calls) == 1
     assert result.removed_unknown_reference_count == 2
     assert result.package_data["core_conclusion"]["text"] == "Supported conclusion"
-    assert result.package_data["findings"] == [
-        {
-            "claim": "Supported finding",
-            "evidence": "Evidence from the known source",
-            "source_ids": [known_source],
-        }
-    ]
-    repair_message = model.calls[1][0][-1].content
-    assert known_source in repair_message
-    assert "UNKNOWN" not in repair_message
+    assert result.package_data["core_conclusion"]["source_ids"] == [known_source]
+    assert result.package_data["findings"] == []
 
 
 def test_invalid_claims_after_one_repair_raise_content_evidence_invalid(monkeypatch):

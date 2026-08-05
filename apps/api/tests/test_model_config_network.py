@@ -122,6 +122,34 @@ def test_model_endpoint_rejects_forbidden_address_classes(address: str) -> None:
         )
 
 
+def test_model_endpoint_allows_only_explicitly_configured_provider_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    network = _network_module()
+    monkeypatch.setenv("CONTENTAI_MODEL_CONFIG__ALLOWED_IPS", "198.18.1.133")
+
+    assert network.normalize_model_base_url(
+        "https://api.example.test/v1", Resolver(["198.18.1.133"])
+    ) == "https://api.example.test/v1"
+
+    with pytest.raises(network.ModelEndpointForbidden):
+        network.normalize_model_base_url(
+            "https://api.example.test/v1", Resolver(["198.18.1.134"])
+        )
+
+
+def test_model_endpoint_allowlist_never_overrides_metadata_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    network = _network_module()
+    monkeypatch.setenv("CONTENTAI_MODEL_CONFIG__ALLOWED_IPS", "169.254.169.254")
+
+    with pytest.raises(network.ModelEndpointForbidden):
+        network.normalize_model_base_url(
+            "https://api.example.test/v1", Resolver(["169.254.169.254"])
+        )
+
+
 def test_public_http_is_rejected_but_private_http_is_accepted() -> None:
     network = _network_module()
 

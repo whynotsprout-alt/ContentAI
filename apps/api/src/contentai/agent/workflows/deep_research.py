@@ -182,7 +182,6 @@ async def run_deep_research_package_workflow_async(
         package is None
         or partition is None
         or not partition.core_supported
-        or partition.diagnostic_findings
     ):
         repair_messages = [
             *messages,
@@ -213,9 +212,11 @@ async def run_deep_research_package_workflow_async(
             package is None
             or partition is None
             or not partition.core_supported
-            or partition.diagnostic_findings
         ):
             raise ContentEvidenceInvalidError
+    # A research package can safely retain its source-backed conclusion even
+    # when the model also emitted unsupported findings.  Those findings are
+    # diagnostics, not a reason to discard usable evidence or block the user.
     package.findings = partition.supported_findings
     # This schema cannot attach source IDs to risk strings, so they remain
     # diagnostics and must not enter the generation-facing package.
@@ -563,16 +564,17 @@ def _partition_package_evidence(
     def normalized(values: list[str]) -> tuple[list[str], bool]:
         nonlocal unknown_reference_count
         output: list[str] = []
-        valid = True
         for value in values:
             source_id = str(value).strip()
             if source_id not in allowed:
                 unknown_reference_count += 1
-                valid = False
                 continue
             if source_id not in output:
                 output.append(source_id)
-        return output, valid and bool(output)
+        # Unknown IDs are removed, but a claim remains supported when at least
+        # one allowed source survives.  This keeps mixed valid/invalid model
+        # citations from invalidating otherwise usable research.
+        return output, bool(output)
 
     core_ids, core_supported = normalized(package.core_conclusion.source_ids)
     package.core_conclusion.source_ids = core_ids

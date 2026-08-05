@@ -39,6 +39,7 @@ _METADATA_ADDRESSES = {
     ipaddress.ip_address("168.63.129.16"),
     ipaddress.ip_address("fd00:ec2::254"),
 }
+_MODEL_ENDPOINT_ALLOWED_IPS_ENV = "CONTENTAI_MODEL_CONFIG__ALLOWED_IPS"
 
 
 class _ResolverExecutorSaturated(RuntimeError):
@@ -384,9 +385,33 @@ def _is_allowed_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) 
         or (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
     ):
         return False
+    if address in _configured_model_endpoint_allowed_ips():
+        return True
     if _is_enterprise_local(address):
         return True
     return address.is_global and not address.is_reserved
+
+
+def _configured_model_endpoint_allowed_ips() -> frozenset[
+    ipaddress.IPv4Address | ipaddress.IPv6Address
+]:
+    """Return the explicitly trusted, exact model-provider addresses.
+
+    This narrowly scoped escape hatch supports providers routed through a
+    non-global service address. CIDR ranges are deliberately not accepted, and
+    metadata addresses remain blocked even if mistakenly configured.
+    """
+    raw_value = os.getenv(_MODEL_ENDPOINT_ALLOWED_IPS_ENV, "")
+    allowed: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for raw_address in raw_value.split(","):
+        value = raw_address.strip()
+        if not value:
+            continue
+        try:
+            allowed.add(ipaddress.ip_address(value))
+        except ValueError:
+            continue
+    return frozenset(allowed)
 
 
 def _embedded_ipv4_addresses(address: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:

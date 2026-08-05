@@ -182,23 +182,66 @@ def render_deterministic_research_answer(
         for source in evidence.get("sources", [])
         if isinstance(source, dict)
     }
-    lines = ["Research-backed findings:"]
-    for index, claim_id in enumerate(selection.claim_ids, start=1):
+    selected_claims: list[dict[str, Any]] = []
+    for claim_id in selection.claim_ids:
         claim = claims_by_id.get(claim_id)
         if not isinstance(claim, dict):
             raise ContentEvidenceInvalidError
-        citations: list[str] = []
-        for source_id in claim.get("source_ids", []):
-            source = source_by_id.get(str(source_id))
-            url = str(source.get("url") or "").strip() if isinstance(source, dict) else ""
-            if not url:
-                raise ContentEvidenceInvalidError
-            citations.append(f"[{source_id}]({url})")
-        text = str(claim.get("claim") or "").strip()
-        if not text or not citations:
-            raise ContentEvidenceInvalidError
-        lines.append(f"{index}. {text} {', '.join(citations)}")
+        selected_claims.append(claim)
+
+    conclusion = next(
+        (claim for claim in selected_claims if claim.get("kind") == "conclusion"),
+        None,
+    )
+    findings = [claim for claim in selected_claims if claim.get("kind") != "conclusion"]
+    lines = ["## 选题研究摘要"]
+    if conclusion is not None:
+        lines.extend(
+            [
+                "",
+                "### 核心结论",
+                _research_claim_text(conclusion, source_by_id),
+            ]
+        )
+    if findings:
+        lines.extend(["", "### 关键事实"])
+        for index, claim in enumerate(findings, start=1):
+            lines.append(f"{index}. {_research_claim_text(claim, source_by_id)}")
+    if conclusion is None and not findings:
+        raise ContentEvidenceInvalidError
     return "\n".join(lines)
+
+
+def _research_claim_text(
+    claim: dict[str, Any],
+    source_by_id: dict[str, dict[str, Any]],
+) -> str:
+    citations: list[str] = []
+    for source_id in claim.get("source_ids", []):
+        source = source_by_id.get(str(source_id))
+        url = str(source.get("url") or "").strip() if isinstance(source, dict) else ""
+        if not url:
+            raise ContentEvidenceInvalidError
+        citations.append(f"[{_source_link_label(source)}]({url})")
+    text = str(claim.get("claim") or "").strip()
+    if not text or not citations:
+        raise ContentEvidenceInvalidError
+    evidence = str(claim.get("evidence") or "").strip()
+    details = f"\n   {evidence}" if evidence else ""
+    return f"{text}{details}\n   - 参考资料：{'、'.join(citations)}"
+
+
+def _source_link_label(source: dict[str, Any]) -> str:
+    """Render trusted source metadata without exposing internal source identifiers."""
+    title = sanitize_external_text(source.get("title"), max_chars=96)
+    publisher = sanitize_external_text(source.get("publisher"), max_chars=80)
+    if title:
+        label = title
+    elif publisher:
+        label = publisher
+    else:
+        label = (urlparse(str(source.get("url") or "")).hostname or "查看来源").lower()
+    return label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
 def build_research_final_proof(evidence: dict[str, Any], claim_ids: list[str]) -> dict[str, Any]:
