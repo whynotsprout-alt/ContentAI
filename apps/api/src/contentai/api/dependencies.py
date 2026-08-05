@@ -99,6 +99,10 @@ def get_model_configuration_service(request: Request) -> ModelConfigurationServi
 
 
 SessionDep = Annotated[Session, Depends(get_request_session)]
+FunctionSessionDep = Annotated[
+    Session,
+    Depends(get_request_session, scope="function"),
+]
 RequestContextDep = Annotated[RequestContext, Depends(get_request_context)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 CatalogServiceDep = Annotated[CatalogService, Depends(get_catalog_service)]

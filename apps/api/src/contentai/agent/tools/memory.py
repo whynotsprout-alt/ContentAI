@@ -120,6 +120,7 @@ def recall_memory(query: str) -> dict[str, list[dict[str, str]]]:
         normalized_query,
         user_id=context.user_id,
         limit=8,
+        touch=False,
     )
     return {
         "memories": [

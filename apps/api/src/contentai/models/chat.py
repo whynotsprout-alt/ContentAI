@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Column,
     DateTime,
@@ -115,6 +116,13 @@ class AgentExecution(SQLModel, table=True):
             "agent_version_id",
             unique=True,
         ),
+        Index(
+            "ux_agentexecution_id_invocation_session",
+            "id",
+            "invocation_id",
+            "session_id",
+            unique=True,
+        ),
         ForeignKeyConstraint(
             ["invocation_id", "session_id"],
             ["agentinvocation.id", "agentinvocation.session_id"],
@@ -126,6 +134,27 @@ class AgentExecution(SQLModel, table=True):
             ["chatsession.id", "chatsession.agent_version_id"],
             name="fk_agentexecution_session_version",
             ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["current_attempt_id", "id"],
+            ["agentexecutionattempt.id", "agentexecutionattempt.execution_id"],
+            name="fk_agentexecution_current_attempt_lineage",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "stream_committed_sequence BETWEEN 0 AND 9007199254740991",
+            name="ck_agentexecution_stream_committed_sequence_nonnegative",
+        ),
+        CheckConstraint(
+            "(terminal_stream_sequence IS NULL AND "
+            "terminal_stream_attempt_id IS NULL AND terminal_stream_status IS NULL) OR "
+            "(terminal_stream_sequence IS NOT NULL AND terminal_stream_sequence > 0 AND "
+            "terminal_stream_sequence = stream_committed_sequence AND "
+            "terminal_stream_attempt_id IS NOT NULL AND "
+            "btrim(terminal_stream_attempt_id) <> '' AND "
+            "terminal_stream_status IN "
+            "('waiting_input', 'completed', 'failed', 'cancelled'))",
+            name="ck_agentexecution_terminal_stream_sequence_valid",
         ),
         Index("ix_agentexecution_invocation_created", "invocation_id", "created_at"),
         Index("ix_agentexecution_invocation_status", "invocation_id", "status"),
@@ -148,6 +177,11 @@ class AgentExecution(SQLModel, table=True):
     )
     trace_id: str = Field(default_factory=lambda: new_id("trc"), index=True)
     latest_checkpoint_id: str | None = Field(default=None, index=True)
+    checkpoint_revision: int = Field(default=0, sa_type=BigInteger)
+    stream_committed_sequence: int = Field(default=0, sa_type=BigInteger)
+    terminal_stream_sequence: int | None = Field(default=None, sa_type=BigInteger)
+    terminal_stream_attempt_id: str | None = Field(default=None)
+    terminal_stream_status: str | None = Field(default=None)
     status: RunStatus = Field(default=RunStatus.pending, index=True)
     error: str = ""
     interrupt_payload: dict[str, Any] = Field(
@@ -210,6 +244,12 @@ class AgentExecutionAttempt(SQLModel, table=True):
             "ordinal",
             name="ux_agentexecutionattempt_execution_ordinal",
         ),
+        Index(
+            "ux_agentexecutionattempt_id_execution",
+            "id",
+            "execution_id",
+            unique=True,
+        ),
         Index("ix_agentexecutionattempt_execution_started", "execution_id", "started_at"),
     )
 
@@ -228,6 +268,26 @@ class AgentExecutionAttempt(SQLModel, table=True):
 class ChatMessage(SQLModel, table=True):
     __tablename__ = "chatmessage"
     __table_args__ = (
+        CheckConstraint(
+            "execution_id IS NULL OR invocation_id IS NOT NULL",
+            name="ck_chatmessage_execution_requires_invocation",
+        ),
+        ForeignKeyConstraint(
+            ["invocation_id", "session_id"],
+            ["agentinvocation.id", "agentinvocation.session_id"],
+            name="fk_chatmessage_invocation_session",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "invocation_id", "session_id"],
+            [
+                "agentexecution.id",
+                "agentexecution.invocation_id",
+                "agentexecution.session_id",
+            ],
+            name="fk_chatmessage_execution_lineage",
+            ondelete="CASCADE",
+        ),
         Index("ix_chatmessage_session_created_id", "session_id", "created_at", "id"),
         Index(
             "ux_chatmessage_assistant_execution",

@@ -1,7 +1,10 @@
+import type { AdminModelApiMode } from '@/shared/services/api';
+
 export type ModelConfigDraft = {
   baseUrl: string;
   apiKey: string;
   modelName: string;
+  apiMode?: AdminModelApiMode;
   inputPrice?: string;
   outputPrice?: string;
   temperature?: number | null;
@@ -20,6 +23,7 @@ function normalizedSignature(draft: ModelConfigDraft): string {
     draft.baseUrl.trim(),
     draft.apiKey,
     draft.modelName.trim(),
+    draft.apiMode ?? 'chat_completions',
     draft.inputPrice?.trim() ?? '',
     draft.outputPrice?.trim() ?? '',
     draft.temperature,

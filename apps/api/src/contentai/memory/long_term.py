@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from contentai.agent.runtime.model_invocation import invoke_model
 from contentai.memory.repository import MemoryRepository, normalize_memory_kind
 from contentai.memory.retriever import extract_memory_candidates
 from contentai.memory.types import MemoryEntry
@@ -136,9 +137,17 @@ class LongTermMemory:
         session_id: str | None = None,
         source_message_id: str | None = None,
         source_execution_id: str | None = None,
+        existing_memories: list[MemoryEntry] | None = None,
         callbacks: list[Any] | None = None,
     ) -> list[MemoryEntry]:
-        existing = self.list_all(agent_id, user_id=user_id, limit=20)
+        existing = existing_memories
+        if existing is None:
+            existing = self.list_all(
+                agent_id,
+                user_id=user_id,
+                limit=20,
+                touch=False,
+            )
         prompt = _memory_extraction_prompt(
             account_name=account_name,
             account_positioning=account_positioning,
@@ -148,28 +157,40 @@ class LongTermMemory:
             tool_results=tool_results,
         )
         model = model_gateway.build_structured_output_model(MemoryExtractionResult)
-        try:
-            result = model.invoke(prompt, config={"callbacks": callbacks or []})
-        except TypeError as exc:
-            if "config" not in str(exc):
-                raise
-            result = model.invoke(prompt)
+        result = invoke_model(
+            model,
+            prompt,
+            callbacks=callbacks,
+            include_empty_callbacks=True,
+        )
         candidates = _coerce_extraction_result(result)
-        entries: list[MemoryEntry] = []
+        candidates_by_key: dict[str, MemoryCandidate] = {}
         for candidate in candidates:
-            content = candidate.content.strip()
-            kind = candidate.kind.strip() or "semantic"
             if candidate.confidence < MIN_MEMORY_CONFIDENCE:
                 continue
+            content = candidate.content.strip()
             if not content or is_sensitive_memory(content) or is_transient_task_memory(content):
                 continue
+            memory_kind = normalize_memory_kind(candidate.kind.strip())
+            memory_key = self._stable_key(str(memory_kind), content)
+            candidates_by_key.setdefault(
+                memory_key,
+                candidate.model_copy(
+                    update={"kind": str(memory_kind), "content": content}
+                ),
+            )
+
+        entries: list[MemoryEntry] = []
+        for memory_key in sorted(candidates_by_key):
+            candidate = candidates_by_key[memory_key]
             entries.append(
                 self.remember(
                     agent_id,
-                    content,
+                    candidate.content,
                     user_id=user_id,
                     session_id=session_id,
-                    kind=kind[:40],
+                    kind=candidate.kind,
+                    key=memory_key,
                     payload={
                         "source": "turn_summary",
                         "scope": {
@@ -214,11 +235,13 @@ class LongTermMemory:
         *,
         user_id: str,
         limit: int = 20,
+        touch: bool = True,
     ) -> list[MemoryEntry]:
         return self.repository.list_scope(
             limit=limit,
             user_id=user_id,
             agent_id=agent_id,
+            touch=touch,
         )
 
     @staticmethod

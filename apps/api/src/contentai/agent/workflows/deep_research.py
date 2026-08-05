@@ -16,7 +16,15 @@ from contentai.agent.external_content import (
     looks_like_instruction_injection,
     sanitize_external_text,
 )
-from contentai.agent.runtime.errors import is_retryable_model_stream_error
+from contentai.agent.runtime.errors import (
+    is_retryable_model_stream_error,
+    model_retry_delay_seconds,
+)
+from contentai.agent.runtime.model_invocation import (
+    InvocationAttempt,
+    ainvoke_model,
+    append_callback,
+)
 from contentai.agent.tools.search import search_anspire_sources, search_metaso_sources
 from contentai.integrations.search import dedupe_sources
 
@@ -25,7 +33,8 @@ SEARCH_STAGE_TIMEOUT_SECONDS = 30.0
 SYNTHESIS_TIMEOUT_SECONDS = 135.0
 MAX_RESEARCH_SOURCES = 20
 RESEARCH_MODEL_MAX_ATTEMPTS = 2
-RESEARCH_MODEL_RETRY_DELAY_SECONDS = 0.25
+RESEARCH_MODEL_RETRY_BASE_SECONDS = 0.25
+RESEARCH_MODEL_RETRY_MAX_SECONDS = 30.0
 
 _PROVIDER_SOURCE_TEXT_LIMITS = {
     "url": 2_000,
@@ -237,12 +246,13 @@ async def _invoke_research_model_with_retry(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("research synthesis deadline exceeded")
+        invocation_attempt = InvocationAttempt()
         try:
             return await _await_with_cancellation(
                 _ainvoke_research_model(
                     model,
                     messages,
-                    callbacks=callbacks,
+                    callbacks=append_callback(callbacks, invocation_attempt),
                 ),
                 timeout=remaining,
                 ensure_not_cancelled=ensure_not_cancelled,
@@ -250,14 +260,20 @@ async def _invoke_research_model_with_retry(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if not is_retryable_model_stream_error(exc) or attempt == RESEARCH_MODEL_MAX_ATTEMPTS:
+            if (
+                not invocation_attempt.replay_safe
+                or not is_retryable_model_stream_error(exc)
+                or attempt == RESEARCH_MODEL_MAX_ATTEMPTS
+            ):
                 raise
             _ensure_active(ensure_not_cancelled)
-            delay = min(
-                RESEARCH_MODEL_RETRY_DELAY_SECONDS,
-                max(0.0, deadline - time.monotonic()),
+            delay = model_retry_delay_seconds(
+                exc,
+                attempt=attempt,
+                base_seconds=RESEARCH_MODEL_RETRY_BASE_SECONDS,
+                max_seconds=RESEARCH_MODEL_RETRY_MAX_SECONDS,
             )
-            if delay <= 0:
+            if deadline - time.monotonic() <= delay:
                 raise
             await asyncio.sleep(delay)
             _ensure_active(ensure_not_cancelled)
@@ -269,17 +285,12 @@ async def _ainvoke_research_model(
     *,
     callbacks: list[Any] | None,
 ) -> Any:
-    try:
-        return await model.ainvoke(messages, config={"callbacks": callbacks or []})
-    except TypeError as exc:
-        if not _does_not_accept_config(exc):
-            raise
-        return await model.ainvoke(messages)
-
-
-def _does_not_accept_config(exc: TypeError) -> bool:
-    message = str(exc).casefold()
-    return "config" in message and "unexpected keyword argument" in message
+    return await ainvoke_model(
+        model,
+        messages,
+        callbacks=callbacks,
+        include_empty_callbacks=True,
+    )
 
 
 async def _research_package_attempt(
@@ -456,7 +467,18 @@ def _bounded_provider_item(item: Any) -> dict[str, Any] | None:
 
 def _safe_citation_url(value: str) -> str:
     try:
-        parsed = urlparse(value.strip())
+        raw_value = str(value or "")
+        if any(
+            character.isspace()
+            or not character.isprintable()
+            or character in "()<>\\"
+            for character in raw_value
+        ):
+            # Citation URLs are rendered inside a bare Markdown destination.
+            # Reject characters that can terminate, nest, or escape it; their
+            # percent-encoded forms remain valid URLs and safe destinations.
+            return ""
+        parsed = urlparse(raw_value)
         scheme = parsed.scheme.lower()
         hostname = (parsed.hostname or "").strip().lower().rstrip(".")
         if scheme not in {"http", "https"} or not hostname:

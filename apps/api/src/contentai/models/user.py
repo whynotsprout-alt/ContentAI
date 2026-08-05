@@ -75,9 +75,20 @@ class ModelUsage(SQLModel, table=True):
         UniqueConstraint("call_id", name="ux_modelusage_call_id"),
         Index("ix_modelusage_user_created", "user_id", "created_at"),
         Index("ix_modelusage_execution_category", "execution_id", "category"),
+        CheckConstraint("input_tokens >= 0", name="ck_modelusage_input_tokens_nonnegative"),
+        CheckConstraint("output_tokens >= 0", name="ck_modelusage_output_tokens_nonnegative"),
+        CheckConstraint("total_tokens >= 0", name="ck_modelusage_total_tokens_nonnegative"),
+        CheckConstraint(
+            "total_tokens >= input_tokens + output_tokens",
+            name="ck_modelusage_total_tokens_cover_parts",
+        ),
         CheckConstraint("input_cost_usd >= 0", name="ck_modelusage_input_cost_nonnegative"),
         CheckConstraint("output_cost_usd >= 0", name="ck_modelusage_output_cost_nonnegative"),
         CheckConstraint("total_cost_usd >= 0", name="ck_modelusage_total_cost_nonnegative"),
+        CheckConstraint(
+            "total_cost_usd = input_cost_usd + output_cost_usd",
+            name="ck_modelusage_total_cost_matches_parts",
+        ),
     )
 
     id: str = Field(default_factory=lambda: new_id("use"), primary_key=True)

@@ -181,7 +181,7 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
             "model": "custom-model",
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
-            "max_tokens": 1,
+            "max_completion_tokens": 1,
         }
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
@@ -209,6 +209,153 @@ def test_probe_revalidates_dns_before_every_request_and_uses_exact_paths() -> No
         request.extensions["sni_hostname"] == "api.example.test" for request in requests
     )
     assert transport.close_calls == 2
+
+
+def test_probe_bounds_initial_endpoint_resolution() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_executor = network._BoundedResolverExecutor(max_workers=1, max_queue_size=0)
+
+    def blocking_resolver(_host: str, _port: int) -> Sequence[str]:
+        resolver_started.set()
+        release_resolver.wait(timeout=0.4)
+        return ["93.184.216.34"]
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=blocking_resolver,
+        resolver_timeout_seconds=0.02,
+        resolver_executor=resolver_executor,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+    try:
+        started_at = time.perf_counter()
+        with pytest.raises(network.ModelProviderUnreachable):
+            prober.probe("https://api.example.test/v1", "test-secret-key")
+        elapsed = time.perf_counter() - started_at
+    finally:
+        release_resolver.set()
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert resolver_started.is_set()
+    assert elapsed < 0.15
+
+
+def test_probe_bounds_dns_revalidation_before_model_request() -> None:
+    network = _network_module()
+    release_resolver = threading.Event()
+    resolver_executor = network._BoundedResolverExecutor(max_workers=1, max_queue_size=0)
+    resolver_calls = 0
+    requests: list[httpx.Request] = []
+
+    def resolver(_host: str, _port: int) -> Sequence[str]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 3:
+            release_resolver.wait(timeout=0.4)
+        return ["93.184.216.34"]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=resolver,
+        resolver_timeout_seconds=0.02,
+        resolver_executor=resolver_executor,
+        transport=httpx.MockTransport(handle),
+    )
+    try:
+        started_at = time.perf_counter()
+        with pytest.raises(network.ModelProviderUnreachable):
+            prober.probe(
+                "https://api.example.test/v1",
+                "test-secret-key",
+                "custom-model",
+            )
+        elapsed = time.perf_counter() - started_at
+    finally:
+        release_resolver.set()
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert resolver_calls == 3
+    assert [request.url.path for request in requests] == ["/v1/models"]
+    assert elapsed < 0.15
+
+
+def test_probe_uses_responses_endpoint_and_runtime_payload_when_selected() -> None:
+    network = _network_module()
+    resolver = Resolver(
+        ["93.184.216.34"],
+        ["93.184.216.34"],
+        ["93.184.216.34"],
+    )
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "responses-model"}]})
+        assert request.url.path == "/v1/responses"
+        assert json.loads(request.content) == {
+            "model": "responses-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "ping",
+                }
+            ],
+            "stream": False,
+            "max_output_tokens": 1,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ]
+            },
+        )
+
+    prober = network.OpenAICompatibleProbe(
+        resolver=resolver,
+        transport=httpx.MockTransport(handle),
+    )
+
+    result = prober.probe(
+        "https://api.example.test/v1",
+        "test-secret-key",
+        "responses-model",
+        api_mode="responses",
+    )
+
+    assert result.model_validated is True
+    assert [request.url.path for request in requests] == ["/v1/models", "/v1/responses"]
+
+
+def test_responses_probe_accepts_reasoning_that_exhausts_the_token_budget() -> None:
+    network = _network_module()
+
+    network._validate_response(
+        {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "reasoning", "summary": []}],
+        }
+    )
+
+    with pytest.raises(network.ModelProbeFailed):
+        network._validate_response(
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+                "output": [],
+            }
+        )
 
 
 def test_probe_rejects_dns_rebinding_before_second_outbound_request() -> None:
@@ -278,6 +425,43 @@ def test_runtime_sync_transport_revalidates_and_pins_every_outbound_request() ->
     assert requests[0].url.host == "93.184.216.34"
     assert requests[0].headers["Host"] == "api.example.test"
     assert requests[0].extensions["sni_hostname"] == "api.example.test"
+
+
+def test_runtime_sync_transport_bounds_dns_resolution() -> None:
+    network = _network_module()
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_finished = threading.Event()
+    resolver_executor = network._BoundedResolverExecutor(max_workers=1, max_queue_size=0)
+
+    def blocking_resolver(_host: str, _port: int) -> Sequence[str]:
+        resolver_started.set()
+        try:
+            release_resolver.wait(timeout=0.4)
+            return ["93.184.216.34"]
+        finally:
+            resolver_finished.set()
+
+    transport = network.PinnedModelTransport(
+        base_url="https://api.example.test/v1",
+        resolver=blocking_resolver,
+        resolver_timeout_seconds=0.02,
+        resolver_executor=resolver_executor,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+    try:
+        with httpx.Client(transport=transport, trust_env=False) as client:
+            started_at = time.perf_counter()
+            with pytest.raises(network.ModelProviderUnreachable):
+                client.get("https://api.example.test/v1/models", timeout=0.05)
+            elapsed = time.perf_counter() - started_at
+    finally:
+        release_resolver.set()
+        assert resolver_finished.wait(timeout=1.0)
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert resolver_started.is_set()
+    assert elapsed < 0.15
 
 
 def test_runtime_async_transport_revalidates_and_pins_every_outbound_request() -> None:

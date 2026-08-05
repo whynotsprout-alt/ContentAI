@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from contentai.api.dependencies import (
     ConversationServiceDep,
     CurrentUserDep,
+    FunctionSessionDep,
     RequestContextDep,
     SessionDep,
 )
@@ -32,7 +33,9 @@ from contentai.models.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
     MessageListRequest,
+    StreamErrorEventV3,
     StreamEventV3,
+    StreamPublicEventV3,
     UserReplyRequest,
 )
 from contentai.services.errors import (
@@ -45,6 +48,7 @@ from contentai.services.errors import (
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    MessageAlreadyExistsError,
     ResponseItemTooLargeError,
     RunInterruptStaleError,
     SessionAgentMismatchError,
@@ -52,6 +56,7 @@ from contentai.services.errors import (
     StreamReplayExpiredError,
     StreamReplayGapError,
 )
+from contentai.services.event_stream import MAX_SAFE_EVENT_SEQUENCE
 from contentai.services.execution_resume import public_interrupt, public_interrupt_from_projection
 from contentai.services.model_configuration_service import ModelNotConfigured
 
@@ -72,6 +77,7 @@ ServiceHttpError = (
     | IdempotencyPayloadMismatchError
     | InvalidCursorError
     | InvalidStreamCursorError
+    | MessageAlreadyExistsError
     | ResponseItemTooLargeError
     | SessionAgentMismatchError
     | RunInterruptStaleError
@@ -90,6 +96,7 @@ SERVICE_HTTP_ERRORS = (
     IdempotencyPayloadMismatchError,
     InvalidCursorError,
     InvalidStreamCursorError,
+    MessageAlreadyExistsError,
     ResponseItemTooLargeError,
     SessionAgentMismatchError,
     RunInterruptStaleError,
@@ -228,7 +235,11 @@ def create_session_message(
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        max_length=255,
+    ),
 ) -> ChatUserMessageResponse:
     _enforce_llm_rate_limit(request, auth)
     if (
@@ -257,30 +268,45 @@ def create_session_message(
 @translate_service_errors
 def replay_run_events(
     execution_id: str,
-    session: SessionDep,
+    session: FunctionSessionDep,
     auth: CurrentUserDep,
     request_context: RequestContextDep,
     service: ConversationServiceDep,
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-    after_sequence: int | None = Query(default=None, ge=0),
+    after_sequence: str | None = Query(
+        default=None,
+        description=(
+            "Fallback non-negative integer cursor; ignored when Last-Event-ID is non-empty."
+        ),
+    ),
 ) -> StreamingResponse:
     execution = service.get_execution_status(session, execution_id, auth)
-    cursor = (
-        after_sequence
-        if after_sequence is not None
-        else _parse_event_cursor(last_event_id, execution_id)
+    cursor = _select_event_cursor(
+        last_event_id=last_event_id,
+        after_sequence=after_sequence,
+        execution_id=execution_id,
+    )
+    stop_requested = threading.Event()
+    service.validate_execution_event_cursor(
+        session,
+        execution_id,
+        auth,
+        after_sequence=cursor,
     )
     events = service.replay_execution_events(
         session.get_bind(),
         execution_id,
         auth,
         after_sequence=cursor,
+        stop_requested=stop_requested,
+        cursor_prevalidated=True,
     )
     return _event_stream_response(
         events,
         session_id=execution.session_id,
         execution_id=execution_id,
         request_id=request_context.request_id,
+        stop_requested=stop_requested,
     )
 
 
@@ -355,18 +381,20 @@ def _event_stream_response(
     session_id: str | None = None,
     thread_id: str | None = None,
     execution_id: str | None = None,
+    stop_requested: threading.Event | None = None,
 ) -> StreamingResponse:
+    consumer_stop = stop_requested or threading.Event()
+
     async def stream():
         event_queue: asyncio.Queue[tuple[str, dict[str, Any]] | Exception | object] = asyncio.Queue(
             maxsize=SSE_QUEUE_SIZE
         )
         loop = asyncio.get_running_loop()
-        stop_requested = threading.Event()
         backpressure_disconnected = threading.Event()
         started_at = time.monotonic()
         consumer = threading.Thread(
             target=_consume_sync_events,
-            args=(events, loop, event_queue, stop_requested, backpressure_disconnected),
+            args=(events, loop, event_queue, consumer_stop, backpressure_disconnected),
             name="sse-event-consumer",
             daemon=True,
         )
@@ -395,6 +423,7 @@ def _event_stream_response(
                 if item is _SSE_DONE:
                     break
                 if isinstance(item, Exception):
+                    consumer_stop.set()
                     error_payload = _stream_exception_payload(item)
                     yield _encode_sse_event(
                         "errors",
@@ -412,16 +441,26 @@ def _event_stream_response(
                         thread_id=thread_id,
                         execution_id=execution_id,
                     )
-                except ValueError:
-                    continue
-                event_payload = stream_event.model_dump(mode="json")
-                yield _encode_sse_event(
-                    stream_event.channel,
-                    event_payload,
-                    event_id=stream_event.event_id,
-                )
+                    event_payload = stream_event.model_dump(mode="json")
+                    encoded_event = _encode_sse_event(
+                        stream_event.channel,
+                        event_payload,
+                        event_id=stream_event.event_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    consumer_stop.set()
+                    logger.warning("sse_projection_failure_total=1")
+                    yield _encode_sse_event(
+                        "errors",
+                        _stream_exception_event(
+                            execution_id,
+                            _stream_exception_payload(exc),
+                        ),
+                    )
+                    break
+                yield encoded_event
         finally:
-            stop_requested.set()
+            consumer_stop.set()
 
     return StreamingResponse(
         stream(),
@@ -535,10 +574,6 @@ def _extract_service_error_context(
 
 def _extract_context_value(values: list[Any], key: str) -> str | None:
     for value in values:
-        if isinstance(value, str) and key in {"session_id", "execution_id"}:
-            maybe_candidate = value if value else None
-            if maybe_candidate and isinstance(maybe_candidate, str):
-                return maybe_candidate
         if key == "thread_id":
             langgraph_thread_id = getattr(value, "langgraph_thread_id", None)
             if langgraph_thread_id:
@@ -711,6 +746,17 @@ def _http_exception_for_service_error(
                 execution_id=execution_id,
             ),
         )
+    if isinstance(exc, MessageAlreadyExistsError):
+        return HTTPException(
+            status_code=409,
+            detail=_build_service_error_detail(
+                code="MESSAGE_ALREADY_EXISTS",
+                message=str(exc),
+                request_id=request_id,
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        )
     if isinstance(exc, RunInterruptStaleError):
         return HTTPException(
             status_code=409,
@@ -800,8 +846,8 @@ def _to_stream_event_v3(
         sequence_value = int(sequence)
     except (ValueError, TypeError) as exc:
         raise ValueError("Stream event has no sequence") from exc
-    if sequence_value < 1:
-        raise ValueError("Stream event sequence must be positive")
+    if sequence_value < 1 or sequence_value > MAX_SAFE_EVENT_SEQUENCE:
+        raise ValueError("Stream event sequence is outside the safe range")
     semantic_name = normalized_payload.get("name")
     name = str(semantic_name).strip() if isinstance(semantic_name, str) else ""
     channel = _stream_channel(normalized_event, name)
@@ -818,12 +864,13 @@ def _to_stream_event_v3(
         )
     except ValueError:
         timestamp_value = datetime.now().astimezone()
-    return StreamEventV3(
-        execution_id=execution_value,
-        sequence=sequence_value,
-        event_id=f"{execution_value}:{sequence_value}",
-        channel=channel,
-        namespace=(
+    if timestamp_value.tzinfo is None or timestamp_value.utcoffset() is None:
+        timestamp_value = datetime.now().astimezone()
+    event_fields = {
+        "execution_id": execution_value,
+        "sequence": sequence_value,
+        "event_id": f"{execution_value}:{sequence_value}",
+        "namespace": (
             ()
             if has_interrupt
             else tuple(
@@ -834,15 +881,25 @@ def _to_stream_event_v3(
             if isinstance(normalized_payload.get("namespace"), list | tuple)
             else ()
         ),
-        attempt_id=_optional_string(normalized_payload.get("attempt_id")),
-        message_id=_optional_string(normalized_payload.get("message_id")),
-        tool_call_id=(
+        "attempt_id": _optional_string(normalized_payload.get("attempt_id")),
+        "message_id": _optional_string(normalized_payload.get("message_id")),
+        "tool_call_id": (
             None
             if has_interrupt
             else _optional_string(normalized_payload.get("tool_call_id"))
         ),
-        timestamp=timestamp_value,
+        "timestamp": timestamp_value,
+    }
+    if channel == "errors":
+        return StreamErrorEventV3(
+            channel="errors",
+            data=data,
+            **event_fields,
+        )
+    return StreamPublicEventV3(
+        channel=channel,
         data=data,
+        **event_fields,
     )
 
 
@@ -871,19 +928,25 @@ def _is_stream_error_type(*, normalized_event: str, semantic_name: str) -> bool:
 
 
 def _stream_exception_payload(exc: Exception) -> dict[str, str]:
-    message = str(exc).strip()
     if isinstance(exc, StreamReplayGapError):
         code = "STREAM_REPLAY_GAP"
+        message = "The event stream has a replay gap."
     elif isinstance(exc, StreamReplayExpiredError):
         code = "STREAM_REPLAY_EXPIRED"
+        message = "The event stream replay window has expired."
     elif isinstance(exc, StreamingDegradedError):
         code = "STREAMING_DEGRADED"
+        message = "Event streaming is temporarily degraded."
+    elif isinstance(exc, InvalidStreamCursorError):
+        code = "INVALID_STREAM_CURSOR"
+        message = "The event stream cursor is invalid."
     else:
-        code = _coerce_error_code(exc.__class__.__name__) or "STREAM_EXCEPTION_ERROR"
+        code = "STREAM_EXCEPTION_ERROR"
+        message = "Event stream processing failed."
     return {
         "name": "stream_exception",
         "code": code,
-        "message": message or "Stream processing failed.",
+        "message": message,
     }
 
 
@@ -950,7 +1013,12 @@ def _public_stream_data(payload: dict[str, Any], *, channel: str) -> dict[str, A
 
 def _bounded_public_stream_data(projected: dict[str, Any]) -> dict[str, Any]:
     safe = _json_safe_stream_data(projected)
-    encoded = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        safe,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
     if len(encoded) <= 512 * 1024:
         return safe
     return {"state_truncated": True, "summary": "Public stream payload exceeded 512KiB"}
@@ -985,15 +1053,23 @@ def _normalize_stream_error_payload(
         else:
             error_code = "STREAM_EVENT_ERROR"
 
-    payload["code"] = error_code
+    payload["code"] = error_code[:80]
 
-    raw_error_message = payload.get("message")
-    if not raw_error_message:
-        raw_error_message = payload.get("error")
-    if not raw_error_message:
-        raw_error_message = payload.get("content")
-    if isinstance(raw_error_message, str) and raw_error_message.strip():
-        payload["message"] = raw_error_message.strip()
+    raw_name = payload.get("name")
+    if isinstance(raw_name, str) and raw_name.strip():
+        payload["name"] = raw_name.strip()[:120]
+    else:
+        payload.pop("name", None)
+    if not isinstance(payload.get("retryable"), bool):
+        payload.pop("retryable", None)
+
+    error_message = ""
+    for key in ("message", "error", "content"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            error_message = candidate.strip()[:4000]
+            break
+    payload["message"] = error_message or "The execution reported an error."
     return payload
 
 
@@ -1011,6 +1087,35 @@ def _optional_string(value: Any) -> str | None:
     return text or None
 
 
+def _select_event_cursor(
+    *,
+    last_event_id: str | None,
+    after_sequence: str | None,
+    execution_id: str,
+) -> int:
+    if last_event_id is not None and last_event_id.strip():
+        return _parse_event_cursor(last_event_id, execution_id)
+    return _parse_after_sequence(after_sequence)
+
+
+def _parse_after_sequence(value: str | None) -> int:
+    if value is None:
+        return 0
+    try:
+        sequence = int(value.strip())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="after_sequence must be a non-negative integer",
+        ) from exc
+    if sequence < 0 or sequence > MAX_SAFE_EVENT_SEQUENCE:
+        raise HTTPException(
+            status_code=422,
+            detail="after_sequence must be a non-negative integer",
+        )
+    return sequence
+
+
 def _parse_event_cursor(value: str | None, execution_id: str) -> int:
     if value is None or not value.strip():
         return 0
@@ -1023,15 +1128,27 @@ def _parse_event_cursor(value: str | None, execution_id: str) -> int:
             )
         raw = raw_sequence
     try:
-        return max(0, int(raw))
+        sequence = int(raw)
     except ValueError as exc:
         raise HTTPException(
             status_code=422, detail="Last-Event-ID must be a non-negative integer"
         ) from exc
+    if sequence < 0 or sequence > MAX_SAFE_EVENT_SEQUENCE:
+        raise HTTPException(
+            status_code=422, detail="Last-Event-ID must be a non-negative integer"
+        )
+    return sequence
 
 
 def _json_safe_stream_data(payload: dict[str, Any]) -> dict[str, Any]:
-    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    return json.loads(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            default=str,
+            allow_nan=False,
+        )
+    )
 
 
 def _encode_sse_event(
@@ -1045,7 +1162,12 @@ def _encode_sse_event(
         event_id_text = str(event_id)
         lines.append(f"id: {event_id_text}")
     lines.append(f"event: {event}")
-    encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     for data_line in encoded.splitlines() or ["{}"]:
         lines.append(f"data: {data_line}")
     lines.append("")

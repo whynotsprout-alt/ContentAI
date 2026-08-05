@@ -23,6 +23,12 @@ if TYPE_CHECKING:
     from contentai.models.chat import AgentExecution
 
 
+MODEL_PRICE_PRECISION = 12
+MODEL_PRICE_SCALE = 6
+MODEL_PRICE_QUANTUM_USD = Decimal("0.000001")
+MODEL_PRICE_MAX_USD = Decimal("999999.999999")
+
+
 class ModelConfiguration(SQLModel, table=True):
     __tablename__ = "modelconfiguration"
     __table_args__ = (
@@ -57,6 +63,10 @@ class ModelConfiguration(SQLModel, table=True):
             name="ck_modelconfiguration_provider",
         ),
         CheckConstraint(
+            "api_mode IN ('chat_completions', 'responses')",
+            name="ck_modelconfiguration_api_mode",
+        ),
+        CheckConstraint(
             "char_length(api_key_fingerprint) = 64",
             name="ck_modelconfiguration_fingerprint_length",
         ),
@@ -71,15 +81,25 @@ class ModelConfiguration(SQLModel, table=True):
     id: str = Field(default_factory=lambda: new_id("mcf"), primary_key=True)
     version: int
     provider: str = Field(default="openai_compatible", sa_type=String(32))
+    # Keep the endpoint selection explicit.  ``chat_completions`` is the
+    # compatibility default and prevents LangChain from inferring an endpoint
+    # from the model name.
+    api_mode: str = Field(default="chat_completions", sa_type=String(24))
     base_url: str
     model_name: str
     input_price_per_million_usd: Decimal = Field(
         default=Decimal("5.000000"),
-        sa_column=Column(Numeric(12, 6), nullable=False),
+        sa_column=Column(
+            Numeric(MODEL_PRICE_PRECISION, MODEL_PRICE_SCALE),
+            nullable=False,
+        ),
     )
     output_price_per_million_usd: Decimal = Field(
         default=Decimal("25.000000"),
-        sa_column=Column(Numeric(12, 6), nullable=False),
+        sa_column=Column(
+            Numeric(MODEL_PRICE_PRECISION, MODEL_PRICE_SCALE),
+            nullable=False,
+        ),
     )
     temperature: float | None = Field(default=None, sa_type=Float)
     context_window_tokens: int = Field(default=32_000, sa_type=Integer)

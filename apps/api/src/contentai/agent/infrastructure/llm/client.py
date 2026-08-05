@@ -311,16 +311,22 @@ class _OwnerLoopAsyncClient(httpx.AsyncClient):
 class LangChainChatClient:
     """Build OpenAI-compatible chat clients from one immutable configuration."""
 
+    _API_MODES = frozenset({"chat_completions", "responses"})
+
     def __init__(
         self,
         *,
         base_url: str,
         api_key: SecretStr,
         model_name: str,
+        api_mode: str = "chat_completions",
     ) -> None:
+        if api_mode not in self._API_MODES:
+            raise ValueError("api_mode must be 'chat_completions' or 'responses'.")
         self._base_url = base_url
         self._api_key = api_key
         self._model_name = model_name
+        self._api_mode = api_mode
         self._http_client = httpx.Client(
             transport=PinnedModelTransport(base_url=base_url),
             follow_redirects=False,
@@ -388,6 +394,10 @@ class LangChainChatClient:
             "http_client": self._http_client,
             "http_async_client": self._http_async_client,
         }
+        # Pin the endpoint explicitly.  Without this flag langchain-openai
+        # may infer Responses API from the model name, while the provider was
+        # probed using a different endpoint.
+        model_options["use_responses_api"] = self._api_mode == "responses"
         if temperature is not None:
             model_options["temperature"] = temperature
         chat_model = _UsageAwareChatOpenAI(**model_options)
@@ -407,7 +417,7 @@ class LangChainChatClient:
         schema: type[Any],
         model: str | None = None,
         timeout_seconds: float = 240.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
         disable_streaming: bool = False,
     ) -> Any:
         chat_model = self.build_chat_model(

@@ -43,6 +43,27 @@ class MemoryRecord(SQLModel, table=True):
             "(agent_id IS NULL AND session_id IS NOT NULL)",
             name="ck_memoryrecord_owner",
         ),
+        CheckConstraint(
+            "confidence NOT IN ("
+            "'NaN'::double precision, "
+            "'Infinity'::double precision, "
+            "'-Infinity'::double precision"
+            ") AND confidence BETWEEN 0 AND 1",
+            name="ck_memoryrecord_confidence_unit_interval",
+        ),
+        CheckConstraint(
+            "importance_score NOT IN ("
+            "'NaN'::double precision, "
+            "'Infinity'::double precision, "
+            "'-Infinity'::double precision"
+            ") AND importance_score BETWEEN 0 AND 1",
+            name="ck_memoryrecord_importance_unit_interval",
+        ),
+        CheckConstraint("version > 0", name="ck_memoryrecord_version_positive"),
+        CheckConstraint(
+            "access_count >= 0",
+            name="ck_memoryrecord_access_count_nonnegative",
+        ),
         ForeignKeyConstraint(
             ["agent_id", "user_id"],
             ["agentprofile.id", "agentprofile.user_id"],

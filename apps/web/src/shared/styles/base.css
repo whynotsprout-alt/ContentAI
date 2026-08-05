@@ -126,10 +126,6 @@ textarea::placeholder {
   animation: page-enter 520ms var(--ease-out) both;
 }
 
-.desktop-gate {
-  display: none;
-}
-
 .sr-only {
   position: absolute !important;
   width: 1px !important;
@@ -406,60 +402,6 @@ select:focus {
 @keyframes page-enter {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-@media (max-width: 1279px) {
-  .desktop-application {
-    display: none;
-  }
-
-  .desktop-gate {
-    position: relative;
-    z-index: 2;
-    display: grid;
-    width: min(520px, calc(100% - 48px));
-    height: 100%;
-    margin: 0 auto;
-    place-content: center;
-    justify-items: center;
-    text-align: center;
-  }
-
-  .desktop-gate__mark {
-    display: grid;
-    width: 58px;
-    height: 58px;
-    place-items: center;
-    margin-bottom: 20px;
-    color: var(--text);
-    font-family: 'Instrument Serif', serif;
-    font-size: 30px;
-    background: rgb(255 255 252 / 0.52);
-    border: 1px solid var(--line-strong);
-    border-radius: 18px;
-    box-shadow: var(--shadow-float);
-  }
-
-  .desktop-gate__brand {
-    margin: 0 0 18px;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 650;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-  }
-
-  .desktop-gate h1 {
-    margin: 0 0 12px;
-    font-size: 38px;
-  }
-
-  .desktop-gate > p:last-child {
-    max-width: 430px;
-    margin: 0;
-    color: var(--muted);
-    line-height: 1.75;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

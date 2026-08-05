@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal, Self
 
 from pydantic import (
@@ -12,6 +13,11 @@ from pydantic import (
     model_validator,
 )
 
+from contentai.models.model_configuration import (
+    MODEL_PRICE_MAX_USD,
+    MODEL_PRICE_PRECISION,
+    MODEL_PRICE_SCALE,
+)
 from contentai.models.schemas.base import InputSchemaBase, SchemaBase
 from contentai.models.schemas.chat import ChatMessageResponse
 
@@ -92,6 +98,7 @@ class ModelConfigurationResponse(SchemaBase):
     id: str | None = None
     version: int | None = None
     provider: str | None = None
+    api_mode: Literal["chat_completions", "responses"] | None = None
     base_url: str | None = None
     model_name: str | None = None
     input_price_per_million_usd: float | None = None
@@ -110,6 +117,7 @@ class ModelConfigurationResponse(SchemaBase):
 class ModelConfigurationProbeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str = Field(max_length=2048)
     api_key: SecretStr | None = Field(default=None, max_length=4096)
     model_name: str | None = Field(default=None, max_length=256)
@@ -129,9 +137,24 @@ class ModelConfigurationUpdateRequest(
     ModelConfigurationProbeRequest,
     ModelRuntimeParameters,
 ):
+    # Keep probe's explicit default separate from updates: legacy clients that
+    # omit this field must not silently change an existing Responses config.
+    api_mode: Literal["chat_completions", "responses"] | None = None
     model_name: str = Field(max_length=256)
-    input_price_per_million_usd: float | None = Field(default=None, ge=0, le=1_000_000)
-    output_price_per_million_usd: float | None = Field(default=None, ge=0, le=1_000_000)
+    input_price_per_million_usd: Decimal | None = Field(
+        default=None,
+        ge=Decimal("0"),
+        le=MODEL_PRICE_MAX_USD,
+        max_digits=MODEL_PRICE_PRECISION,
+        decimal_places=MODEL_PRICE_SCALE,
+    )
+    output_price_per_million_usd: Decimal | None = Field(
+        default=None,
+        ge=Decimal("0"),
+        le=MODEL_PRICE_MAX_USD,
+        max_digits=MODEL_PRICE_PRECISION,
+        decimal_places=MODEL_PRICE_SCALE,
+    )
     expected_version: int = Field(ge=0)
 
 

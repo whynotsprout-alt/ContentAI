@@ -5,7 +5,13 @@ export interface AgentProfile {
   id: string;
   name: string;
   description: string;
-  current_version: AgentVersion | null;
+  current_version: AgentVersionReference | null;
+}
+
+export interface AgentVersionReference {
+  id: string;
+  agent_id: string;
+  version: number;
 }
 
 export interface AgentVersion {
@@ -15,6 +21,18 @@ export interface AgentVersion {
   topic_scoring_prompt: string;
   content_prompt: string;
   hotspot_sources: string[];
+}
+
+export interface AgentProfileDetail {
+  id: string;
+  name: string;
+  description: string;
+  current_version: AgentVersion | null;
+}
+
+export interface AgentProfileListResponse {
+  items: AgentProfile[];
+  next_cursor: string | null;
 }
 
 export interface AgentProfilePayload {
@@ -92,10 +110,25 @@ export interface RunMessage {
 }
 
 export interface SendMessageRequest {
-  agent_id: string;
   message: string;
   message_id?: string;
   idempotency_key?: string;
+}
+
+export interface PublicInterrupt {
+  interrupt_id: string;
+  actions: Array<{
+    tool_name: string;
+    purpose: string;
+    memory?: { type: string; content: string } | null;
+  }>;
+}
+
+export type ResumeDecision = 'approve' | 'reject';
+
+export interface ResumeRunRequest {
+  interrupt_id: string;
+  decision: ResumeDecision;
 }
 
 export interface ChatExecutionInfo {
@@ -103,7 +136,7 @@ export interface ChatExecutionInfo {
   session_id: string;
   status: ExecutionStatus;
   error?: { code: string; message: string; retryable: boolean } | null;
-  interrupt_payload?: Record<string, unknown>;
+  interrupt: PublicInterrupt | null;
   streaming_degraded?: boolean;
   streaming_degraded_reason?: string;
   queue_stage?: 'dispatching' | 'waiting_worker' | 'starting' | null;
@@ -128,12 +161,16 @@ export interface ChatSessionSummary {
   message_count: number;
 }
 
-export interface ChatSessionDetail extends ChatSessionSummary {
-  messages: RunMessage[];
-  latest_execution: ChatExecutionInfo | null;
+export interface ChatSessionListResponse {
+  items: ChatSessionSummary[];
+  next_cursor: string | null;
 }
 
-export type AgentProfileDetail = AgentProfile;
+export interface ChatSessionDetail extends ChatSessionSummary {
+  messages: RunMessage[];
+  next_cursor: string | null;
+  latest_execution: ChatExecutionInfo | null;
+}
 
 function normalizeApiErrorPayload(status: number, payload: unknown, fallback: string) {
   const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
@@ -291,7 +328,19 @@ export class FetchEventStream {
 }
 
 export const api = {
-  agents: () => request<AgentProfile[]>('/api/agents'),
+  agents: (
+    params: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal
+  ) => {
+    const query = new URLSearchParams();
+    if (params.cursor) query.set('cursor', params.cursor);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    const queryString = query.toString();
+    return request<AgentProfileListResponse>(
+      `/api/agents${queryString ? `?${queryString}` : ''}`,
+      { signal }
+    );
+  },
   agent: (agentId: string) => request<AgentProfileDetail>(`/api/agents/${agentId}`),
   createAgent: (payload: AgentProfilePayload) =>
     request<AgentProfileDetail>('/api/agents', {
@@ -310,8 +359,26 @@ export const api = {
     }),
   deleteAgent: (agentId: string) =>
     request<void>(`/api/agents/${agentId}`, { method: 'DELETE' }),
-  sessions: () => request<ChatSessionSummary[]>('/api/chat/sessions'),
-  session: (sessionId: string) => request<ChatSessionDetail>(`/api/chat/sessions/${sessionId}`),
+  sessions: (params: { agent_id?: string; cursor?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.agent_id) query.set('agent_id', params.agent_id);
+    if (params.cursor) query.set('cursor', params.cursor);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    const queryString = query.toString();
+    return request<ChatSessionListResponse>(`/api/chat/sessions${queryString ? `?${queryString}` : ''}`);
+  },
+  session: (
+    sessionId: string,
+    params: { cursor?: string; limit?: number } = {}
+  ) => {
+    const query = new URLSearchParams();
+    if (params.cursor) query.set('cursor', params.cursor);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    const queryString = query.toString();
+    return request<ChatSessionDetail>(
+      `/api/chat/sessions/${sessionId}${queryString ? `?${queryString}` : ''}`
+    );
+  },
   createSession: (payload: { agent_id: string }) =>
     request<{ session_id: string; agent_id: string; agent_version_id: string; title: string }>('/api/chat/sessions', {
       method: 'POST',
@@ -328,7 +395,6 @@ export const api = {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        agent_id: payload.agent_id,
         message: payload.message,
         ...(payload.message_id ? { message_id: payload.message_id } : {}),
         ...(payload.idempotency_key ? { idempotency_key: payload.idempotency_key } : {})
@@ -338,7 +404,7 @@ export const api = {
   executionEvents: (runId: string, afterSequence = 0) =>
     new FetchEventStream(`${API_BASE}/api/chat/runs/${runId}/events?after_sequence=${afterSequence}`),
   runStatus: (runId: string) => request<ChatExecutionInfo>(`/api/chat/runs/${runId}/status`),
-  resumeRun: (runId: string, payload: { agent_id: string; message: string }) =>
+  resumeRun: (runId: string, payload: ResumeRunRequest) =>
     request<ChatExecutionInfo>(`/api/chat/runs/${runId}/resume`, {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -356,6 +422,8 @@ export interface CurrentUser {
   password_changed_at: string;
   created_at: string;
   last_login_at: string | null;
+  must_change_password: boolean;
+  temporary_password_expires_at: string | null;
 }
 
 export interface AdminUser extends CurrentUser {
@@ -422,10 +490,13 @@ export interface AdminUsageBucket {
   average_latency_ms: number | null;
 }
 
+export type AdminModelApiMode = 'chat_completions' | 'responses';
+
 interface AdminModelConfigurationMetadata {
   id?: string | null;
   version?: number | null;
   provider?: string | null;
+  api_mode?: AdminModelApiMode | null;
   base_url?: string | null;
   model_name?: string | null;
   input_price_per_million_usd?: number | null;
@@ -440,6 +511,7 @@ interface AdminModelConfigurationMetadata {
 export type AdminModelConfiguration = AdminModelConfigurationMetadata & (
   | {
     configured: true;
+    api_mode: AdminModelApiMode;
     temperature: number | null;
     context_window_tokens: number;
     chat_max_tokens: number;
@@ -463,12 +535,14 @@ export interface AdminModelProbeResult {
 }
 
 export interface AdminModelProbePayload {
+  api_mode?: AdminModelApiMode;
   base_url: string;
   api_key?: string;
   model_name?: string;
 }
 
-export interface AdminModelUpdatePayload extends AdminModelProbePayload {
+export interface AdminModelUpdatePayload extends Omit<AdminModelProbePayload, 'api_mode'> {
+  api_mode?: AdminModelApiMode;
   model_name: string;
   input_price_per_million_usd: number;
   output_price_per_million_usd: number;
@@ -557,4 +631,3 @@ export const adminApi = {
     return request<{ items: AdminUsageBucket[] }>(`/api/admin/usage?${query}`, { signal });
   }
 };
-

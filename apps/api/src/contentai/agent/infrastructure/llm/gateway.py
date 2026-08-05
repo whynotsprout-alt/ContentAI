@@ -23,11 +23,13 @@ class ModelGateway:
         context_window_tokens: int,
         chat_max_tokens: int,
         structured_max_tokens: int,
+        api_mode: str = "chat_completions",
         client: LangChainChatClient | None = None,
     ) -> None:
         self.model_config_id = model_config_id
         self.base_url = base_url
         self.model_name = model_name
+        self.api_mode = api_mode
         self.temperature = temperature
         self.context_window_tokens = context_window_tokens
         self.chat_max_tokens = chat_max_tokens
@@ -36,6 +38,7 @@ class ModelGateway:
             base_url=base_url,
             api_key=api_key,
             model_name=model_name,
+            api_mode=api_mode,
         )
         self._close_lock = threading.Lock()
         self._token_counter_lock = threading.Lock()
@@ -69,6 +72,8 @@ class ModelGateway:
             temperature=self.temperature,
             max_tokens=self.chat_max_tokens,
             tools=tools or [],
+            # The graph owns the bounded retry policy for streamed agent turns.
+            max_retries=0,
         )
 
     def build_hotspot_filter_model(self) -> Any:
@@ -79,6 +84,7 @@ class ModelGateway:
             temperature=self.temperature,
             max_tokens=self.structured_max_tokens,
             schema=HotspotFilterResult,
+            max_retries=0,
         )
 
     def build_research_final_model(self) -> Any:
@@ -89,6 +95,8 @@ class ModelGateway:
             temperature=self.temperature,
             max_tokens=self.structured_max_tokens,
             schema=ResearchFinalSelection,
+            # Validation repair is the only retry layer for this final selector.
+            max_retries=0,
             disable_streaming=True,
         )
 
@@ -122,7 +130,7 @@ class ModelGateway:
         schema: type[Any],
         *,
         timeout_seconds: float = 240.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
     ) -> Any:
         return self.client.build_structured_output_model(
             model=self.model_name,

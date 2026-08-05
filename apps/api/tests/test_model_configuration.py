@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from decimal import Decimal
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -12,10 +13,13 @@ from model_config_helpers import (
     DEFAULT_MODEL_CONFIG_ID,
     TEST_MODEL_CONFIG_API_KEY,
     model_runtime_parameters,
+    resolve_test_database_url,
 )
 from pydantic import ValidationError
-from sqlalchemy import func, inspect, text
+from sqlalchemy import create_engine, func, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, StatementError
+from sqlalchemy.pool import QueuePool
 from sqlmodel import Session, select
 
 
@@ -48,6 +52,18 @@ def _development_settings(**values: object) -> Settings:
     )
 
 
+def test_test_database_url_is_isolated_per_xdist_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CONTENTAI_TEST_DATABASE_URL",
+        "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test_shared",
+    )
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")
+
+    assert make_url(resolve_test_database_url()).database == "contentai_test_shared_gw3"
+
+
 def test_fernet_roundtrip_and_deterministic_fingerprint() -> None:
     crypto = _crypto_module()
     protector = crypto.ModelConfigurationSecretProtector(_fernet_key(1))
@@ -61,6 +77,86 @@ def test_fernet_roundtrip_and_deterministic_fingerprint() -> None:
         plaintext.encode("utf-8")
     ).hexdigest()
     assert protector.fingerprint(plaintext) == protector.fingerprint(plaintext)
+
+
+def test_update_api_mode_defaults_preserve_existing_configuration() -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+
+    assert (
+        service_module.ModelConfigurationService._resolve_api_mode(
+            SimpleNamespace(api_mode="responses"), None
+        )
+        == "responses"
+    )
+    assert (
+        service_module.ModelConfigurationService._resolve_api_mode(None, None)
+        == "chat_completions"
+    )
+    assert (
+        service_module.ModelConfigurationService._resolve_api_mode(None, "responses")
+        == "responses"
+    )
+
+
+def test_update_without_api_mode_probes_and_persists_the_active_mode() -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+    key = _fernet_key(5)
+    protector = _crypto_module().ModelConfigurationSecretProtector(key)
+    plaintext_key = "existing-provider-key"
+    active = SimpleNamespace(
+        version=7,
+        base_url="https://models.example.test/v1",
+        api_mode="responses",
+        api_key_ciphertext=protector.encrypt(plaintext_key),
+        api_key_fingerprint=protector.fingerprint(plaintext_key),
+        api_key_hint=protector.hint(plaintext_key),
+        input_price_per_million_usd=Decimal("5.000000"),
+        output_price_per_million_usd=Decimal("25.000000"),
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.saved: dict[str, object] = {}
+
+        def get_active(self, _session):
+            return active
+
+        def replace_active(self, _session, **kwargs):
+            self.saved = kwargs
+            return SimpleNamespace(**kwargs)
+
+    class Prober:
+        def __init__(self) -> None:
+            self.api_modes: list[str] = []
+
+        def probe(self, base_url, api_key, model_name, *, api_mode):
+            assert api_key == plaintext_key
+            assert model_name == "selected-model"
+            self.api_modes.append(api_mode)
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    repository = Repository()
+    prober = Prober()
+    service = service_module.ModelConfigurationService(
+        _development_settings(**{"CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": key}),
+        repository=repository,
+        prober=prober,
+    )
+    session = SimpleNamespace(in_transaction=lambda: None)
+
+    service.update(
+        session,
+        actor_user_id="local-user",
+        request_id="request-mode-compat",
+        base_url="https://models.example.test/v1",
+        api_key=None,
+        model_name="selected-model",
+        **model_runtime_parameters(),
+        expected_version=7,
+    )
+
+    assert prober.api_modes == ["responses"]
+    assert repository.saved["api_mode"] == "responses"
 
 
 def test_wrong_fernet_key_fails_closed_without_disclosing_secret() -> None:
@@ -112,9 +208,7 @@ def test_test_settings_accept_explicit_deterministic_model_config_key() -> None:
     settings = Settings(
         _env_file=None,
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database={"url": resolve_test_database_url()},
         **{"CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY": _fernet_key(4)},
     )
 
@@ -235,6 +329,208 @@ def test_model_configuration_persistence_failure_rolls_back_and_hides_parameters
     assert exc_info.value.__cause__ is None
 
 
+def test_model_configuration_probe_uses_an_isolated_preflight_transaction() -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+
+    class Repository:
+        def __init__(self) -> None:
+            self.read_sessions: list[Session] = []
+
+        def get_active(self, read_session):
+            self.read_sessions.append(read_session)
+            read_session.exec(text("SELECT 1")).one()
+            return None
+
+    class Prober:
+        def __init__(self, engine, caller_session, pending) -> None:
+            self.engine = engine
+            self.caller_session = caller_session
+            self.pending = pending
+
+        def probe(self, base_url, _api_key, _model_name):
+            assert self.engine.pool.checkedout() == 0
+            assert self.pending in self.caller_session.new
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    engine = create_engine("sqlite+pysqlite://", poolclass=QueuePool)
+    repository = Repository()
+    try:
+        with Session(engine) as caller_session:
+            pending = _model_class()(
+                version=99,
+                base_url="https://pending.example.test/v1",
+                model_name="pending-model",
+                api_key_ciphertext="pending-ciphertext",
+                api_key_fingerprint="f" * 64,
+                api_key_hint="...test",
+                created_by_user_id="pending-user",
+            )
+            caller_session.add(pending)
+            service = service_module.ModelConfigurationService(
+                get_settings(),
+                repository=repository,
+                prober=Prober(engine, caller_session, pending),
+            )
+
+            result = service.probe(
+                caller_session,
+                base_url="https://models.example.test/v1",
+                api_key="test-only-key",
+                model_name="test-model",
+            )
+
+            assert result.model_validated is True
+            assert repository.read_sessions[0] is not caller_session
+            assert pending in caller_session.new
+            assert caller_session.in_transaction() is not None
+    finally:
+        engine.dispose()
+
+
+def test_update_probe_failure_preserves_caller_pending_writes() -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+    network_module = import_module("contentai.services.model_config_network")
+
+    class Repository:
+        @staticmethod
+        def get_active(read_session):
+            read_session.exec(text("SELECT 1")).one()
+            return None
+
+    class FailingProbe:
+        def __init__(self, engine, caller_session, pending) -> None:
+            self.engine = engine
+            self.caller_session = caller_session
+            self.pending = pending
+
+        def probe(self, _base_url, _api_key, _model_name):
+            assert self.engine.pool.checkedout() == 0
+            assert self.pending in self.caller_session.new
+            raise network_module.ModelProbeFailed("expected test failure")
+
+    engine = create_engine("sqlite+pysqlite://", poolclass=QueuePool)
+    try:
+        with Session(engine) as caller_session:
+            pending = _model_class()(
+                version=99,
+                base_url="https://pending.example.test/v1",
+                model_name="pending-model",
+                api_key_ciphertext="pending-ciphertext",
+                api_key_fingerprint="f" * 64,
+                api_key_hint="...test",
+                created_by_user_id="pending-user",
+            )
+            caller_session.add(pending)
+            service = service_module.ModelConfigurationService(
+                get_settings(),
+                repository=Repository(),
+                prober=FailingProbe(engine, caller_session, pending),
+            )
+
+            with pytest.raises(network_module.ModelProbeFailed):
+                service.update(
+                    caller_session,
+                    actor_user_id="local-user",
+                    request_id="request-test",
+                    base_url="https://models.example.test/v1",
+                    api_key="test-only-key",
+                    model_name="test-model",
+                    **model_runtime_parameters(),
+                    expected_version=0,
+                )
+
+            assert pending in caller_session.new
+            assert caller_session.in_transaction() is not None
+    finally:
+        engine.dispose()
+
+
+def test_legacy_probe_fails_closed_for_responses_mode() -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+    network_module = import_module("contentai.services.model_config_network")
+
+    class Repository:
+        @staticmethod
+        def get_active(_session):
+            return None
+
+    class LegacyProbe:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str | None]] = []
+
+        def probe(self, base_url, api_key, model_name):
+            self.calls.append((base_url, api_key, model_name))
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    prober = LegacyProbe()
+    service = service_module.ModelConfigurationService(
+        get_settings(), repository=Repository(), prober=prober
+    )
+    session = SimpleNamespace()
+
+    chat_result = service.probe(
+        session,
+        base_url="https://models.example.test/v1",
+        api_key="test-only-key",
+        model_name="test-model",
+        api_mode="chat_completions",
+    )
+    with pytest.raises(network_module.ModelProbeFailed):
+        service.probe(
+            session,
+            base_url="https://models.example.test/v1",
+            api_key="test-only-key",
+            model_name="test-model",
+            api_mode="responses",
+        )
+
+    assert chat_result.model_validated is True
+    assert prober.calls == [
+        ("https://models.example.test/v1", "test-only-key", "test-model")
+    ]
+
+
+@pytest.mark.parametrize("signature_kind", ["variadic", "positional_only"])
+def test_probe_requires_explicit_keyword_api_mode_for_responses(signature_kind: str) -> None:
+    service_module = import_module("contentai.services.model_configuration_service")
+    network_module = import_module("contentai.services.model_config_network")
+
+    class Repository:
+        @staticmethod
+        def get_active(_session):
+            return None
+
+    calls: list[str] = []
+
+    class VariadicProbe:
+        @staticmethod
+        def probe(base_url, _api_key, _model_name, **_ignored):
+            calls.append(base_url)
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    class PositionalOnlyProbe:
+        @staticmethod
+        def probe(base_url, _api_key, _model_name, api_mode, /):
+            calls.append(f"{base_url}:{api_mode}")
+            return SimpleNamespace(base_url=base_url, model_validated=True)
+
+    prober = VariadicProbe() if signature_kind == "variadic" else PositionalOnlyProbe()
+    service = service_module.ModelConfigurationService(
+        get_settings(), repository=Repository(), prober=prober
+    )
+
+    with pytest.raises(network_module.ModelProbeFailed):
+        service.probe(
+            SimpleNamespace(),
+            base_url="https://models.example.test/v1",
+            api_key="test-only-key",
+            model_name="test-model",
+            api_mode="responses",
+        )
+
+    assert calls == []
+
+
 def test_model_configuration_serialization_and_repr_exclude_secret_material() -> None:
     model_class = _model_class()
     ciphertext = "ciphertext-must-not-be-serialized"
@@ -261,6 +557,7 @@ def test_model_configuration_metadata_and_execution_snapshot_contract() -> None:
         "id",
         "version",
         "provider",
+        "api_mode",
         "base_url",
         "model_name",
         "input_price_per_million_usd",
@@ -433,6 +730,7 @@ def test_postgres_allows_multiple_inactive_model_configurations() -> None:
         ({"id": "second-active", "version": 210, "is_active": True}, "active"),
         ({"id": "duplicate-version", "version": 1}, "version"),
         ({"id": "invalid-provider", "provider": "unsupported"}, "provider"),
+        ({"id": "invalid-api-mode", "api_mode": "auto"}, "api_mode"),
         ({"id": "invalid-fingerprint", "api_key_fingerprint": "short"}, "fingerprint"),
         ({"id": "invalid-creator", "created_by_user_id": "missing-user"}, "creator"),
         ({"id": "temperature-low", "temperature": -0.01}, "temperature"),

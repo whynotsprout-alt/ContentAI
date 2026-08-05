@@ -20,7 +20,7 @@ from contentai.agent.runtime.container import RuntimeContainer
 from contentai.agent.workflows.deep_research import DeepResearchResult
 from contentai.agent.workflows.final_evidence import build_supported_research_evidence
 from contentai.api.app import create_app
-from contentai.api.chat import _stream_channel, _stream_exception_payload
+from contentai.api.chat import _stream_channel, _stream_exception_payload, replay_run_events
 from contentai.api.chat import router as chat_router
 from contentai.core.config import Settings, get_settings
 from contentai.core.security import AuthContext, authenticate_request
@@ -49,20 +49,34 @@ from contentai.services.agent_service import AgentService
 from contentai.services.checkpoint_deletion import drain_checkpoint_deletion_outbox
 from contentai.services.conversation_service import ConversationService
 from contentai.services.errors import (
+    InvalidStreamCursorError,
     StreamingDegradedError,
     StreamReplayExpiredError,
     StreamReplayGapError,
 )
 from contentai.services.execution_claim import claim_execution
 from direct_dispatcher import DirectDispatcher
+from fastapi import HTTPException
 from langchain_core.messages import AIMessage
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, resolve_test_database_url
 from sqlalchemy import event, text
 from sqlmodel import Session, select
 
 _TEST_RUNTIME: RuntimeContainer | None = None
 app = create_app(execution_dispatcher_factory=DirectDispatcher)
 app.dependency_overrides[authenticate_request] = default_test_auth_context
+
+
+@pytest.fixture(autouse=True)
+def isolate_llm_rate_limit_namespace() -> Iterator[None]:
+    """Keep Redis-backed LLM limits from leaking across integration tests."""
+    settings = app.state.settings
+    original_prefix = settings.redis.rate_limit_prefix
+    settings.redis.rate_limit_prefix = f"{original_prefix}:test:{time.monotonic_ns()}"
+    try:
+        yield
+    finally:
+        settings.redis.rate_limit_prefix = original_prefix
 
 
 def account_payload(
@@ -101,9 +115,7 @@ def auth_test_app():
     test_app = create_app(
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": resolve_test_database_url()},
         ),
         runtime=_TEST_RUNTIME,
         execution_dispatcher_factory=DirectDispatcher,
@@ -304,7 +316,6 @@ def claim_pending_execution(
         service,
         execution_id,
         worker_id,
-        use_lease=False,
     )
     assert claimed is not None
     return execution_id, claimed
@@ -322,6 +333,7 @@ def run_claimed_execution(
             runner_session,
             execution_id=execution_id,
             worker_id=claimed.worker_id,
+            attempt_id=claimed.attempt_id,
             auth=claimed.auth,
             tool_permissions=claimed.auth.tool_permissions,
             turn_context=claimed.turn_context,
@@ -489,8 +501,8 @@ def test_accounts_are_isolated_by_user():
             headers=auth_headers(user_id="other-user"),
         )
 
-    assert account_id in [account["id"] for account in owner_list.json()]
-    assert other_list.json() == []
+    assert account_id in [account["id"] for account in owner_list.json()["items"]]
+    assert other_list.json() == {"items": [], "next_cursor": None}
     assert other_get.status_code == 404
     assert other_update.status_code == 404
     assert other_delete.status_code == 404
@@ -707,7 +719,7 @@ def test_auth_filters_agents_by_allowed_agent_ids():
 
     assert listed.status_code == 200
 
-    assert [account["id"] for account in listed.json()] == ["default-agent"]
+    assert [account["id"] for account in listed.json()["items"]] == ["default-agent"]
 
     assert forbidden.status_code == 403
 
@@ -933,6 +945,7 @@ def test_preflight_uses_existing_summary_before_creating_a_turn():
                 user_id="local-user",
                 session_id=chat["session_id"],
             )
+            db_session.commit()
 
         conversation_service = app.state.conversation_service
         dispatcher = conversation_service.execution_dispatcher
@@ -1655,6 +1668,41 @@ def test_stream_recovery_errors_keep_stable_degradation_codes() -> None:
     assert _stream_exception_payload(StreamReplayExpiredError("expired"))["code"] == (
         "STREAM_REPLAY_EXPIRED"
     )
+    assert _stream_exception_payload(InvalidStreamCursorError("future"))["code"] == (
+        "INVALID_STREAM_CURSOR"
+    )
+
+
+def test_event_endpoint_rejects_invalid_cursor_before_streaming_response() -> None:
+    class FakeService:
+        @staticmethod
+        def get_execution_status(_session, execution_id, _auth):
+            return SimpleNamespace(id=execution_id, session_id="session-1")
+
+        @staticmethod
+        def validate_execution_event_cursor(
+            _session,
+            _execution_id,
+            _auth,
+            *,
+            after_sequence,
+        ):
+            assert after_sequence == 999
+            raise InvalidStreamCursorError("cursor is after latest sequence")
+
+    with pytest.raises(HTTPException) as caught:
+        replay_run_events(
+            "execution-1",
+            SimpleNamespace(),
+            None,
+            SimpleNamespace(request_id="request-1"),
+            FakeService(),
+            last_event_id="999",
+            after_sequence=None,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == "INVALID_STREAM_CURSOR"
 
 
 def test_session_message_count_includes_persisted_conversation_messages():
@@ -2721,6 +2769,7 @@ def test_claim_rejects_tampered_tool_call_hash_as_stable_stale_interrupt(
             f"/api/chat/sessions/{chat['session_id']}/messages",
             json={"message": "protect this approval"},
         )
+        assert started.status_code == 202, started.text
         waiting = wait_for_terminal_session(client, chat["session_id"])
         interrupt_id = waiting["latest_execution"]["interrupt"]["interrupt_id"]
         dispatcher = app.state.conversation_service.execution_dispatcher
@@ -2843,7 +2892,6 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                 service,
                 execution_id,
                 f"fault-setup-{fault_window}",
-                use_lease=False,
             )
             assert initial_claim is not None
             with Session(get_engine()) as setup_session:
@@ -2851,6 +2899,7 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                     setup_session,
                     execution_id=execution_id,
                     worker_id=initial_claim.worker_id,
+                    attempt_id=initial_claim.attempt_id,
                     auth=initial_claim.auth,
                     tool_permissions=initial_claim.auth.tool_permissions,
                     turn_context=initial_claim.turn_context,
@@ -2887,7 +2936,6 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                     service,
                     execution_id,
                     f"fault-worker-{delivery}",
-                    use_lease=False,
                 )
                 assert claimed is not None
                 real_deliveries += 1
@@ -2905,12 +2953,14 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
                             db_session,
                             execution_id=execution_id,
                             worker_id=claimed.worker_id,
+                            attempt_id=claimed.attempt_id,
                             auth=claimed.auth,
                             tool_permissions=claimed.auth.tool_permissions,
                             turn_context=claimed.turn_context,
                             resume_value=claimed.resume_value,
                             resume_request_id=claimed.resume_request_id,
                             continue_from_checkpoint=claimed.continue_from_checkpoint,
+                            checkpoint_id=claimed.checkpoint_id,
                             event_writer=event_writer,
                         )
                     except SystemExit:
@@ -3011,10 +3061,14 @@ def test_fault_windows_redeliver_three_times_and_converge_exactly_once(
         execution_id=execution_id,
     ) == []
     event_names = [name for name, _payload in event_writer.events]
+    # This fake records raw publication attempts. In the commit fault window,
+    # Redis-ahead frames are intentionally possible; replay visibility is fenced by
+    # the durable committed watermark (covered by test_event_stream.py).
+    terminal_publish_attempts = 3 if fault_window == "before_terminal_commit" else 1
     assert event_names.count("tool_end") == 1
-    assert event_names.count("assistant_message") == 1
-    assert event_names.count("message_finish") == 1
-    assert event_names.count("run_finish") == 1
+    assert event_names.count("assistant_message") == terminal_publish_attempts
+    assert event_names.count("message_finish") == terminal_publish_attempts
+    assert event_names.count("run_finish") == terminal_publish_attempts
 
 
 @pytest.mark.parametrize(
@@ -3053,7 +3107,6 @@ def test_runner_does_not_revive_execution_cancelled_after_claim(
                 service,
                 execution_id,
                 f"linearization-worker-{transition}",
-                use_lease=False,
             )
             assert claimed is not None
 
@@ -3100,6 +3153,7 @@ def test_runner_does_not_revive_execution_cancelled_after_claim(
                         runner_session,
                         execution_id=execution_id,
                         worker_id=claimed.worker_id,
+                        attempt_id=claimed.attempt_id,
                         auth=claimed.auth,
                         tool_permissions=claimed.auth.tool_permissions,
                         turn_context=claimed.turn_context,
@@ -3401,13 +3455,13 @@ def test_waiting_input_stale_worker_does_not_project_cancellation_over_terminal_
     )
 
 
-def test_waiting_input_state_and_attempt_commit_before_event_projection(
+def test_waiting_input_settlement_rolls_back_when_event_projection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _CrashingWriter:
         def emit(self, event_name: str, _payload: dict[str, Any]) -> None:
             if event_name == "attempt_end":
-                raise SystemExit("crash after waiting-input commit")
+                raise SystemExit("crash before waiting-input commit")
 
     interrupt_payload = {
         "interrupts": [
@@ -3425,16 +3479,27 @@ def test_waiting_input_state_and_attempt_commit_before_event_projection(
             message="waiting transition must be atomic",
             worker_id="waiting-atomic-worker",
         )
-        monkeypatch.setattr(
-            service.runner.execution_engine,
-            "run_turn",
-            lambda **_kwargs: SimpleNamespace(
+
+        def persist_before_interrupt(**kwargs: Any) -> Any:
+            service.runner.execution_engine.message_persister.persist_assistant_text(
+                kwargs["db_session"],
+                session_id=kwargs["chat"].id,
+                invocation_id=kwargs["invocation"].id,
+                execution_id=kwargs["execution"].id,
+                content="must roll back with waiting settlement",
+            )
+            return SimpleNamespace(
                 interrupt_payload=interrupt_payload,
                 assistant_message=None,
                 streamed_assistant_text="",
-            ),
+            )
+
+        monkeypatch.setattr(
+            service.runner.execution_engine,
+            "run_turn",
+            persist_before_interrupt,
         )
-        with pytest.raises(SystemExit, match="crash after waiting-input commit"):
+        with pytest.raises(SystemExit, match="crash before waiting-input commit"):
             run_claimed_execution(
                 service=service,
                 execution_id=execution_id,
@@ -3445,14 +3510,29 @@ def test_waiting_input_state_and_attempt_commit_before_event_projection(
     with Session(get_engine()) as verification_session:
         execution = verification_session.get(AgentExecution, execution_id)
         assert execution is not None
-        assert execution.status == RunStatus.waiting_input
+        assert execution.status == RunStatus.running
+        assert execution.worker_id == claimed.worker_id
+        assert execution.current_attempt_id == claimed.attempt_id
+        assert execution.lease_expires_at is not None
+        assert execution.interrupt_payload == {}
+        assert execution.stream_committed_sequence == 0
+        assert execution.terminal_stream_sequence is None
+        assert execution.terminal_stream_attempt_id is None
+        assert execution.terminal_stream_status is None
+        assistant_messages = verification_session.exec(
+            select(ChatMessage).where(
+                ChatMessage.execution_id == execution_id,
+                ChatMessage.role == MessageRole.assistant,
+            )
+        ).all()
+        assert assistant_messages == []
         attempt = verification_session.get(
             AgentExecutionAttempt,
             execution.current_attempt_id,
         )
         assert attempt is not None
-        assert attempt.status == ExecutionAttemptStatus.waiting_input
-        assert attempt.finished_at is not None
+        assert attempt.status == ExecutionAttemptStatus.running
+        assert attempt.finished_at is None
 
 
 def test_generic_failure_after_assistant_flush_rolls_back_message(
@@ -3478,7 +3558,6 @@ def test_generic_failure_after_assistant_flush_rolls_back_message(
                 invocation_id=kwargs["invocation"].id,
                 execution_id=kwargs["execution"].id,
                 content="must not survive generic failure",
-                event_writer=kwargs["event_writer"],
             )
             raise RuntimeError("generic failure after flush")
 
@@ -3543,12 +3622,12 @@ def test_postcommit_projection_failure_does_not_rewrite_completed_execution(
                 invocation_id=kwargs["invocation"].id,
                 execution_id=kwargs["execution"].id,
                 content="completed before projection",
-                event_writer=kwargs["event_writer"],
             )
             return SimpleNamespace(
                 interrupt_payload=None,
                 assistant_message=assistant,
                 streamed_assistant_text="",
+                pending_events=[],
             )
 
         monkeypatch.setattr(
@@ -3811,7 +3890,6 @@ def test_cancel_after_assistant_flush_rolls_back_final_message(
                 service,
                 execution_id,
                 "cancel-after-flush-worker",
-                use_lease=False,
             )
             assert claimed is not None
 
@@ -3822,7 +3900,6 @@ def test_cancel_after_assistant_flush_rolls_back_final_message(
                     invocation_id=kwargs["invocation"].id,
                     execution_id=kwargs["execution"].id,
                     content="must roll back",
-                    event_writer=kwargs["event_writer"],
                 )
                 with Session(get_engine()) as cancelling_session:
                     execution = cancelling_session.get(AgentExecution, execution_id)
@@ -3847,6 +3924,7 @@ def test_cancel_after_assistant_flush_rolls_back_final_message(
                     runner_session,
                     execution_id=execution_id,
                     worker_id=claimed.worker_id,
+                    attempt_id=claimed.attempt_id,
                     auth=claimed.auth,
                     tool_permissions=claimed.auth.tool_permissions,
                     turn_context=claimed.turn_context,
@@ -3914,7 +3992,6 @@ def test_completed_execution_persists_postprocess_outbox_before_dispatch(
                 service,
                 execution_id,
                 "atomic-postprocess-worker",
-                use_lease=False,
             )
             assert claimed is not None
 
@@ -3926,12 +4003,12 @@ def test_completed_execution_persists_postprocess_outbox_before_dispatch(
                     invocation_id=kwargs["invocation"].id,
                     execution_id=kwargs["execution"].id,
                     content="atomic final answer",
-                    event_writer=kwargs["event_writer"],
                 )
                 return SimpleNamespace(
                     interrupt_payload=None,
                     assistant_message=assistant,
                     streamed_assistant_text="",
+                    pending_events=(),
                 )
 
             def crash_before_dispatch(**_kwargs: Any) -> None:
@@ -3949,6 +4026,7 @@ def test_completed_execution_persists_postprocess_outbox_before_dispatch(
                         runner_session,
                         execution_id=execution_id,
                         worker_id=claimed.worker_id,
+                        attempt_id=claimed.attempt_id,
                         auth=claimed.auth,
                         tool_permissions=claimed.auth.tool_permissions,
                         turn_context=claimed.turn_context,

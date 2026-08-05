@@ -76,6 +76,9 @@ class ToolRuntimeContext:
     topic_scoring_prompt: str = ""
     hotspot_filter_model: Any | None = None
     research_model_gateway: Any | None = None
+    # Engine selected by the owning runtime. Durable tool writes must not fall
+    # back to process-global settings when an app uses an explicit database.
+    database_engine: Any | None = None
     model_usage_callback_factory: Callable[[str], Iterable[Any]] | None = None
     event_writer: Any | None = None
     tool_policies: dict[str, dict[str, Any]] = field(default_factory=dict)

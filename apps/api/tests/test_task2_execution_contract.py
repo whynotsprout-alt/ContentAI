@@ -6,6 +6,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import contentai.services.conversation_service as conversation_service_module
 import contentai.services.errors as service_errors
 import contentai.services.execution_resume as execution_resume_module
 import pytest
@@ -20,13 +21,18 @@ from contentai.agent.runtime.checkpoint import (
 )
 from contentai.agent.runtime.container import RuntimeContainer
 from contentai.agent.tools.memory import normalize_remember_input, remember
-from contentai.api.chat import _encode_sse_event, _public_stream_data, _to_stream_event_v3
+from contentai.api.chat import (
+    _encode_sse_event,
+    _http_exception_for_service_error,
+    _public_stream_data,
+    _to_stream_event_v3,
+)
 from contentai.core.config import get_settings
 from contentai.core.security import AuthContext
 from contentai.db.session import get_engine
 from contentai.memory.long_term import is_sensitive_memory
 from contentai.memory.message_persister import MessagePersister
-from contentai.models.base import utcnow
+from contentai.models.base import new_id, utcnow
 from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
@@ -43,6 +49,7 @@ from contentai.services.conversation_service import ConversationService
 from contentai.services.errors import (
     ChatSessionNotFoundError,
     IdempotencyPayloadMismatchError,
+    MessageAlreadyExistsError,
     RunInterruptStaleError,
 )
 from contentai.services.execution_claim import claim_execution
@@ -55,6 +62,7 @@ from langgraph.types import interrupt
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from pydantic import ValidationError
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 
@@ -784,6 +792,139 @@ def _seed_chat(session: Session, *, suffix: str) -> ChatSession:
     return chat
 
 
+def test_create_turn_does_not_translate_non_integrity_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _conversation_service()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    with Session(get_engine()) as session:
+        chat = _seed_chat(session, suffix="commit-runtime-error")
+
+        original_rollback = session.rollback
+        rollback_calls = 0
+
+        def fail_commit() -> None:
+            raise RuntimeError("database unavailable")
+
+        def track_rollback() -> None:
+            nonlocal rollback_calls
+            rollback_calls += 1
+            original_rollback()
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+        monkeypatch.setattr(session, "rollback", track_rollback)
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            service.create_turn(
+                session,
+                AgentMessageRequest(
+                    session_id=chat.id,
+                    message="commit failure should remain visible",
+                ),
+                auth,
+            )
+        assert rollback_calls == 1
+
+
+def test_create_turn_maps_reused_client_message_id_to_stable_conflict() -> None:
+    service = _conversation_service()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    with Session(get_engine()) as session:
+        chat = _seed_chat(session, suffix="duplicate-message-id")
+        first, replayed = service.create_turn(
+            session,
+            AgentMessageRequest(
+                session_id=chat.id,
+                message="first message",
+                message_id="client-duplicate-message-id",
+            ),
+            auth,
+        )
+        assert replayed is False
+        execution = session.get(AgentExecution, first.execution_id)
+        assert execution is not None
+        execution.status = RunStatus.completed
+        session.add(execution)
+        session.commit()
+
+        with pytest.raises(MessageAlreadyExistsError, match="already in use"):
+            service.create_turn(
+                session,
+                AgentMessageRequest(
+                    session_id=chat.id,
+                    message="different message",
+                    message_id="client-duplicate-message-id",
+                ),
+                auth,
+            )
+
+        # The service rolled back the failed flush/commit, so callers can
+        # immediately reuse the same Session for another query.
+        assert session.get(ChatSession, chat.id) is not None
+
+
+def test_create_turn_rolls_back_non_message_integrity_failure_without_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _conversation_service()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    duplicate_invocation_id = "duplicate-invocation-id"
+    message_id = "message-for-invocation-conflict"
+
+    with Session(get_engine()) as seed_session:
+        chat = _seed_chat(seed_session, suffix="duplicate-invocation-id")
+        chat_id = chat.id
+        seed_session.add(
+            AgentInvocation(
+                id=duplicate_invocation_id,
+                session_id=chat_id,
+                agent_id=chat.agent_id,
+                user_id=auth.user_id,
+            )
+        )
+        seed_session.commit()
+
+    def controlled_new_id(prefix: str) -> str:
+        if prefix == "inv":
+            return duplicate_invocation_id
+        return new_id(prefix)
+
+    monkeypatch.setattr(conversation_service_module, "new_id", controlled_new_id)
+
+    with Session(get_engine()) as session:
+        with pytest.raises(IntegrityError) as caught:
+            service.create_turn(
+                session,
+                AgentMessageRequest(
+                    session_id=chat_id,
+                    message="preserve the original database error",
+                    message_id=message_id,
+                ),
+                auth,
+            )
+
+        assert service._integrity_constraint_name(caught.value) == "agentinvocation_pkey"
+        # The aggregate flush failed before the message insert. Rollback still
+        # restores the caller-owned Session and preserves the original row.
+        assert session.get(AgentInvocation, duplicate_invocation_id) is not None
+        assert session.get(ChatMessage, message_id) is None
+
+
+def test_message_already_exists_maps_to_stable_http_conflict() -> None:
+    response = _http_exception_for_service_error(
+        MessageAlreadyExistsError("The message_id is already in use."),
+        request_id="request-message-conflict",
+        session_id="session-message-conflict",
+    )
+
+    assert response.status_code == 409
+    assert response.detail == {
+        "code": "MESSAGE_ALREADY_EXISTS",
+        "message": "The message_id is already in use.",
+        "request_id": "request-message-conflict",
+        "session_id": "session-message-conflict",
+    }
+
+
 def test_execution_lineage_locks_owned_session_and_derives_all_identity() -> None:
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix="lineage")
@@ -864,6 +1005,70 @@ def test_idempotency_key_is_bound_to_normalized_request_payload() -> None:
                 auth,
                 idempotency_key="digest-key",
             )
+
+
+def test_idempotency_replay_keeps_original_message_after_approval() -> None:
+    service = _conversation_service()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    with Session(get_engine()) as session:
+        chat = _seed_chat(session, suffix="approval-idempotency-replay")
+        payload = AgentMessageRequest(
+            session_id=chat.id,
+            message="remember this after approval",
+            message_id="client-message-approval-replay",
+        )
+        first, replayed = service.create_turn(
+            session,
+            payload,
+            auth,
+            idempotency_key="approval-replay-key",
+        )
+        assert replayed is False
+
+        execution = session.get(AgentExecution, first.execution_id)
+        assert execution is not None
+        execution.status = RunStatus.waiting_input
+        execution.interrupt_payload = {
+            "interrupts": [
+                {
+                    "id": "interrupt-approval-replay",
+                    "value": {
+                        "tool_calls": [
+                            {
+                                "name": "remember",
+                                "id": "call-approval-replay",
+                                "args": {"content": "remember this after approval"},
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+        session.add(execution)
+        session.commit()
+
+        service.resume_execution(
+            session,
+            execution.id,
+            "interrupt-approval-replay",
+            "approve",
+            auth,
+        )
+        decision_message = session.exec(
+            select(ChatMessage).where(ChatMessage.execution_id == execution.id)
+        ).one()
+
+        replay, was_replayed = service.create_turn(
+            session,
+            payload,
+            auth,
+            idempotency_key="approval-replay-key",
+        )
+
+        assert was_replayed is True
+        assert replay.message_id == first.message_id
+        assert replay.message_id != decision_message.id
+        assert replay.execution_id == first.execution_id
 
 
 def test_historical_key_without_digest_is_not_replayable() -> None:
@@ -1067,10 +1272,6 @@ def test_real_postgres_checkpoint_namespace_hides_old_interrupt_from_new_executi
 
 
 def test_final_assistant_materialization_insert_or_reads_one_execution_message() -> None:
-    class _Writer:
-        def emit(self, _event: str, _payload: dict[str, Any]) -> None:
-            raise AssertionError("message events must be emitted only after the terminal commit")
-
     with Session(get_engine()) as session:
         chat = _seed_chat(session, suffix="assistant-once")
         invocation = AgentInvocation(
@@ -1096,7 +1297,6 @@ def test_final_assistant_materialization_insert_or_reads_one_execution_message()
             invocation_id=invocation.id,
             execution_id=execution.id,
             content="checkpoint final",
-            event_writer=_Writer(),
         )
         second = persister.persist_assistant_text(
             session,
@@ -1104,7 +1304,6 @@ def test_final_assistant_materialization_insert_or_reads_one_execution_message()
             invocation_id=invocation.id,
             execution_id=execution.id,
             content="must not replace checkpoint final",
-            event_writer=_Writer(),
         )
         session.commit()
 

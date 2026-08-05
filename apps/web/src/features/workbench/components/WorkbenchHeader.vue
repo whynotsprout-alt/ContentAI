@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
   Bot,
   Check,
@@ -32,6 +32,7 @@ const agentMenuOpen = ref(false);
 const userMenuOpen = ref(false);
 const highlighted = ref(0);
 const agentButton = ref<HTMLButtonElement | null>(null);
+const userButton = ref<HTMLButtonElement | null>(null);
 
 const selectedAgent = computed(() => props.agents.find((agent) => agent.id === props.activeAgentId));
 
@@ -39,6 +40,29 @@ function toggleAgentMenu() {
   userMenuOpen.value = false;
   agentMenuOpen.value = !agentMenuOpen.value;
   highlighted.value = Math.max(0, props.agents.findIndex((agent) => agent.id === props.activeAgentId));
+}
+
+function closeMenus(restoreFocus = false) {
+  const restoreAgent = restoreFocus && agentMenuOpen.value;
+  const restoreUser = restoreFocus && userMenuOpen.value;
+  agentMenuOpen.value = false;
+  userMenuOpen.value = false;
+  if (restoreAgent || restoreUser) {
+    void nextTick(() => (restoreAgent ? agentButton.value : userButton.value)?.focus());
+  }
+}
+
+function onDocumentPointerDown(event: PointerEvent) {
+  const target = event.target;
+  if (target instanceof Node && (target as Element).closest('.header-popover')) return;
+  closeMenus();
+}
+
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && (agentMenuOpen.value || userMenuOpen.value)) {
+    event.preventDefault();
+    closeMenus(true);
+  }
 }
 
 function choose(agentId: string) {
@@ -52,8 +76,7 @@ function onAgentKeydown(event: KeyboardEvent) {
   if (!agentMenuOpen.value || !props.agents.length) return;
   if (event.key === 'Escape') {
     event.preventDefault();
-    agentMenuOpen.value = false;
-    agentButton.value?.focus();
+    closeMenus(true);
   } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
     const direction = event.key === 'ArrowDown' ? 1 : -1;
@@ -64,6 +87,31 @@ function onAgentKeydown(event: KeyboardEvent) {
     if (agent) choose(agent.id);
   }
 }
+
+function onUserKeydown(event: KeyboardEvent) {
+  if (!userMenuOpen.value) return;
+  const items = Array.from(document.querySelectorAll<HTMLElement>('#user-menu [role="menuitem"]'));
+  if (!items.length) return;
+  const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1 + items.length) % items.length;
+  else if (event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + items.length) % items.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = items.length - 1;
+  else return;
+  event.preventDefault();
+  items[nextIndex]?.focus();
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocumentPointerDown);
+  document.addEventListener('keydown', onDocumentKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocumentPointerDown);
+  document.removeEventListener('keydown', onDocumentKeydown);
+});
 </script>
 
 <template>
@@ -89,8 +137,11 @@ function onAgentKeydown(event: KeyboardEvent) {
           class="agent-picker-button"
           data-agent-manager-trigger
           type="button"
+          role="combobox"
           :aria-expanded="agentMenuOpen"
           aria-haspopup="listbox"
+          aria-controls="agent-options-list"
+          :aria-activedescendant="agentMenuOpen && agents[highlighted] ? `agent-option-${agents[highlighted].id}` : undefined"
           :disabled="switching || !agents.length"
           @click="toggleAgentMenu"
         >
@@ -98,31 +149,35 @@ function onAgentKeydown(event: KeyboardEvent) {
           <span class="agent-picker-label">{{ selectedAgent?.name ?? (agents.length ? '选择内容账号' : '尚未创建账号') }}</span>
           <ChevronDown :size="15" />
         </button>
-        <div v-if="agentMenuOpen" class="popover-menu agent-options" role="listbox" aria-label="选择内容账号">
-          <button
-            v-for="(agent, index) in agents"
-            :key="agent.id"
-            type="button"
-            role="option"
-            :aria-selected="agent.id === activeAgentId"
-            :class="{ highlighted: highlighted === index }"
-            @mouseenter="highlighted = index"
-            @click="choose(agent.id)"
-          >
-            <span><strong>{{ agent.name }}</strong><small>{{ agent.description || '未填写账号定位' }}</small></span>
-            <Check v-if="agent.id === activeAgentId" :size="15" />
-          </button>
+        <div v-if="agentMenuOpen" class="popover-menu agent-options">
+          <div id="agent-options-list" role="listbox" aria-label="选择内容账号">
+            <button
+              v-for="(agent, index) in agents"
+              :key="agent.id"
+              :id="`agent-option-${agent.id}`"
+              type="button"
+              role="option"
+              tabindex="-1"
+              :aria-selected="agent.id === activeAgentId"
+              :class="{ highlighted: highlighted === index }"
+              @mouseenter="highlighted = index"
+              @click="choose(agent.id)"
+            >
+              <span><strong>{{ agent.name }}</strong><small>{{ agent.description || '未填写账号定位' }}</small></span>
+              <Check v-if="agent.id === activeAgentId" :size="15" />
+            </button>
+          </div>
           <button class="menu-secondary" data-agent-manager-trigger type="button" @click="agentMenuOpen = false; emit('openAgents')">
             <Settings :size="15" /> 管理内容账号
           </button>
         </div>
       </div>
 
-      <div class="header-popover" @keydown.esc="userMenuOpen = false">
-        <button class="user-menu-button" type="button" :aria-expanded="userMenuOpen" aria-haspopup="menu" @click="userMenuOpen = !userMenuOpen; agentMenuOpen = false">
+      <div class="header-popover" @keydown="onUserKeydown" @keydown.esc="closeMenus(true)">
+        <button ref="userButton" class="user-menu-button" type="button" aria-label="打开用户菜单" title="用户菜单" :aria-expanded="userMenuOpen" aria-haspopup="menu" aria-controls="user-menu" @click="userMenuOpen = !userMenuOpen; agentMenuOpen = false">
           {{ userEmail.slice(0, 1).toUpperCase() }}
         </button>
-        <div v-if="userMenuOpen" class="popover-menu user-menu" role="menu">
+        <div v-if="userMenuOpen" id="user-menu" class="popover-menu user-menu" role="menu">
           <span class="user-email">{{ userEmail }}</span>
           <button type="button" role="menuitem" @click="userMenuOpen = false; emit('changePassword')"><KeyRound :size="15" /> 修改密码</button>
           <button type="button" role="menuitem" @click="userMenuOpen = false; emit('logout')"><LogOut :size="15" /> 退出登录</button>

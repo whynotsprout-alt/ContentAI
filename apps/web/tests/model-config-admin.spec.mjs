@@ -88,6 +88,7 @@ const configuredModel = (overrides = {}) => ({
   id: 'model-config-v1',
   version: 1,
   provider: 'openai_compatible',
+  api_mode: 'chat_completions',
   base_url: 'https://models.example.test/v1',
   model_name: 'model-v1',
   api_key_hint: 'key-…v1',
@@ -139,6 +140,9 @@ describe('admin model configuration', () => {
 
     expect(configuration).toContain('configured: true;');
     expect(configuration).toContain('configured: false;');
+    expect(configuration).toContain('api_mode: AdminModelApiMode;');
+    expect(probePayload).toContain('api_mode?: AdminModelApiMode;');
+    expect(updatePayload).toContain('api_mode?: AdminModelApiMode;');
     expect(configuration).toMatch(/\n\s*temperature: number \| null;/);
     expect(updatePayload).toMatch(/\n\s*temperature: number \| null;/);
     for (const field of ['context_window_tokens', 'chat_max_tokens', 'structured_max_tokens']) {
@@ -156,6 +160,7 @@ describe('admin model configuration', () => {
     }
     expect(guard).toContain('inputPrice?: string;');
     expect(guard).toContain('outputPrice?: string;');
+    expect(guard).toContain('apiMode?: AdminModelApiMode;');
   });
 
   it('keeps runtime and prices in save signatures but outside connection probe signatures', async () => {
@@ -262,6 +267,7 @@ describe('admin model configuration', () => {
       await state.saveConfiguration();
 
       expect(update).toHaveBeenCalledWith({
+        api_mode: 'chat_completions',
         base_url: 'https://models.example.test/v1',
         model_name: 'model-v1',
         input_price_per_million_usd: 6,
@@ -274,6 +280,26 @@ describe('admin model configuration', () => {
       });
       expect(state.active.version).toBe(2);
       expect(state.temperatureMode).toBe('auto');
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it('keeps an existing Responses API mode when saving the loaded configuration', async () => {
+    const { adminApi } = await import('../src/shared/services/api.ts');
+    vi.spyOn(adminApi, 'modelConfig').mockResolvedValue(
+      configuredModel({ api_mode: 'responses' })
+    );
+    const update = vi.spyOn(adminApi, 'updateModelConfig').mockResolvedValue(
+      configuredModel({ api_mode: 'responses', version: 2 })
+    );
+    const { app, state } = await mountAdminModels();
+
+    try {
+      await state.saveConfiguration();
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({ api_mode: 'responses' })
+      );
     } finally {
       app.unmount();
     }

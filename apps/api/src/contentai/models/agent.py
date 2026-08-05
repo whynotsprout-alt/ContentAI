@@ -14,6 +14,7 @@ class AgentProfile(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="ux_agentprofile_user_name"),
         Index("ux_agentprofile_id_user", "id", "user_id", unique=True),
+        Index("ix_agentprofile_user_created_id", "user_id", "created_at", "id"),
         Index("ix_agentprofile_user_updated", "user_id", "updated_at"),
     )
 

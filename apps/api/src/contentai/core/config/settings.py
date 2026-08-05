@@ -95,7 +95,6 @@ class Settings(BaseSettings):
             raise ValueError("CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS must be at least 1.")
 
         self._validate_database_pool()
-        self._validate_llm()
         self._validate_logging()
         self._validate_agent()
         self._validate_redis()
@@ -154,14 +153,6 @@ class Settings(BaseSettings):
                 "CONTENTAI_AGENT__WORKER_CONCURRENCY."
             )
         validate_connection_budget(self.database)
-
-    def _validate_llm(self) -> None:
-        if self.llm.context_window_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__CONTEXT_WINDOW_TOKENS must be greater than 0.")
-        if self.llm.chat_max_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__CHAT_MAX_TOKENS must be greater than 0.")
-        if self.llm.structured_max_tokens < 1:
-            raise ValueError("CONTENTAI_LLM__STRUCTURED_MAX_TOKENS must be greater than 0.")
 
     def _validate_logging(self) -> None:
         import logging

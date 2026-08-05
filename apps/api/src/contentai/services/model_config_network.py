@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, TypeVar
+from typing import Any
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 import httpx
@@ -21,11 +21,10 @@ MAX_MODEL_ID_LENGTH = 256
 MAX_PROBE_RESPONSE_BYTES = 256 * 1024
 MAX_PROBE_LATENCY_MS = 60_000
 DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS = 3.0
-_ASYNC_RESOLVER_MAX_WORKERS = 4
-_ASYNC_RESOLVER_MAX_QUEUE_SIZE = 8
+_RESOLVER_MAX_WORKERS = 4
+_RESOLVER_MAX_QUEUE_SIZE = 8
 
 Resolver = Callable[[str, int], Sequence[str]]
-_Result = TypeVar("_Result")
 
 _IPV4_ENTERPRISE_NETWORKS = tuple(
     ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -70,16 +69,16 @@ class _BoundedResolverExecutor:
         for thread in self._threads:
             thread.start()
 
-    def submit(
+    def submit[ResultT](
         self,
-        call: Callable[..., _Result],
+        call: Callable[..., ResultT],
         /,
         *args: Any,
         **kwargs: Any,
-    ) -> Future[_Result]:
+    ) -> Future[ResultT]:
         if not self._slots.acquire(blocking=False):
             raise _ResolverExecutorSaturated
-        future: Future[_Result] = Future()
+        future: Future[ResultT] = Future()
         with self._state_lock:
             if self._shutdown:
                 self._slots.release()
@@ -119,37 +118,60 @@ class _BoundedResolverExecutor:
                 self._slots.release()
 
 
-_async_resolver_executor: _BoundedResolverExecutor | None = None
-_async_resolver_executor_pid: int | None = None
-_async_resolver_executor_lock = threading.Lock()
+_resolver_executor: _BoundedResolverExecutor | None = None
+_resolver_executor_pid: int | None = None
+_resolver_executor_lock = threading.Lock()
 
 
-def _get_async_resolver_executor() -> _BoundedResolverExecutor:
-    global _async_resolver_executor, _async_resolver_executor_pid
+def _get_resolver_executor() -> _BoundedResolverExecutor:
+    global _resolver_executor, _resolver_executor_pid
     current_pid = os.getpid()
-    with _async_resolver_executor_lock:
+    with _resolver_executor_lock:
         if (
-            _async_resolver_executor is None
-            or _async_resolver_executor_pid != current_pid
+            _resolver_executor is None
+            or _resolver_executor_pid != current_pid
         ):
-            _async_resolver_executor = _BoundedResolverExecutor(
-                max_workers=_ASYNC_RESOLVER_MAX_WORKERS,
-                max_queue_size=_ASYNC_RESOLVER_MAX_QUEUE_SIZE,
+            _resolver_executor = _BoundedResolverExecutor(
+                max_workers=_RESOLVER_MAX_WORKERS,
+                max_queue_size=_RESOLVER_MAX_QUEUE_SIZE,
             )
-            _async_resolver_executor_pid = current_pid
-        return _async_resolver_executor
+            _resolver_executor_pid = current_pid
+        return _resolver_executor
 
 
-def _reset_async_resolver_executor_after_fork() -> None:
-    global _async_resolver_executor, _async_resolver_executor_pid
-    global _async_resolver_executor_lock
-    _async_resolver_executor = None
-    _async_resolver_executor_pid = None
-    _async_resolver_executor_lock = threading.Lock()
+def _run_bounded_resolver_call[ResultT](
+    call: Callable[..., ResultT],
+    /,
+    *args: Any,
+    timeout_seconds: float,
+    executor: _BoundedResolverExecutor | None = None,
+) -> ResultT:
+    """Run DNS-sensitive validation without allowing a worker to hang forever."""
+    try:
+        future = (executor or _get_resolver_executor()).submit(call, *args)
+    except _ResolverExecutorSaturated:
+        raise ModelProviderUnreachable(
+            "The model provider could not be reached."
+        ) from None
+    try:
+        return future.result(timeout=max(0.01, float(timeout_seconds)))
+    except TimeoutError:
+        future.cancel()
+        raise ModelProviderUnreachable(
+            "The model provider could not be reached."
+        ) from None
+
+
+def _reset_resolver_executor_after_fork() -> None:
+    global _resolver_executor, _resolver_executor_pid
+    global _resolver_executor_lock
+    _resolver_executor = None
+    _resolver_executor_pid = None
+    _resolver_executor_lock = threading.Lock()
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_async_resolver_executor_after_fork)
+    os.register_at_fork(after_in_child=_reset_resolver_executor_after_fork)
 
 
 class ModelProbeError(RuntimeError):
@@ -393,15 +415,24 @@ class PinnedModelTransport(httpx.BaseTransport):
         *,
         base_url: str,
         resolver: Resolver = resolve_host_addresses,
+        resolver_timeout_seconds: float = DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS,
+        resolver_executor: _BoundedResolverExecutor | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._base_url = base_url
         self._resolver = resolver
+        self._resolver_timeout_seconds = max(0.01, float(resolver_timeout_seconds))
+        self._resolver_executor = resolver_executor
         self._transport = transport or httpx.HTTPTransport(trust_env=False, retries=0)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        pinned_url, host_header, sni_hostname = _pinned_request_target(
-            str(request.url), self._base_url, self._resolver
+        pinned_url, host_header, sni_hostname = _run_bounded_resolver_call(
+            _pinned_request_target,
+            str(request.url),
+            self._base_url,
+            self._resolver,
+            timeout_seconds=self._resolver_timeout_seconds,
+            executor=self._resolver_executor,
         )
         headers = request.headers.copy()
         headers["Host"] = host_header
@@ -444,7 +475,7 @@ class PinnedAsyncModelTransport(httpx.AsyncBaseTransport):
         resolution_failed = False
         try:
             resolver_future = (
-                self._resolver_executor or _get_async_resolver_executor()
+                self._resolver_executor or _get_resolver_executor()
             ).submit(
                 _pinned_request_target,
                 str(request.url),
@@ -489,14 +520,32 @@ class OpenAICompatibleProbe:
         resolver: Resolver = resolve_host_addresses,
         transport: httpx.BaseTransport | None = None,
         timeout: httpx.Timeout | None = None,
+        resolver_timeout_seconds: float = DEFAULT_ASYNC_RESOLVER_TIMEOUT_SECONDS,
+        resolver_executor: _BoundedResolverExecutor | None = None,
     ) -> None:
         self._resolver = resolver
         self._transport = transport
         self._timeout = timeout or httpx.Timeout(5.0, connect=3.0)
+        self._resolver_timeout_seconds = max(0.01, float(resolver_timeout_seconds))
+        self._resolver_executor = resolver_executor
 
-    def probe(self, base_url: str, api_key: str, model_name: str | None = None) -> ModelProbeResult:
+    def probe(
+        self,
+        base_url: str,
+        api_key: str,
+        model_name: str | None = None,
+        api_mode: str = "chat_completions",
+    ) -> ModelProbeResult:
+        if api_mode not in {"chat_completions", "responses"}:
+            raise ModelProbeFailed("The model API mode is not supported.")
         started_at = monotonic()
-        normalized_url = normalize_model_base_url(base_url, self._resolver)
+        normalized_url = _run_bounded_resolver_call(
+            normalize_model_base_url,
+            base_url,
+            self._resolver,
+            timeout_seconds=self._resolver_timeout_seconds,
+            executor=self._resolver_executor,
+        )
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
@@ -512,20 +561,46 @@ class OpenAICompatibleProbe:
         models, truncated = _parse_models(models_payload)
         model_validated = False
         if model_name:
-            completion_payload = self._request_json(
-                "POST",
-                f"{normalized_url}/chat/completions",
-                headers=headers,
-                json_payload={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "stream": False,
-                    "max_tokens": 1,
-                },
-                base_url=normalized_url,
-                model_request=True,
-            )
-            _validate_completion(completion_payload)
+            if api_mode == "responses":
+                completion_url = f"{normalized_url}/responses"
+                completion_payload = self._request_json(
+                    "POST",
+                    completion_url,
+                    headers=headers,
+                    json_payload={
+                        "model": model_name,
+                        # Match langchain-openai's Responses API conversion
+                        # for a HumanMessage instead of probing a different
+                        # input shape than the runtime uses.
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": "ping",
+                            }
+                        ],
+                        "stream": False,
+                        "max_output_tokens": 1,
+                    },
+                    base_url=normalized_url,
+                    model_request=True,
+                )
+                _validate_response(completion_payload)
+            else:
+                completion_payload = self._request_json(
+                    "POST",
+                    f"{normalized_url}/chat/completions",
+                    headers=headers,
+                    json_payload={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                        "max_completion_tokens": 1,
+                    },
+                    base_url=normalized_url,
+                    model_request=True,
+                )
+                _validate_completion(completion_payload)
             model_validated = True
 
         latency_ms = min(MAX_PROBE_LATENCY_MS, max(0, round((monotonic() - started_at) * 1000)))
@@ -547,10 +622,13 @@ class OpenAICompatibleProbe:
         model_request: bool,
         json_payload: dict[str, object] | None = None,
     ) -> object:
-        pinned_url, host_header, sni_hostname = _pinned_request_target(
+        pinned_url, host_header, sni_hostname = _run_bounded_resolver_call(
+            _pinned_request_target,
             url,
             base_url,
             self._resolver,
+            timeout_seconds=self._resolver_timeout_seconds,
+            executor=self._resolver_executor,
         )
         request_headers = {**headers, "Host": host_header}
         extensions = {"sni_hostname": sni_hostname} if sni_hostname is not None else None
@@ -638,3 +716,38 @@ def _validate_completion(payload: object) -> None:
     message = choices[0].get("message")
     if not isinstance(message, dict) or not isinstance(message.get("content"), str):
         raise ModelProbeFailed("The model provider returned an invalid response.")
+
+
+def _validate_response(payload: object) -> None:
+    """Validate the minimal non-streaming shape returned by Responses API."""
+    if not isinstance(payload, dict):
+        raise ModelProbeFailed("The model provider returned an invalid response.")
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str):
+        return
+    output = payload.get("output")
+    if not isinstance(output, list):
+        raise ModelProbeFailed("The model provider returned an invalid response.")
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(part, dict)
+            and part.get("type") == "output_text"
+            and isinstance(part.get("text"), str)
+            for part in content
+        ):
+            return
+    incomplete_details = payload.get("incomplete_details")
+    if (
+        payload.get("status") == "incomplete"
+        and isinstance(incomplete_details, dict)
+        and incomplete_details.get("reason") == "max_output_tokens"
+    ):
+        # A reasoning model can spend the probe's one-token budget before
+        # producing text. This typed response still validates the endpoint.
+        return
+    raise ModelProbeFailed("The model provider returned an invalid response.")

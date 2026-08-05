@@ -1,12 +1,20 @@
 import json
 import uuid
-from collections.abc import Sequence
-from time import sleep
+from collections.abc import Mapping, Sequence
+from time import monotonic, sleep
 from typing import Any
 
 from contentai.agent.graph.state import AgentState
 from contentai.agent.runtime.context import get_tool_runtime_context
-from contentai.agent.runtime.errors import is_retryable_model_stream_error
+from contentai.agent.runtime.errors import (
+    is_retryable_model_stream_error,
+    model_retry_delay_seconds,
+)
+from contentai.agent.runtime.model_invocation import (
+    InvocationAttempt,
+    append_callback,
+    invoke_model,
+)
 from contentai.agent.runtime.tool_execution import execute_tool_call
 from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
 from contentai.agent.workflows.final_evidence import (
@@ -25,6 +33,10 @@ from pydantic import ValidationError
 
 MODEL_STREAM_MAX_ATTEMPTS = 3
 MODEL_STREAM_RETRY_BASE_SECONDS = 0.25
+MODEL_STREAM_RETRY_MAX_SECONDS = 30.0
+MODEL_REQUEST_TIMEOUT_SECONDS = 240.0
+MODEL_STREAM_DEADLINE_SECONDS = 300.0
+RESEARCH_FINAL_DEADLINE_SECONDS = 300.0
 REJECTED_TOOL_MESSAGE = "已取消保存"
 
 
@@ -34,9 +46,8 @@ def build_agent_node(model: Any, *, research_final_model: Any | None = None):
         config: RunnableConfig | None = None,
     ) -> dict[str, Any]:
         _emit_node_event("agent_node", {"status": "started"}, config=config)
-        # LangGraph supplies the stream writer through its runnable context;
-        # do not force a config kwarg because provider-compatible models (and
-        # test doubles) are only required to implement invoke(messages).
+        # Keep callback propagation compatible with provider-compatible models
+        # and test doubles that only implement invoke(messages).
         research_identity = parse_research_identity(
             state.get("research_package_id"),
             state.get("research_topic_hash"),
@@ -92,12 +103,14 @@ def _research_backed_final_message(
 ) -> AIMessage:
     evidence = _research_supported_evidence(state, expected_identity=identity)
     callbacks = _research_final_usage_callbacks()
+    deadline = monotonic() + RESEARCH_FINAL_DEADLINE_SECONDS
 
     response = _invoke_research_final_response(
         model,
         evidence=evidence,
         repair=False,
         callbacks=callbacks,
+        deadline=deadline,
     )
     if response is None:
         response = _invoke_research_final_response(
@@ -105,6 +118,7 @@ def _research_backed_final_message(
             evidence=evidence,
             repair=True,
             callbacks=callbacks,
+            deadline=deadline,
         )
     if response is None:
         raise ContentEvidenceInvalidError
@@ -126,10 +140,19 @@ def _invoke_research_final_response(
     evidence: dict[str, Any],
     repair: bool,
     callbacks: list[Any] | None,
+    deadline: float,
 ) -> Any | None:
     messages = _research_final_messages(evidence, repair=repair)
     try:
-        value = _invoke_research_final_model(model, messages, callbacks=callbacks)
+        value = _invoke_research_final_model(
+            model,
+            messages,
+            callbacks=callbacks,
+            timeout_seconds=min(
+                MODEL_REQUEST_TIMEOUT_SECONDS,
+                _remaining_model_timeout(deadline, "research final"),
+            ),
+        )
         return validate_research_final_selection(
             value,
             evidence=evidence,
@@ -151,18 +174,15 @@ def _invoke_research_final_model(
     messages: list[SystemMessage | HumanMessage],
     *,
     callbacks: list[Any] | None,
+    timeout_seconds: float,
 ) -> Any:
-    try:
-        return model.invoke(messages, config={"callbacks": callbacks or []})
-    except TypeError as exc:
-        if not _does_not_accept_config(exc):
-            raise
-        return model.invoke(messages)
-
-
-def _does_not_accept_config(exc: TypeError) -> bool:
-    message = str(exc).casefold()
-    return "config" in message and "unexpected keyword argument" in message
+    return invoke_model(
+        model,
+        messages,
+        callbacks=callbacks,
+        include_empty_callbacks=True,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _research_final_messages(
@@ -239,12 +259,28 @@ def _invoke_model_with_stream_retry(
     *,
     config: RunnableConfig | None,
 ) -> Any:
-    """Retry only before model.invoke returns, so no tool call is repeated."""
+    """Retry transport failures only when the failed attempt emitted no output."""
+    deadline = monotonic() + MODEL_STREAM_DEADLINE_SECONDS
     for attempt in range(1, MODEL_STREAM_MAX_ATTEMPTS + 1):
+        invocation_attempt = InvocationAttempt()
         try:
-            return model.invoke(messages)
+            callbacks = config.get("callbacks") if isinstance(config, Mapping) else None
+            return invoke_model(
+                model,
+                messages,
+                callbacks=append_callback(callbacks, invocation_attempt),
+                include_empty_callbacks=True,
+                timeout_seconds=min(
+                    MODEL_REQUEST_TIMEOUT_SECONDS,
+                    _remaining_model_timeout(deadline, "agent model"),
+                ),
+            )
         except Exception as exc:
-            if not is_retryable_model_stream_error(exc) or attempt == MODEL_STREAM_MAX_ATTEMPTS:
+            if (
+                not invocation_attempt.replay_safe
+                or not is_retryable_model_stream_error(exc)
+                or attempt == MODEL_STREAM_MAX_ATTEMPTS
+            ):
                 raise
             _emit_node_event(
                 "agent_node_retry",
@@ -256,7 +292,22 @@ def _invoke_model_with_stream_retry(
                 },
                 config=config,
             )
-            sleep(MODEL_STREAM_RETRY_BASE_SECONDS * (2 ** (attempt - 1)))
+            delay = model_retry_delay_seconds(
+                exc,
+                attempt=attempt,
+                base_seconds=MODEL_STREAM_RETRY_BASE_SECONDS,
+                max_seconds=MODEL_STREAM_RETRY_MAX_SECONDS,
+            )
+            if deadline - monotonic() <= delay:
+                raise
+            sleep(delay)
+
+
+def _remaining_model_timeout(deadline: float, operation: str) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"{operation} deadline exceeded")
+    return remaining
 
 
 def build_tools_node(tools: Sequence[BaseTool]):

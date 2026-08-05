@@ -287,6 +287,9 @@ class _GatewayOwner:
 class _RetainedRuntimeValue:
     def __init__(self, value: Any, owner: _GatewayOwner) -> None:
         self._value = value
+        # Let signature-aware callers inspect the retained value instead of
+        # mistaking this generic ``*args, **kwargs`` proxy for provider support.
+        self.__wrapped__ = value
         owner.retain()
         self._release = weakref.finalize(self, owner.release)
 
@@ -450,6 +453,7 @@ class RuntimeContainer:
                 base_url=configuration.base_url,
                 api_key=configuration.api_key,
                 model_name=configuration.model_name,
+                api_mode=configuration.api_mode,
                 temperature=configuration.temperature,
                 context_window_tokens=configuration.context_window_tokens,
                 chat_max_tokens=configuration.chat_max_tokens,

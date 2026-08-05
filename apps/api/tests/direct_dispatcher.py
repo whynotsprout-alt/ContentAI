@@ -42,8 +42,6 @@ class DirectDispatcher:
             self.service,
             execution_id,
             f"direct:{uuid4()}",
-            create_attempt=False,
-            use_lease=False,
         )
         if claimed is None:
             return
@@ -52,11 +50,13 @@ class DirectDispatcher:
                 session,
                 execution_id=execution_id,
                 worker_id=claimed.worker_id,
+                attempt_id=claimed.attempt_id,
                 auth=claimed.auth,
                 tool_permissions=claimed.auth.tool_permissions,
                 turn_context=claimed.turn_context,
                 resume_value=claimed.resume_value,
                 resume_request_id=claimed.resume_request_id,
                 continue_from_checkpoint=claimed.continue_from_checkpoint,
+                checkpoint_id=claimed.checkpoint_id,
                 request_id=request_id,
             )

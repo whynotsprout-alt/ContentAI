@@ -3,18 +3,166 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Barrier, Event
 from time import monotonic
 
 import pytest
 from contentai.core.config import get_settings
+from contentai.core.security import AuthContext
 from contentai.db.session import get_engine
+from contentai.models.agent import AgentProfile
+from contentai.models.schemas import AgentProfileUpdate
 from contentai.models.user import AppUser, AuthSession
 from contentai.services.admin_service import AdminService
 from contentai.services.auth_service import AuthService, AuthServiceError
+from contentai.services.catalog_service import CatalogService
+from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import Session, select
+
+
+def test_concurrent_registration_maps_unique_race_to_conflict(monkeypatch) -> None:
+    service = AuthService(get_settings())
+    barrier = Barrier(2)
+    original_hash = service.password_hash.hash
+
+    def synchronized_hash(password: str) -> str:
+        barrier.wait(timeout=10)
+        return original_hash(password)
+
+    monkeypatch.setattr(service.password_hash, "hash", synchronized_hash)
+
+    def register() -> tuple[str, int | None]:
+        with Session(get_engine()) as session:
+            try:
+                service.register(
+                    session,
+                    email="registration-race@example.com",
+                    password="registration race password",
+                )
+            except AuthServiceError as exc:
+                return "conflict", exc.status_code
+            return "created", None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: register(), range(2)))
+
+    assert sorted(outcomes) == [("conflict", 409), ("created", None)]
+    with Session(get_engine()) as session:
+        users = session.exec(
+            select(AppUser).where(
+                AppUser.email_normalized == "registration-race@example.com"
+            )
+        ).all()
+    assert len(users) == 1
+
+
+def test_catalog_integrity_error_mapping_covers_agent_profile_and_version_keys() -> None:
+    profile_error = IntegrityError(
+        "duplicate key value violates unique constraint ux_agentprofile_user_name",
+        None,
+        None,
+    )
+    version_error = IntegrityError(
+        "duplicate key value violates unique constraint ux_agentversion_agent_version",
+        None,
+        None,
+    )
+
+    assert CatalogService._extract_constraint_name(profile_error) == "ux_agentprofile_user_name"
+    assert CatalogService._extract_constraint_name(version_error) == "ux_agentversion_agent_version"
+
+
+def test_catalog_update_and_delete_serialize_on_the_profile_lock(monkeypatch) -> None:
+    service = CatalogService()
+    auth = AuthContext(user_id="local-user", allowed_agent_ids=("default-agent",))
+    update_holds_profile_lock = Event()
+    release_update = Event()
+    original_name_check = service._ensure_name_available
+
+    def pause_update_after_profile_read(
+        session: Session,
+        *,
+        user_id: str,
+        name: str,
+        exclude_agent_id: str | None = None,
+    ) -> None:
+        original_name_check(
+            session,
+            user_id=user_id,
+            name=name,
+            exclude_agent_id=exclude_agent_id,
+        )
+        update_holds_profile_lock.set()
+        assert release_update.wait(timeout=10)
+
+    monkeypatch.setattr(service, "_ensure_name_available", pause_update_after_profile_read)
+
+    def update_agent():
+        with Session(get_engine()) as session:
+            session.exec(text("SET LOCAL application_name = 'catalog-agent-update'"))
+            return service.update_agent(
+                session,
+                "default-agent",
+                AgentProfileUpdate(name="Updated Agent"),
+                auth,
+            )
+
+    def delete_agent() -> None:
+        with Session(get_engine()) as session:
+            session.exec(text("SET LOCAL application_name = 'catalog-agent-delete'"))
+            service.delete_agent(session, "default-agent", auth)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        update_future = pool.submit(update_agent)
+        assert update_holds_profile_lock.wait(timeout=5)
+        delete_future = pool.submit(delete_agent)
+        try:
+            _wait_until_postgres_reports_lock_wait("catalog-agent-delete")
+        finally:
+            release_update.set()
+
+        updated = update_future.result(timeout=10)
+        delete_future.result(timeout=10)
+
+    assert updated.name == "Updated Agent"
+    with Session(get_engine()) as session:
+        assert session.get(AgentProfile, "default-agent") is None
+
+
+def test_concurrent_admin_bootstrap_is_idempotent(monkeypatch) -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.auth.bootstrap_admin_email = "bootstrap-race@example.com"
+    settings.auth.bootstrap_admin_password = SecretStr("bootstrap race password")
+    service = AuthService(settings)
+    barrier = Barrier(2)
+    original_hash = service.password_hash.hash
+
+    def synchronized_hash(password: str) -> str:
+        barrier.wait(timeout=10)
+        return original_hash(password)
+
+    monkeypatch.setattr(service.password_hash, "hash", synchronized_hash)
+
+    def bootstrap() -> str | None:
+        with Session(get_engine(settings)) as session:
+            user = service.bootstrap_default_admin(session)
+            return user.id if user is not None else None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        user_ids = list(executor.map(lambda _index: bootstrap(), range(2)))
+
+    assert user_ids[0] is not None
+    assert user_ids[0] == user_ids[1]
+    with Session(get_engine(settings)) as session:
+        users = session.exec(
+            select(AppUser).where(
+                AppUser.email_normalized == "bootstrap-race@example.com"
+            )
+        ).all()
+    assert len(users) == 1
+    assert users[0].role == "admin"
 
 
 def _create_user_and_session() -> tuple[AuthService, str, str]:

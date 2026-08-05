@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from contentai.agent.runtime.tool_execution import execute_tool_call
-from contentai.agent.tools.memory import remember
+from contentai.agent.runtime.tool_execution import _start_audit, execute_tool_call
+from contentai.agent.tools.memory import recall_memory, remember
 from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
 from contentai.db.session import get_engine
 from contentai.memory import LongTermMemory, MemoryRepository
@@ -27,6 +27,8 @@ from contentai.services.execution_resume import stable_json_hash
 from langchain_core.messages import ToolMessage
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
 from pydantic import ValidationError
+from sqlalchemy import text, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 
@@ -76,6 +78,18 @@ def _runtime(
         tool_policies=policies,
         event_writer=event_writer,
     )
+
+
+def test_tool_audit_preserves_unrelated_integrity_error() -> None:
+    with pytest.raises(IntegrityError):
+        _start_audit(
+            execution_id="missing-execution",
+            tool_name="test_tool",
+            tool_call_id="missing-execution-call",
+            tool_version="1",
+            arguments_hash="arguments-hash",
+            side_effecting=False,
+        )
 
 
 class RecordingEventWriter:
@@ -142,6 +156,61 @@ def test_remember_rejects_bytes_kind_before_execution_without_persisting() -> No
         ).all()
 
     assert persisted == []
+
+
+def test_runtime_recall_is_read_only_and_does_not_hold_the_memory_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id = "execution-runtime-recall"
+    memory_key = "runtime-recall-no-touch"
+    _seed_execution(execution_id)
+    engine = get_engine()
+    with Session(engine) as seed_session:
+        MemoryRepository(seed_session).upsert(
+            memory_key,
+            content="durable runtime recall preference",
+            user_id="local-user",
+            agent_id="default-agent",
+        )
+        seed_session.commit()
+        memory_id = seed_session.exec(
+            select(MemoryRecord.id).where(MemoryRecord.memory_key == memory_key)
+        ).one()
+
+    observed_touch: list[bool] = []
+    with Session(engine) as runner_session:
+        long_term = LongTermMemory(MemoryRepository(runner_session))
+        real_recall = long_term.recall
+
+        def tracked_recall(*args: object, **kwargs: object):
+            observed_touch.append(bool(kwargs.get("touch")))
+            return real_recall(*args, **kwargs)
+
+        monkeypatch.setattr(long_term, "recall", tracked_recall)
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = long_term
+        with tool_runtime_scope(runtime):
+            result = recall_memory.invoke({"query": "runtime recall preference"})
+
+        assert runner_session.in_transaction()
+        with Session(engine) as concurrent_session:
+            concurrent_session.exec(text("SET LOCAL lock_timeout = '250ms'"))
+            concurrent_session.execute(
+                update(MemoryRecord)
+                .where(MemoryRecord.id == memory_id)
+                .values(importance_score=0.5)
+            )
+            concurrent_session.commit()
+        runner_session.rollback()
+
+    assert observed_touch == [False]
+    assert [item["key"] for item in result["memories"]] == [memory_key]
+    with Session(engine) as session:
+        row = session.get(MemoryRecord, memory_id)
+        assert row is not None
+        assert row.access_count == 0
+        assert row.last_accessed_at is None
+        assert row.importance_score == 0.5
 
 
 def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:

@@ -3,10 +3,11 @@
 import os
 
 from celery import Celery
-from celery.signals import setup_logging
+from celery.signals import setup_logging, worker_process_shutdown, worker_shutdown
 
 from contentai.core.config import get_settings
 from contentai.core.logging import configure_logging
+from contentai.services.event_stream import close_cached_event_streams
 
 settings = get_settings()
 
@@ -102,3 +103,9 @@ def configure_celery_logging(**_kwargs: object) -> None:
     else:
         service_name = "agent-worker"
     configure_logging(service_name, settings)
+
+
+@worker_process_shutdown.connect
+@worker_shutdown.connect
+def close_worker_event_streams(**_kwargs: object) -> None:
+    close_cached_event_streams()

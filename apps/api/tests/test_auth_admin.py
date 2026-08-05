@@ -17,6 +17,7 @@ from contentai.services.auth_service import AuthService
 from contentai.services.usage_service import ModelUsageCallback, UsageContext, calculate_usage_cost
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from model_config_helpers import resolve_test_database_url
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
@@ -25,9 +26,7 @@ def auth_app():
     return create_app(
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": resolve_test_database_url()},
             auth={
                 "bootstrap_admin_email": "admin@example.com",
                 "bootstrap_admin_password": "admin password 123",
@@ -121,9 +120,7 @@ def test_production_ignores_retired_email_settings():
 def test_startup_bootstraps_an_active_admin_once():
     settings = Settings(
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database={"url": resolve_test_database_url()},
         auth={
             "bootstrap_admin_email": "bootstrap-admin@example.com",
             "bootstrap_admin_password": "bootstrap password 123",
@@ -147,9 +144,7 @@ def test_startup_bootstraps_an_active_admin_once():
 def test_bootstrap_does_not_change_an_existing_user():
     settings = Settings(
         env="test",
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        },
+        database={"url": resolve_test_database_url()},
         auth={
             "bootstrap_admin_email": "existing@example.com",
             "bootstrap_admin_password": "new bootstrap password",
@@ -186,9 +181,7 @@ def test_bootstrap_admin_requires_email_and_password_together():
         Settings(
             _env_file=None,
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": resolve_test_database_url()},
             auth={"bootstrap_admin_email": "bootstrap-admin@example.com"},
         )
 
@@ -302,9 +295,7 @@ def test_retired_bootstrap_admin_allowlist_is_rejected_explicitly():
     with pytest.raises(ValidationError, match="bootstrap_admin_emails"):
         Settings(
             env="test",
-            database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-            },
+            database={"url": resolve_test_database_url()},
             auth={"bootstrap_admin_emails": ["allowlisted@example.com"]},
         )
 
@@ -591,7 +582,7 @@ def test_local_users_cannot_access_each_others_content_accounts():
 
         _register(client, "second@example.com", "second password 123")
         _login(client, "second@example.com", "second password 123")
-        assert client.get("/api/agents").json() == []
+        assert client.get("/api/agents").json() == {"items": [], "next_cursor": None}
         assert client.get(f"/api/agents/{account_id}").status_code == 404
 
 

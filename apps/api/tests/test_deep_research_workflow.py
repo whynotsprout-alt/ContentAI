@@ -37,6 +37,29 @@ class NoConfigStructuredModel:
         return self.response
 
 
+class NoConfigFailingStructuredModel(NoConfigStructuredModel):
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    async def ainvoke(self, messages: Any) -> Any:
+        self.calls.append(messages)
+        raise httpx.RemoteProtocolError("output may already have escaped")
+
+
+def _model_http_status_error(
+    status_code: int,
+    *,
+    headers: dict[str, str] | None = None,
+) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://models.example.test/v1/chat/completions")
+    response = httpx.Response(status_code, request=request, headers=headers)
+    return httpx.HTTPStatusError(
+        f"provider returned HTTP {status_code}",
+        request=request,
+        response=response,
+    )
+
+
 class RetryingStructuredModel(StructuredModel):
     def __init__(self, responses: list[Any]) -> None:
         super().__init__(None)
@@ -48,6 +71,17 @@ class RetryingStructuredModel(StructuredModel):
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class PartialFailureStructuredModel(StructuredModel):
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    async def ainvoke(self, messages: Any, config: Any = None) -> Any:
+        self.calls.append((messages, config))
+        for callback in config["callbacks"]:
+            callback.on_llm_new_token(token="partial")
+        raise httpx.RemoteProtocolError("incomplete chunked read")
 
 
 class Gateway:
@@ -574,6 +608,110 @@ def test_research_retries_recoverable_model_connection_error(monkeypatch):
     assert len(model.calls) == 2
 
 
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_research_retries_transient_http_status_with_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    known_source = source_id("https://one.example/a")
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Only",
+                    "url": "https://one.example/a",
+                    "summary": "usable",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result("anspire", [], ok=False),
+    )
+    model = RetryingStructuredModel(
+        [
+            _model_http_status_error(status_code, headers={"Retry-After": "2"}),
+            deep_research.DeepResearchPackage(
+                core_conclusion=deep_research.ResearchConclusion(
+                    text="Conclusion after HTTP retry",
+                    source_ids=[known_source],
+                ),
+            ),
+        ]
+    )
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("contentai.agent.runtime.errors.random.random", lambda: 0.0)
+    monkeypatch.setattr(deep_research.asyncio, "sleep", record_sleep)
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Retry HTTP status",
+        model_gateway=Gateway(model),
+    )
+
+    assert result.package_data["core_conclusion"]["text"] == "Conclusion after HTTP retry"
+    assert len(model.calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_research_does_not_retry_after_partial_model_output(monkeypatch):
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Only",
+                    "url": "https://one.example/a",
+                    "summary": "usable",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result("anspire", [], ok=False),
+    )
+    model = PartialFailureStructuredModel()
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        deep_research.run_deep_research_package_workflow(
+            topic="Partial synthesis",
+            model_gateway=Gateway(model),
+        )
+
+    assert len(model.calls) == 1
+
+
+def test_research_does_not_retry_when_legacy_model_output_is_unobservable(monkeypatch):
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Only",
+                    "url": "https://one.example/a",
+                    "summary": "usable",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result("anspire", [], ok=False),
+    )
+    model = NoConfigFailingStructuredModel()
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        deep_research.run_deep_research_package_workflow(
+            topic="Unobservable synthesis",
+            model_gateway=Gateway(model),
+        )
+
+    assert len(model.calls) == 1
+
+
 @pytest.mark.parametrize(
     "malicious",
     [
@@ -631,6 +769,56 @@ def test_injection_text_is_isolated_and_not_sent_to_model(monkeypatch, malicious
     assert all(source["url"] != "https://bad.example/a" for source in result.sources)
 
 
+def test_markdown_citation_destination_injection_is_rejected(monkeypatch) -> None:
+    malicious_url = "https://good.example/a) [forged](https://evil.example/x"
+    good_url = "https://good.example/safe"
+    good_source = source_id(good_url)
+    install_search_tools(
+        monkeypatch,
+        provider_result(
+            "metaso",
+            [
+                {
+                    "title": "Forged citation candidate",
+                    "url": malicious_url,
+                    "summary": "must never reach Markdown output",
+                    "provider": "metaso",
+                }
+            ],
+        ),
+        provider_result(
+            "anspire",
+            [
+                {
+                    "title": "Safe citation",
+                    "url": good_url,
+                    "summary": "safe summary",
+                    "provider": "anspire",
+                }
+            ],
+        ),
+    )
+    model = StructuredModel(
+        deep_research.DeepResearchPackage(
+            core_conclusion=deep_research.ResearchConclusion(
+                text="Safe conclusion",
+                source_ids=[good_source],
+            ),
+        )
+    )
+
+    result = deep_research.run_deep_research_package_workflow(
+        topic="Citation integrity",
+        model_gateway=Gateway(model),
+    )
+
+    assert deep_research._safe_citation_url(malicious_url) == ""
+    assert malicious_url not in model.calls[0][0][1].content
+    assert "forged" not in result.content.casefold()
+    assert "evil.example" not in result.content
+    assert [source["url"] for source in result.sources] == [good_url]
+
+
 def test_no_usable_results_returns_search_no_results(monkeypatch):
     install_search_tools(
         monkeypatch,
@@ -676,6 +864,11 @@ def test_url_only_result_is_not_usable_research_text(monkeypatch):
         "http://169.254.169.254/latest/meta-data",
         "http://user:password@example.com/a",
         "https://example.com:8443/a",
+        "https://example.com/a b",
+        "https://example.com/a\tsegment",
+        "https://example.com/a\nsegment",
+        "https://example.com/a(parenthesized)",
+        "https://example.com/a\\)escaped",
     ],
 )
 def test_dangerous_citation_urls_are_rejected(url: str):

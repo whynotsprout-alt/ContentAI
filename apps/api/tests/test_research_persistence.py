@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, local
 from types import SimpleNamespace
 
 import contentai.agent.runtime.execution_services as execution_services
 import contentai.agent.tools.research as research_tool_module
+import contentai.agent.workflows.research_repository as research_repository_module
 import pytest
 from contentai.agent.context.assembler import ContextAssembler
 from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
@@ -17,6 +20,7 @@ from contentai.models.chat import AgentExecution, AgentInvocation, ChatSession
 from contentai.models.research import ResearchPackage
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 
@@ -63,6 +67,93 @@ def seed_execution() -> tuple[str, str]:
         session.add(execution)
         session.commit()
         return chat.id, execution.id
+
+
+def test_research_persistence_only_recovers_the_idempotent_unique_race() -> None:
+    replay_race = IntegrityError(
+        "duplicate key violates ux_researchpackage_execution_topic",
+        None,
+        None,
+    )
+    lineage_failure = IntegrityError(
+        "foreign key violates fk_researchpackage_execution_lineage",
+        None,
+        None,
+    )
+
+    assert research_repository_module._constraint_name(replay_race) == (
+        "ux_researchpackage_execution_topic"
+    )
+    assert research_repository_module._constraint_name(lineage_failure) is None
+
+
+def test_research_persistence_preserves_unique_error_when_winner_disappears(
+    monkeypatch,
+) -> None:
+    expected = IntegrityError(
+        "duplicate key violates ux_researchpackage_execution_topic",
+        None,
+        None,
+    )
+
+    class EmptyResult:
+        @staticmethod
+        def first():
+            return None
+
+    class VanishingWinnerSession:
+        rolled_back = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def exec(_statement):
+            return EmptyResult()
+
+        @staticmethod
+        def add(_row):
+            return None
+
+        @staticmethod
+        def commit():
+            raise expected
+
+        def rollback(self):
+            self.rolled_back = True
+
+        @staticmethod
+        def refresh(_row):
+            raise AssertionError("a vanished winner cannot be refreshed")
+
+    fake_session = VanishingWinnerSession()
+    monkeypatch.setattr(
+        research_repository_module,
+        "Session",
+        lambda _bind: fake_session,
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        ResearchPackageRepository.persist(
+            bind=object(),
+            session_id="session-race",
+            execution_id="execution-race",
+            agent_version_id="agent-version-race",
+            topic="race topic",
+            package_data={},
+            sources=[],
+            provider_diagnostics={},
+            rendered_content="race package",
+            valid_source_count=0,
+            isolated_source_count=0,
+            removed_unknown_reference_count=0,
+        )
+
+    assert caught.value is expected
+    assert fake_session.rolled_back is True
 
 
 def test_research_tool_persists_complete_package_without_webpage_body(monkeypatch):
@@ -238,6 +329,176 @@ def test_research_package_load_requires_package_execution_and_topic_hash_match()
     assert later_execution_load is None
     assert wrong_topic_load is None
     assert not hasattr(ResearchPackageRepository, "latest_for_session")
+
+
+def test_sequential_research_retry_cannot_replace_first_durable_package() -> None:
+    chat_id, execution_id = seed_execution()
+    first_package_data = {
+        "core_conclusion": {"text": "first durable conclusion", "source_ids": ["S1"]},
+        "findings": [],
+    }
+    first_sources = [{"source_id": "S1", "url": "https://first.example/source"}]
+    first_diagnostics = {"metaso": {"ok": True, "result_count": 1}}
+    first = ResearchPackageRepository.persist(
+        session_id=chat_id,
+        execution_id=execution_id,
+        agent_version_id="default-agent-v1",
+        topic="Immutable Topic",
+        package_data=first_package_data,
+        sources=first_sources,
+        provider_diagnostics=first_diagnostics,
+        rendered_content="first rendered package",
+        valid_source_count=1,
+        isolated_source_count=0,
+        removed_unknown_reference_count=0,
+    )
+
+    retry = ResearchPackageRepository.persist(
+        session_id=chat_id,
+        execution_id=execution_id,
+        agent_version_id="default-agent-v1",
+        topic=" immutable   topic ",
+        package_data={
+            "core_conclusion": {"text": "replacement conclusion", "source_ids": ["S2"]}
+        },
+        sources=[{"source_id": "S2", "url": "https://replacement.example/source"}],
+        provider_diagnostics={"anspire": {"ok": False, "result_count": 0}},
+        rendered_content="replacement rendered package",
+        valid_source_count=9,
+        isolated_source_count=8,
+        removed_unknown_reference_count=7,
+    )
+
+    assert retry.id == first.id
+    with Session(get_engine()) as session:
+        durable = session.get(ResearchPackage, first.id)
+        assert durable is not None
+        assert durable.topic == "Immutable Topic"
+        assert durable.package_data == first_package_data
+        assert durable.sources == first_sources
+        assert durable.provider_diagnostics == first_diagnostics
+        assert durable.rendered_content == "first rendered package"
+        assert durable.valid_source_count == 1
+        assert durable.isolated_source_count == 0
+        assert durable.removed_unknown_reference_count == 0
+
+
+def test_concurrent_research_inserts_return_one_first_durable_package(
+    monkeypatch,
+) -> None:
+    chat_id, execution_id = seed_execution()
+    initial_lookup_barrier = Barrier(2)
+    worker_state = local()
+    original_exec = research_repository_module.Session.exec
+    original_constraint_name = research_repository_module._constraint_name
+    encountered_constraints: list[str | None] = []
+
+    def synchronize_initial_lookup(session, statement, *args, **kwargs):
+        result = original_exec(session, statement, *args, **kwargs)
+        if not getattr(worker_state, "initial_lookup_completed", False):
+            worker_state.initial_lookup_completed = True
+            initial_lookup_barrier.wait(timeout=10)
+        return result
+
+    def capture_constraint_name(exc):
+        constraint_name = original_constraint_name(exc)
+        encountered_constraints.append(constraint_name)
+        return constraint_name
+
+    candidates = [
+        {
+            "topic": "Concurrent Immutable Topic",
+            "package_data": {
+                "core_conclusion": {"text": "candidate alpha", "source_ids": ["SA"]}
+            },
+            "sources": [{"source_id": "SA", "url": "https://alpha.example/source"}],
+            "provider_diagnostics": {"alpha": {"ok": True}},
+            "rendered_content": "candidate alpha rendered",
+            "valid_source_count": 1,
+            "isolated_source_count": 0,
+            "removed_unknown_reference_count": 0,
+        },
+        {
+            "topic": " concurrent   immutable topic ",
+            "package_data": {
+                "core_conclusion": {"text": "candidate beta", "source_ids": ["SB"]}
+            },
+            "sources": [{"source_id": "SB", "url": "https://beta.example/source"}],
+            "provider_diagnostics": {"beta": {"ok": False}},
+            "rendered_content": "candidate beta rendered",
+            "valid_source_count": 2,
+            "isolated_source_count": 1,
+            "removed_unknown_reference_count": 1,
+        },
+    ]
+
+    def persist(candidate):
+        return ResearchPackageRepository.persist(
+            session_id=chat_id,
+            execution_id=execution_id,
+            agent_version_id="default-agent-v1",
+            **candidate,
+        )
+
+    with monkeypatch.context() as race_patch:
+        race_patch.setattr(
+            research_repository_module.Session,
+            "exec",
+            synchronize_initial_lookup,
+        )
+        race_patch.setattr(
+            research_repository_module,
+            "_constraint_name",
+            capture_constraint_name,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(persist, candidates))
+
+    assert encountered_constraints == ["ux_researchpackage_execution_topic"]
+    assert len({result.id for result in results}) == 1
+    with Session(get_engine()) as session:
+        durable_rows = session.exec(
+            select(ResearchPackage).where(
+                ResearchPackage.execution_id == execution_id,
+                ResearchPackage.topic_hash == topic_digest("Concurrent Immutable Topic"),
+            )
+        ).all()
+
+    assert len(durable_rows) == 1
+    durable = durable_rows[0]
+    durable_snapshot = (
+        durable.topic,
+        durable.package_data,
+        durable.sources,
+        durable.provider_diagnostics,
+        durable.rendered_content,
+        durable.valid_source_count,
+        durable.isolated_source_count,
+        durable.removed_unknown_reference_count,
+    )
+    candidate_snapshots = {
+        (
+            candidate["topic"],
+            json.dumps(candidate["package_data"], sort_keys=True),
+            json.dumps(candidate["sources"], sort_keys=True),
+            json.dumps(candidate["provider_diagnostics"], sort_keys=True),
+            candidate["rendered_content"],
+            candidate["valid_source_count"],
+            candidate["isolated_source_count"],
+            candidate["removed_unknown_reference_count"],
+        )
+        for candidate in candidates
+    }
+    assert (
+        durable_snapshot[0],
+        json.dumps(durable_snapshot[1], sort_keys=True),
+        json.dumps(durable_snapshot[2], sort_keys=True),
+        json.dumps(durable_snapshot[3], sort_keys=True),
+        *durable_snapshot[4:],
+    ) in candidate_snapshots
+    assert all(result.id == durable.id for result in results)
+    assert all(result.package_data == durable.package_data for result in results)
+    assert all(result.sources == durable.sources for result in results)
 
 
 def test_execution_research_loader_uses_only_checkpointed_package_identity(monkeypatch):

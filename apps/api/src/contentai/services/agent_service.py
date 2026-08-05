@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from contentai.agent.runtime.container import RuntimeContainer
 from contentai.agent.runtime.runner import AgentRunner
 from contentai.core.config import Settings, get_settings
+from contentai.services.event_stream import close_cached_event_streams
+
+logger = logging.getLogger(__name__)
 
 
 class AgentService:
@@ -17,6 +22,7 @@ class AgentService:
         self._runner_closed = False
         self._runtime_sync_closed = False
         self._runtime_async_closed = False
+        self._event_streams_closed = False
 
     def start(self) -> None:
         if self.settings.database.runtime_role == "agent-worker":
@@ -30,6 +36,7 @@ class AgentService:
         runtime_error = self._close_runtime_once()
         if runtime_error is not None:
             errors.append(runtime_error)
+        self._close_event_streams_once()
         if errors:
             raise errors[0]
 
@@ -51,6 +58,7 @@ class AgentService:
             runtime_error = self._close_runtime_once()
             if runtime_error is not None:
                 errors.append(runtime_error)
+        self._close_event_streams_once()
         if errors:
             raise errors[0]
 
@@ -75,6 +83,16 @@ class AgentService:
             return exc
         self._runtime_sync_closed = True
         return None
+
+    def _close_event_streams_once(self) -> None:
+        if getattr(self, "_event_streams_closed", False):
+            return
+        try:
+            close_cached_event_streams()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to close cached execution event streams.")
+            return
+        self._event_streams_closed = True
 
 
 __all__ = ["AgentService"]

@@ -553,14 +553,24 @@ def _start_audit(
         session.add(row)
         try:
             session.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             session.rollback()
+            if _constraint_name(exc) != "ux_toolexecution_execution_tool_call":
+                # Only the expected idempotent audit insert race may load the
+                # winning row. Preserve FK/check failures instead of masking
+                # them with NoResultFound from the recovery query below.
+                raise
             raced = session.exec(
                 select(ToolExecution).where(
                     ToolExecution.execution_id == execution_id,
                     ToolExecution.tool_call_id == tool_call_id,
                 )
-            ).one()
+            ).one_or_none()
+            if raced is None:
+                # The winning row may have been deleted between the unique
+                # conflict and recovery. Keep the original IntegrityError as
+                # the observable cause.
+                raise
             mismatch = side_effecting and any(
                 (
                     raced.tool_name != tool_name,
@@ -589,6 +599,24 @@ def _start_audit(
             )
         session.refresh(row)
         return _AuditStart(row.id, created=True)
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    diagnostic_name = getattr(
+        getattr(exc.orig, "diag", None),
+        "constraint_name",
+        None,
+    )
+    if diagnostic_name:
+        return str(diagnostic_name)
+    message = str(exc)
+    if "ux_toolexecution_execution_tool_call" in message or (
+        "UNIQUE constraint failed" in message
+        and "toolexecution.execution_id" in message
+        and "toolexecution.tool_call_id" in message
+    ):
+        return "ux_toolexecution_execution_tool_call"
+    return None
 
 
 def _finish_audit(

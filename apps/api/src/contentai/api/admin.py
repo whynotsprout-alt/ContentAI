@@ -66,6 +66,8 @@ def _model_error_response(exc: Exception) -> JSONResponse:
         code = "MODEL_CONFIG_CHANGED"
     else:
         code = getattr(exc, "code", "MODEL_PROBE_FAILED")
+    if code not in _MODEL_ERROR_STATUS:
+        code = "MODEL_PROBE_FAILED"
     return JSONResponse(
         status_code=_MODEL_ERROR_STATUS[code],
         content={"detail": {"code": code, "message": _MODEL_ERROR_MESSAGES[code]}},
@@ -81,6 +83,7 @@ def _model_configuration_response(active) -> ModelConfigurationResponse:
         id=configuration.id,
         version=configuration.version,
         provider=configuration.provider,
+        api_mode=configuration.api_mode,
         base_url=configuration.base_url,
         model_name=configuration.model_name,
         input_price_per_million_usd=float(configuration.input_price_per_million_usd),
@@ -127,6 +130,7 @@ def probe_model_configuration(
             base_url=payload.base_url,
             api_key=payload.api_key.get_secret_value() if payload.api_key is not None else None,
             model_name=payload.model_name,
+            api_mode=payload.api_mode,
         )
     except (ModelProbeError, ModelCredentialsRequired) as exc:
         return _model_error_response(exc)
@@ -161,6 +165,7 @@ def update_model_configuration(
             base_url=payload.base_url,
             api_key=payload.api_key.get_secret_value() if payload.api_key is not None else None,
             model_name=payload.model_name,
+            api_mode=payload.api_mode,
             temperature=payload.temperature,
             context_window_tokens=payload.context_window_tokens,
             chat_max_tokens=payload.chat_max_tokens,

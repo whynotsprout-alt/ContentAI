@@ -82,7 +82,7 @@ flowchart TD
 
 LangGraph 定义在 `apps/api/src/contentai/agent/graph`：
 
-1. `agent`：主模型生成回复或工具调用；可对可重试模型流错误重试最多 3 次。
+1. `agent`：主模型生成回复或工具调用；SDK 内建重试关闭，由图节点在 300 秒共享预算内对尚未输出 token 的可重试传输错误统一重试，最多 3 次；每次请求最多 240 秒并受剩余预算约束，一旦已有流式输出便不再自动重放整轮调用。
 2. `tools`：执行模型请求的工具；失败时写入错误 `ToolMessage`，再回到 `agent` 让模型处理失败。
 3. `human`：需要人工确认的工具会触发 LangGraph interrupt，执行状态变为 `waiting_input`。
 4. `tool_error`：避免在某些模型上以错误的 Assistant prefill 继续请求。
@@ -110,7 +110,7 @@ LangGraph 定义在 `apps/api/src/contentai/agent/graph`：
 2. 结果按规范化 URL 去重，并由 URL 派生稳定 `source_id`。引用 URL 只做无凭据 HTTP/HTTPS、标准端口和明显本地/私网/元数据地址格式检查，绝不由服务端请求。
 3. 标题、摘要和站点名会清理控制字符、零宽/双向字符、HTML 残片及超长字段；命中提示注入特征的来源只保留 URL 与隔离诊断，不送入模型。
 4. 可用结果作为独立 JSON 数据块交给研究子模型，最多 135 秒，输出固定结构。后端只移除不在本轮来源集合中的引用，不做独立域、原始信源、交叉支持或 `insufficient` 判断。
-5. 单提供商单结果也可生成资料包；双方均失败或没有可用文本时返回 `SEARCH_NO_RESULTS`。成功结果以 `(execution_id, topic_hash)` 幂等写入 `ResearchPackage`。
+5. 单提供商单结果也可生成资料包；双方均失败或没有可用文本时返回 `SEARCH_NO_RESULTS`。成功结果以 `(execution_id, topic_hash)` 幂等写入 `ResearchPackage`；首个 durable package 不可原地覆盖，重试复用其 ID 与证据快照。
 
 ### 3.7 V3 SSE 与断线恢复
 

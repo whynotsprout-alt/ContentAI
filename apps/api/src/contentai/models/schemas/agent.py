@@ -21,15 +21,29 @@ class AgentVersionSummary(SchemaBase):
     hotspot_sources: list[str] = Field(default_factory=list)
 
 
+class AgentVersionReference(SchemaBase):
+    id: AgentId
+    agent_id: AgentId
+    version: int
+
+
 class AgentProfileSummary(SchemaBase):
+    id: AgentId
+    name: ShortText
+    description: DescriptionText = ""
+    current_version: AgentVersionReference | None = None
+
+
+class AgentProfileDetail(SchemaBase):
     id: AgentId
     name: ShortText
     description: DescriptionText = ""
     current_version: AgentVersionSummary | None = None
 
 
-class AgentProfileDetail(AgentProfileSummary):
-    pass
+class AgentProfileListResponse(SchemaBase):
+    items: list[AgentProfileSummary] = Field(default_factory=list)
+    next_cursor: str | None = None
 
 
 class AgentProfileCreate(InputSchemaBase):

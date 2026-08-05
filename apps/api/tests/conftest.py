@@ -1,15 +1,17 @@
 import base64
+import os
 from pathlib import Path
 
 import pytest
 from model_config_helpers import (
     DEFAULT_MODEL_RUNTIME_PARAMETERS,
     TEST_MODEL_CONFIG_API_KEY,
+    resolve_test_database_url,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
+TEST_DATABASE_URL = resolve_test_database_url()
 TEST_MODEL_CONFIG_ENCRYPTION_KEY = base64.urlsafe_b64encode(bytes([7]) * 32).decode("ascii")
 TEST_ENV_VARS = {
     "CONTENTAI_ENV": "test",
@@ -21,13 +23,12 @@ TEST_ENV_VARS = {
 
 
 def pytest_configure() -> None:
-    import os
-
     from alembic import command
     from contentai.core.alembic import build_alembic_config
     from contentai.core.config import set_settings_env_file
 
-    test_env_file = PROJECT_ROOT / ".pytest_cache" / "contentai-test.env"
+    worker_id = os.getenv("PYTEST_XDIST_WORKER", "master").strip() or "master"
+    test_env_file = PROJECT_ROOT / ".pytest_cache" / f"contentai-test-{worker_id}.env"
     test_env_file.parent.mkdir(parents=True, exist_ok=True)
     test_env_file.write_text(
         "\n".join(f"{name}={value}" for name, value in TEST_ENV_VARS.items()),
@@ -59,6 +60,11 @@ def _ensure_test_database_exists() -> None:
         raise RuntimeError("CONTENTAI_DATABASE__URL must include a database name.")
     if database in {"postgres", "template0", "template1"}:
         raise RuntimeError("CONTENTAI_DATABASE__URL must point to a dedicated test database.")
+    if "test" not in database.casefold():
+        raise RuntimeError(
+            "Refusing to reset a database whose name does not contain the explicit "
+            f"test marker: {database!r}."
+        )
 
     maintenance_url = (
         url.set(database="postgres")

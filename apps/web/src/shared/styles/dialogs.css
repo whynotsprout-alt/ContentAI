@@ -785,3 +785,209 @@ body.dialog-open {
     transition-duration: .01ms !important;
   }
 }
+
+@media (max-width: 900px) {
+  .modal-backdrop {
+    padding: 12px;
+  }
+
+  .modal-fullscreen {
+    padding: 12px;
+  }
+
+  .accessible-dialog-fullscreen {
+    width: calc(100vw - 24px);
+    height: calc(100dvh - 24px);
+  }
+
+  .manager-header {
+    min-height: 0;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px 22px 16px;
+  }
+
+  .manager-header-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .manager-header-actions .dirty-indicator {
+    margin-right: auto;
+  }
+
+  .manager-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 220px) auto minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .agent-directory {
+    max-height: 220px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .manager-sections {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, max-content);
+    grid-template-rows: minmax(0, 1fr);
+    align-content: stretch;
+    padding: 10px 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .manager-sections button {
+    min-height: 38px;
+  }
+
+  .agent-editor {
+    min-height: 420px;
+  }
+
+  .editor-section {
+    padding: 32px clamp(22px, 5vw, 48px) 48px;
+  }
+
+  .source-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 599px) {
+  .modal-backdrop {
+    padding: 8px;
+  }
+
+  .accessible-dialog-default {
+    width: min(480px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+  }
+
+  .modal-fullscreen {
+    padding: 8px;
+  }
+
+  .accessible-dialog-fullscreen {
+    width: calc(100vw - 16px);
+    height: calc(100dvh - 16px);
+    border-radius: 16px;
+  }
+
+  .manager-header {
+    gap: 12px;
+    padding: 16px 14px 14px;
+  }
+
+  .manager-header h2 {
+    font-size: clamp(26px, 8vw, 34px);
+  }
+
+  .manager-header p {
+    font-size: 12px;
+  }
+
+  .manager-header-actions {
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .manager-header-actions > * {
+    min-width: 0;
+  }
+
+  .manager-layout {
+    grid-template-rows: minmax(132px, 164px) auto minmax(0, 1fr);
+  }
+
+  .agent-directory {
+    max-height: 164px;
+    padding: 10px 10px 12px;
+  }
+
+  .agent-directory .compact-search {
+    height: 40px;
+  }
+
+  .new-agent-button {
+    min-height: 40px;
+    margin: 8px 0 8px;
+  }
+
+  .manager-sections {
+    grid-auto-columns: minmax(128px, 42vw);
+    gap: 4px;
+    padding: 8px 10px;
+  }
+
+  .manager-sections button {
+    min-height: 36px;
+    padding-inline: 10px;
+    font-size: 11px;
+  }
+
+  .agent-editor {
+    min-height: 390px;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .editor-section {
+    padding: 24px 16px 38px;
+  }
+
+  .editor-section h3 {
+    font-size: clamp(26px, 8vw, 36px);
+  }
+
+  .editor-section > p {
+    margin-bottom: 22px;
+    font-size: 12px;
+  }
+
+  .source-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .prompt-editor {
+    min-height: 220px;
+  }
+
+  .positioning-editor {
+    min-height: 180px;
+  }
+
+  .editor-footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 14px 12px;
+  }
+
+  .editor-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .editor-actions > button {
+    min-width: 0;
+    flex: 1 1 140px;
+  }
+
+  .confirmation-dialog,
+  .password-dialog {
+    padding: 22px 18px 18px;
+  }
+
+  .dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dialog-actions > button {
+    width: 100%;
+  }
+}

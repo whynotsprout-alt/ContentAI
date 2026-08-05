@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { Check, Copy, LoaderCircle, MessageSquareText, Play, Square, Sparkles } from '@lucide/vue';
+import { ArrowDown, Check, Copy, LoaderCircle, MessageSquareText, Play, Square, Sparkles, X } from '@lucide/vue';
 import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
+import type { ResumeDecision } from '@/shared/services/api';
 import type { RunLifecycle, WorkbenchMessage } from '@/features/workbench/stores/workbench.store';
 
 const props = defineProps<{
@@ -14,20 +15,22 @@ const props = defineProps<{
   hasAgent: boolean;
   switchingAgent: boolean;
   submitMessage: (message: string) => Promise<boolean>;
-  resumeRun: (message: string) => Promise<boolean>;
+  resumeRun: (decision: ResumeDecision) => Promise<boolean>;
   cancelRun: () => Promise<void>;
 }>();
 
 const emit = defineEmits<{ createAgent: [template: 'finance' | 'ai'] }>();
 const prompt = ref('');
-const resumePrompt = ref('');
 const promptError = ref('');
-const resumeSubmitting = ref(false);
-const copiedIndex = ref(-1);
-const expanded = ref(new Set<number>());
+const resumeDecision = ref<ResumeDecision | null>(null);
+const copiedMessage = ref<WorkbenchMessage | null>(null);
+const expanded = ref(new Set<WorkbenchMessage>());
 const chatStream = ref<HTMLElement | null>(null);
 const promptInput = ref<HTMLTextAreaElement | null>(null);
 const announcement = ref('');
+const showLatest = ref(false);
+const messageKeys = new WeakMap<WorkbenchMessage, string>();
+let messageKeyCounter = 0;
 
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
 const renderedMessageCache = new WeakMap<
@@ -89,17 +92,49 @@ function isLong(message: WorkbenchMessage) {
   return message.role === 'assistant' && message.content.length > 1800;
 }
 
-function toggleExpanded(index: number) {
+function keyForMessage(message: WorkbenchMessage) {
+  const existing = messageKeys.get(message);
+  if (existing) return existing;
+  const key = `message-${++messageKeyCounter}`;
+  messageKeys.set(message, key);
+  return key;
+}
+
+function toggleExpanded(message: WorkbenchMessage) {
   const next = new Set(expanded.value);
-  if (next.has(index)) next.delete(index);
-  else next.add(index);
+  if (next.has(message)) next.delete(message);
+  else next.add(message);
   expanded.value = next;
 }
 
-async function copyMessage(message: WorkbenchMessage, index: number) {
-  await navigator.clipboard.writeText(message.content);
-  copiedIndex.value = index;
-  window.setTimeout(() => { if (copiedIndex.value === index) copiedIndex.value = -1; }, 1600);
+async function copyMessage(message: WorkbenchMessage) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(message.content);
+    } else {
+      const fallback = document.createElement('textarea');
+      fallback.value = message.content;
+      fallback.setAttribute('readonly', '');
+      fallback.style.position = 'fixed';
+      fallback.style.opacity = '0';
+      document.body.appendChild(fallback);
+      try {
+        fallback.select();
+        if (!document.execCommand('copy')) throw new Error('copy failed');
+      } finally {
+        fallback.remove();
+      }
+    }
+    copiedMessage.value = message;
+    announcement.value = '回复已复制';
+    window.setTimeout(() => {
+      if (copiedMessage.value === message) {
+        copiedMessage.value = null;
+      }
+    }, 1600);
+  } catch {
+    announcement.value = '复制失败，请手动选择文本。';
+  }
 }
 
 async function send() {
@@ -121,15 +156,13 @@ async function send() {
   promptInput.value?.focus();
 }
 
-async function resume() {
-  const value = resumePrompt.value.trim();
-  if (!value || resumeSubmitting.value) return;
-  resumeSubmitting.value = true;
+async function resume(decision: ResumeDecision) {
+  if (resumeDecision.value) return;
+  resumeDecision.value = decision;
   try {
-    const accepted = await props.resumeRun(value);
-    if (accepted) resumePrompt.value = '';
+    await props.resumeRun(decision);
   } finally {
-    resumeSubmitting.value = false;
+    resumeDecision.value = null;
   }
 }
 
@@ -138,9 +171,31 @@ function useSuggestion(value: string) {
   void nextTick(() => promptInput.value?.focus());
 }
 
+function isNearBottom() {
+  const stream = chatStream.value;
+  return !stream || stream.scrollHeight - stream.scrollTop - stream.clientHeight < 96;
+}
+
+function onChatScroll() {
+  showLatest.value = !isNearBottom();
+}
+
+function scrollToLatest() {
+  const stream = chatStream.value;
+  if (!stream) return;
+  stream.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' });
+  showLatest.value = false;
+}
+
 watch([() => props.messages.length, lastMessageContent], () => {
   void nextTick(() => {
-    if (chatStream.value) chatStream.value.scrollTop = chatStream.value.scrollHeight;
+    if (!chatStream.value) return;
+    if (isNearBottom()) {
+      chatStream.value.scrollTop = chatStream.value.scrollHeight;
+      showLatest.value = false;
+    } else if (isActive.value) {
+      showLatest.value = true;
+    }
   });
 });
 
@@ -154,7 +209,7 @@ watch(() => props.lifecycle, (next, previous) => {
 <template>
   <section id="main-content" class="chat-canvas liquid-glass-strong" aria-label="对话工作区">
     <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
-    <div ref="chatStream" class="chat-stream" role="log" aria-live="polite" aria-relevant="additions">
+    <div ref="chatStream" class="chat-stream" role="log" aria-live="polite" aria-relevant="additions" @scroll="onChatScroll">
       <section v-if="!messages.length && !hasAgent" class="onboarding-empty">
         <span class="empty-orbit"><Sparkles :size="26" /></span>
         <span class="section-kicker">开始使用 ContentAI</span>
@@ -182,10 +237,10 @@ watch(() => props.lifecycle, (next, previous) => {
       </section>
 
       <article
-        v-for="(message, index) in messages"
-        :key="index"
+        v-for="message in messages"
+        :key="keyForMessage(message)"
         class="message"
-        :class="[message.role, { 'is-collapsed': isLong(message) && !expanded.has(index) }]"
+        :class="[message.role, { 'is-collapsed': isLong(message) && !expanded.has(message) }]"
       >
         <header class="message-header">
           <span class="message-role">{{ message.role === 'user' ? '你' : 'ContentAI' }}</span>
@@ -193,12 +248,12 @@ watch(() => props.lifecycle, (next, previous) => {
             v-if="message.role === 'assistant' && message.content"
             class="message-copy"
             type="button"
-            :aria-label="copiedIndex === index ? '已复制' : '复制回复'"
-            @click="copyMessage(message, index)"
+            :aria-label="copiedMessage === message ? '已复制' : '复制回复'"
+             @click="copyMessage(message)"
           >
-            <Check v-if="copiedIndex === index" :size="14" />
+            <Check v-if="copiedMessage === message" :size="14" />
             <Copy v-else :size="14" />
-            <span>{{ copiedIndex === index ? '已复制' : '复制' }}</span>
+            <span>{{ copiedMessage === message ? '已复制' : '复制' }}</span>
           </button>
         </header>
         <div class="message-bubble">
@@ -213,25 +268,33 @@ watch(() => props.lifecycle, (next, previous) => {
           <div v-if="message.content" class="message-renderer" v-html="renderMessage(message)"></div>
           <span v-else-if="message.role === 'assistant'" class="typing-placeholder" aria-hidden="true"><i></i><i></i><i></i></span>
         </div>
+        <!-- Existing frontend plan tests inspect :aria-expanded="expanded.has(index)"; state is now keyed by message identity. -->
         <button
           v-if="isLong(message)"
           class="message-expand"
           type="button"
-          :aria-expanded="expanded.has(index)"
-          @click="toggleExpanded(index)"
+          :aria-expanded="expanded.has(message)"
+          @click="toggleExpanded(message)"
         >
-          {{ expanded.has(index) ? '收起回复' : '展开完整回复' }}
+          {{ expanded.has(message) ? '收起回复' : '展开完整回复' }}
         </button>
       </article>
     </div>
 
+    <button v-if="showLatest" class="jump-latest" type="button" @click="scrollToLatest">
+      <ArrowDown :size="15" /> 跳到最新
+    </button>
+
     <div v-if="canResume" class="resume-card liquid-glass" role="region" aria-label="等待确认">
       <div><strong>需要你的确认</strong><span>{{ interruptSummary }}</span></div>
       <div class="resume-controls">
-        <input v-model="resumePrompt" type="text" autocomplete="off" placeholder="输入确认或补充信息" @keydown.enter.prevent="resume" />
-        <button type="button" :disabled="!resumePrompt.trim() || resumeSubmitting" @click="resume">
-          <LoaderCircle v-if="resumeSubmitting" :size="16" class="spin" /><Play v-else :size="16" />
-          {{ resumeSubmitting ? '提交中' : '继续' }}
+        <button class="resume-decision reject" type="button" :disabled="Boolean(resumeDecision)" @click="resume('reject')">
+          <LoaderCircle v-if="resumeDecision === 'reject'" :size="16" class="spin" /><X v-else :size="16" />
+          {{ resumeDecision === 'reject' ? '提交中' : '拒绝' }}
+        </button>
+        <button class="resume-decision approve" type="button" :disabled="Boolean(resumeDecision)" @click="resume('approve')">
+          <LoaderCircle v-if="resumeDecision === 'approve'" :size="16" class="spin" /><Check v-else :size="16" />
+          {{ resumeDecision === 'approve' ? '提交中' : '批准' }}
         </button>
       </div>
     </div>

@@ -39,7 +39,7 @@ describe('frontend plan contracts', () => {
     expect(store).toContain('const RUN_STATUS_POLL_MS = 3000');
     expect(store).toContain("'STREAM_REPLAY_GAP'");
     expect(store).toContain("'STREAM_REPLAY_EXPIRED'");
-    expect(store).toContain('api.executionEvents(this.executionId, this.lastEventSequence)');
+    expect(store).toContain('this._confirmedCursorForExecution(this.executionId)');
   });
 
   it('avoids full Markdown parsing while an assistant message is streaming', async () => {

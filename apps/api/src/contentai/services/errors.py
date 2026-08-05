@@ -10,6 +10,10 @@ class AgentAlreadyExistsError(AgentDomainError):
     pass
 
 
+class AgentVersionConflictError(AgentDomainError):
+    """A new version could not be assigned a unique version number."""
+
+
 class AgentValidationError(AgentDomainError):
     pass
 
@@ -44,6 +48,10 @@ class ChatSessionNotFoundError(ConversationError):
 
 class ActiveExecutionExistsError(ConversationError):
     pass
+
+
+class MessageAlreadyExistsError(ConversationError):
+    """A caller-provided message identifier is already in use."""
 
 
 class SessionAgentMismatchError(ConversationError):

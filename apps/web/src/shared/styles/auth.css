@@ -43,6 +43,7 @@
 .auth-hero__copy h1 em {
   color: #5f8067;
   font-style: italic;
+  white-space: nowrap;
 }
 
 .auth-hero__copy p {
@@ -133,6 +134,38 @@
   box-shadow: none;
 }
 
+.auth-password-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid rgb(45 101 72 / 0.18);
+  border-radius: var(--radius-control);
+}
+
+.auth-password-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.auth-password-notice > span {
+  display: grid;
+  gap: 3px;
+}
+
+.auth-password-notice strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.auth-password-notice small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .auth-links {
   display: flex;
   align-items: center;
@@ -154,6 +187,24 @@
   font-size: 11px;
   text-underline-offset: 4px;
   transition: color var(--transition-fast);
+}
+
+.auth-link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.auth-link-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.auth-links--forced {
+  align-items: flex-start;
 }
 
 .auth-links a:hover,
@@ -201,4 +252,76 @@
 @keyframes auth-reveal {
   from { opacity: 0; transform: translateY(16px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 1279px) {
+  .auth-shell {
+    min-height: 0;
+    height: 100dvh;
+    padding: 14px;
+    overflow-y: auto;
+  }
+
+  .auth-hero {
+    width: min(680px, calc(100% - 8px));
+    min-height: 100%;
+    gap: 22px;
+    padding: 20px 0 32px;
+  }
+
+  .auth-hero__copy h1 {
+    max-width: 620px;
+    font-size: clamp(40px, 7.2vw, 58px);
+  }
+
+  .auth-form-card {
+    max-height: none;
+  }
+}
+
+@media (max-width: 599px) {
+  .auth-shell {
+    padding: 10px;
+  }
+
+  .auth-hero {
+    width: 100%;
+    gap: 18px;
+    padding: 16px 0 24px;
+  }
+
+  .auth-hero__copy h1 {
+    max-width: 100%;
+    margin-top: 8px;
+    font-size: clamp(33px, 9.4vw, 48px);
+    text-wrap: balance;
+  }
+
+  .auth-hero__copy h1 em {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .auth-hero-break {
+    display: none;
+  }
+
+  .auth-hero__copy p {
+    max-width: 34rem;
+    font-size: 13px;
+  }
+
+  .auth-form {
+    gap: 14px;
+    padding: 20px;
+  }
+
+  .auth-form > header h2 {
+    font-size: 24px;
+  }
+
+  .auth-links {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
 }

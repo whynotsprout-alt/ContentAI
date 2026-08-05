@@ -37,7 +37,7 @@ def test_release_artifacts_and_maintained_docs_use_the_canonical_version() -> No
         for path in ("docs/OPERATIONS.md", "docs/UBUNTU_FROM_SCRATCH.md")
     )
 
-    assert version == "0.5.0-rc.1"
+    assert version == "0.7.0"
     assert web_package["version"] == version
     assert web_lock["version"] == version
     assert web_lock["packages"][""]["version"] == version
@@ -101,6 +101,15 @@ def test_release_diff_files_have_one_canonical_eof_newline() -> None:
         "apps/api/src/contentai/core/client_ip.py",
         "apps/api/src/contentai/migrations/versions/202608030001_model_pricing_and_usage_cost.py",
         "apps/api/src/contentai/migrations/versions/202608030002_restore_model_runtime_parameters.py",
+        "apps/api/src/contentai/migrations/versions/202608040001_model_api_mode.py",
+        "apps/api/src/contentai/migrations/versions/202608040002_model_usage_token_constraints.py",
+        "apps/api/src/contentai/migrations/versions/202608040003_model_usage_cost_consistency.py",
+        "apps/api/src/contentai/migrations/versions/202608040004_chatmessage_lineage_constraints.py",
+        "apps/api/src/contentai/migrations/versions/202608040005_memory_numeric_constraints.py",
+        "apps/api/src/contentai/migrations/versions/202608040006_current_attempt_lineage.py",
+        "apps/api/src/contentai/migrations/versions/202608040007_agent_catalog_pagination_index.py",
+        "apps/api/src/contentai/migrations/versions/202608040008_checkpoint_revision.py",
+        "apps/api/src/contentai/migrations/versions/202608040009_event_stream_watermarks.py",
     ):
         content = (ROOT / relative_path).read_bytes()
         assert content.endswith(b"\n"), relative_path

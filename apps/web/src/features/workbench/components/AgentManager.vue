@@ -13,7 +13,10 @@ import {
   X
 } from '@lucide/vue';
 import { ApiError, api, type AgentProfileDetail, type AgentProfilePayload } from '@/shared/services/api';
-import { useWorkbenchStore } from '@/features/workbench/stores/workbench.store';
+import {
+  AgentCatalogRefreshCancelledError,
+  useWorkbenchStore
+} from '@/features/workbench/stores/workbench.store';
 import AccessibleDialog from '@/shared/components/AccessibleDialog.vue';
 
 type TemplateId = 'finance' | 'ai';
@@ -93,6 +96,10 @@ const fieldErrors = computed(() => ({
 const valid = computed(() => Object.values(fieldErrors.value).every((value) => !value));
 const snapshot = computed(() => JSON.stringify(form.value));
 const dirty = computed(() => snapshot.value !== originalSnapshot.value);
+
+function isAgentCatalogCancellation(value: unknown) {
+  return value instanceof AgentCatalogRefreshCancelledError;
+}
 
 function resetForm(template?: TemplateId | null) {
   const source = template ? templates[template] : null;
@@ -196,6 +203,7 @@ async function save() {
     originalSnapshot.value = JSON.stringify(form.value);
     notice.value = '内容账号已保存，并已切换到它的会话。';
   } catch (value) {
+    if (isAgentCatalogCancellation(value)) return;
     error.value = value instanceof ApiError ? value.message : String(value);
   } finally {
     saving.value = false;
@@ -213,6 +221,7 @@ async function removeAgent() {
     else resetForm();
     notice.value = '内容账号已删除。';
   } catch (value) {
+    if (isAgentCatalogCancellation(value)) return;
     error.value = value instanceof ApiError ? value.message : String(value);
   } finally {
     saving.value = false;
@@ -227,6 +236,20 @@ function requestClose() {
 function discardAndClose() {
   confirmClose.value = false;
   emit('close');
+}
+
+function onSectionKeydown(event: KeyboardEvent) {
+  const currentIndex = sections.findIndex((section) => section.id === activeSection.value);
+  if (currentIndex < 0) return;
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % sections.length;
+  else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + sections.length) % sections.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = sections.length - 1;
+  else return;
+  event.preventDefault();
+  activeSection.value = sections[nextIndex].id;
+  void nextTick(() => document.getElementById(`manager-tab-${sections[nextIndex].id}`)?.focus());
 }
 
 watch(() => props.open, (open) => {
@@ -266,15 +289,17 @@ watch(() => props.open, (open) => {
           <p v-if="!filteredAgents.length" class="directory-empty">没有匹配的内容账号。</p>
         </aside>
 
-        <nav class="manager-sections" aria-label="配置分区">
+        <nav class="manager-sections" role="tablist" aria-label="配置分区" @keydown="onSectionKeydown">
           <button
             v-for="section in sections"
             :id="`manager-tab-${section.id}`"
             :key="section.id"
             type="button"
+            role="tab"
+            :tabindex="activeSection === section.id ? 0 : -1"
             :class="{ active: activeSection === section.id }"
             :aria-controls="`manager-panel-${section.id}`"
-            :aria-current="activeSection === section.id ? 'step' : undefined"
+            :aria-selected="activeSection === section.id"
             @click="activeSection = section.id"
           >
             {{ section.label }}
@@ -285,31 +310,31 @@ watch(() => props.open, (open) => {
         <form class="agent-editor" aria-label="内容账号配置编辑器" :aria-busy="loading || saving" @submit.prevent="save">
           <div v-if="loading" class="editor-loading" role="status"><LoaderCircle :size="20" class="spin" /> 正在加载配置</div>
           <template v-else>
-            <section id="manager-panel-basic" v-show="activeSection === 'basic'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-basic">
+            <section id="manager-panel-basic" v-show="activeSection === 'basic'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-basic" :aria-hidden="activeSection !== 'basic'">
               <span class="form-badge">{{ mode === 'create' ? '新建账号' : '基础信息' }}</span>
               <h3>让 Agent 理解你的内容边界</h3>
               <p>用受众和内容价值描述定位，避免只写宽泛行业词。</p>
-              <label class="field-block"><span>账号名称</span><input v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" /><small v-if="touched && fieldErrors.name" class="field-error">{{ fieldErrors.name }}</small></label>
-              <label class="field-block"><span>账号定位</span><textarea v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" /><small v-if="touched && fieldErrors.positioning" class="field-error">{{ fieldErrors.positioning }}</small></label>
+              <label class="field-block"><span>账号名称</span><input v-model="form.name" type="text" maxlength="80" placeholder="例如：高百烈说财经" :aria-invalid="touched && Boolean(fieldErrors.name)" :aria-describedby="touched && fieldErrors.name ? 'agent-name-error' : undefined" /><small v-if="touched && fieldErrors.name" id="agent-name-error" class="field-error">{{ fieldErrors.name }}</small></label>
+              <label class="field-block"><span>账号定位</span><textarea v-model="form.positioning" class="positioning-editor" rows="9" placeholder="服务谁、关注什么、提供什么独特价值" :aria-invalid="touched && Boolean(fieldErrors.positioning)" :aria-describedby="touched && fieldErrors.positioning ? 'agent-positioning-error' : undefined" /><small v-if="touched && fieldErrors.positioning" id="agent-positioning-error" class="field-error">{{ fieldErrors.positioning }}</small></label>
             </section>
 
-            <section id="manager-panel-sources" v-show="activeSection === 'sources'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-sources">
+            <section id="manager-panel-sources" v-show="activeSection === 'sources'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-sources" :aria-hidden="activeSection !== 'sources'">
               <span class="form-badge">热点来源</span><h3>选择信号来源</h3><p>已选择 {{ form.sources.length }} / {{ allSources.length }} 个来源。这里只控制来源偏好，不表示连通性状态。</p>
               <div class="source-groups">
-                <fieldset v-for="group in sourceGroups" :key="group.title" class="source-group"><legend>{{ group.title }}</legend><div class="source-grid">
+                <fieldset v-for="group in sourceGroups" :key="group.title" class="source-group" :aria-invalid="touched && Boolean(fieldErrors.sources)" :aria-describedby="touched && fieldErrors.sources ? 'agent-sources-error' : undefined"><legend>{{ group.title }}</legend><div class="source-grid">
                   <button v-for="source in group.sources" :key="source.id" type="button" :aria-pressed="form.sources.includes(source.id)" :class="{ selected: form.sources.includes(source.id) }" @click="toggleSource(source.id)"><Check v-if="form.sources.includes(source.id)" :size="14" />{{ source.label }}</button>
                 </div></fieldset>
-              </div><small v-if="touched && fieldErrors.sources" class="field-error">{{ fieldErrors.sources }}</small>
+              </div><small v-if="touched && fieldErrors.sources" id="agent-sources-error" class="field-error">{{ fieldErrors.sources }}</small>
             </section>
 
-            <section id="manager-panel-scoring" v-show="activeSection === 'scoring'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-scoring">
+            <section id="manager-panel-scoring" v-show="activeSection === 'scoring'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-scoring" :aria-hidden="activeSection !== 'scoring'">
               <span class="form-badge">评分规则</span><h3>定义什么值得做</h3><p>描述判断维度与取舍逻辑，输出仍会作为普通 Assistant 消息出现在对话中。</p>
-              <label class="field-block"><span>选题评分提示词</span><textarea v-model="form.scoring" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.scoring" class="field-error">{{ fieldErrors.scoring }}</small></label>
+              <label class="field-block"><span>选题评分提示词</span><textarea v-model="form.scoring" class="prompt-editor" rows="18" :aria-invalid="touched && Boolean(fieldErrors.scoring)" :aria-describedby="touched && fieldErrors.scoring ? 'agent-scoring-error' : undefined" /><small v-if="touched && fieldErrors.scoring" id="agent-scoring-error" class="field-error">{{ fieldErrors.scoring }}</small></label>
             </section>
 
-            <section id="manager-panel-content" v-show="activeSection === 'content'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-content">
+            <section id="manager-panel-content" v-show="activeSection === 'content'" class="editor-section" role="tabpanel" aria-labelledby="manager-tab-content" :aria-hidden="activeSection !== 'content'">
               <span class="form-badge">内容规则</span><h3>定义最终表达</h3><p>写清结构、语气、事实边界和引用要求，避免塞入具体某一次任务。</p>
-              <label class="field-block"><span>内容生成提示词</span><textarea v-model="form.content" class="prompt-editor" rows="18" /><small v-if="touched && fieldErrors.content" class="field-error">{{ fieldErrors.content }}</small></label>
+              <label class="field-block"><span>内容生成提示词</span><textarea v-model="form.content" class="prompt-editor" rows="18" :aria-invalid="touched && Boolean(fieldErrors.content)" :aria-describedby="touched && fieldErrors.content ? 'agent-content-error' : undefined" /><small v-if="touched && fieldErrors.content" id="agent-content-error" class="field-error">{{ fieldErrors.content }}</small></label>
             </section>
 
           </template>

@@ -1,4 +1,4 @@
-# Ubuntu 部署指南（ContentAI V0.5.0-rc.1）
+# Ubuntu 部署指南（ContentAI V0.7.0）
 
 本文用于在全新的 Ubuntu 22.04 或 24.04 LTS 服务器上部署 ContentAI。生产环境使用 Docker Compose，应用只在本机回环地址暴露 Web 服务，由 Nginx 或 Caddy 负责 HTTPS。
 
@@ -55,23 +55,23 @@ docker compose version
 
 ~~~bash
 cd /tmp
-curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.5.0-rc.1/contentai-0.5.0-rc.1-ubuntu.tar.gz
-curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/V0.5.0-rc.1/contentai-0.5.0-rc.1-ubuntu.tar.gz.sha256
+curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/v0.7.0/contentai-0.7.0-ubuntu.tar.gz
+curl -fL -O https://github.com/whynotsprout-alt/ContentAI/releases/download/v0.7.0/contentai-0.7.0-ubuntu.tar.gz.sha256
 
-sha256sum -c contentai-0.5.0-rc.1-ubuntu.tar.gz.sha256
+sha256sum -c contentai-0.7.0-ubuntu.tar.gz.sha256
 
 sudo install -d -m 0755 /opt/contentai
-sudo tar -xzf contentai-0.5.0-rc.1-ubuntu.tar.gz -C /opt/contentai
-sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.5.0-rc.1-ubuntu
-cd /opt/contentai/contentai-0.5.0-rc.1-ubuntu
+sudo tar -xzf contentai-0.7.0-ubuntu.tar.gz -C /opt/contentai
+sudo chown -R "$USER":"$USER" /opt/contentai/contentai-0.7.0-ubuntu
+cd /opt/contentai/contentai-0.7.0-ubuntu
 ~~~
 
 也可从源码安装：
 
 ~~~bash
-git clone --branch V0.5.0-rc.1 --single-branch \
-  https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.5.0-rc.1
-cd /opt/contentai/contentai-0.5.0-rc.1
+git clone --branch v0.7.0 --single-branch \
+  https://github.com/whynotsprout-alt/ContentAI.git /opt/contentai/contentai-0.7.0
+cd /opt/contentai/contentai-0.7.0
 ~~~
 
 ## 4. 配置生产环境
@@ -150,7 +150,7 @@ sudo certbot --nginx -d content.example.com
 ## 6. 启动与验证
 
 ~~~bash
-cd /opt/contentai/contentai-0.5.0-rc.1-ubuntu
+cd /opt/contentai/contentai-0.7.0-ubuntu
 docker compose --env-file .env config --quiet
 bash infra/ubuntu/deploy.sh
 bash infra/ubuntu/health.sh
@@ -167,7 +167,7 @@ curl --fail https://content.example.com/api/ready
 
 使用该账号登录后立即修改初始密码。初始密码应保存在受控的密钥管理系统中，不应写入文档、Shell 历史或版本库。
 
-然后访问 `/admin/models` 配置唯一全局 active OpenAI-compatible Base URL、API Key 和模型名。可先 probe；保存时服务端会再次完成完整 probe。首次配置必须输入 API Key，后续更新留空才表示继续使用当前 active Key。模型切换仅影响新 execution；queued、running、resume 与 retry 使用固化的历史版本。首个版本不提供旧环境变量自动导入、数据库回退、配置删除、回滚或在线 Fernet 主密钥轮换。
+然后访问 `/admin/models` 配置唯一全局 active OpenAI-compatible Base URL、API Key、模型名和 API 模式（Chat Completions 或 Responses）。可先 probe；保存时服务端会再次按所选模式探测对应 endpoint，运行时不会再根据模型名自动切换。首次配置必须输入 API Key，后续更新留空才表示继续使用当前 active Key。模型切换仅影响新 execution；queued、running、resume 与 retry 使用固化的历史版本。首个版本不提供旧环境变量自动导入、数据库回退、配置删除、回滚或在线 Fernet 主密钥轮换。
 
 ## 7. 日志与深度搜索排错
 

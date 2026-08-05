@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import String, and_, case, cast, func, literal, or_, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
 from contentai.memory.types import MemoryEntry
-from contentai.models.base import json_loads, utcnow
+from contentai.models.base import json_loads, new_id, utcnow
 from contentai.models.enums import MemoryKind, MemorySourceType
 from contentai.models.memory import MemoryRecord
 
@@ -30,7 +33,7 @@ def normalize_memory_source_type(
 
 
 class MemoryRepository:
-    def __init__(self, session: Session, *, auto_commit: bool = True) -> None:
+    def __init__(self, session: Session, *, auto_commit: bool = False) -> None:
         self.session = session
         self.auto_commit = auto_commit
 
@@ -53,44 +56,69 @@ class MemoryRepository:
         expires_at: datetime | None = None,
     ) -> MemoryEntry:
         self._validate_owner(agent_id=agent_id, session_id=session_id)
-        row = self._find_active(
-            key=key,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-        )
         now = utcnow()
-        if row is None:
-            row = MemoryRecord(
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                memory_key=key,
+        values = {
+            "id": new_id("mem"),
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "memory_key": key,
+            "kind": normalize_memory_kind(kind),
+            "payload": payload or {},
+            "content": content.strip(),
+            "confidence": _normalize_unit_score(confidence, field_name="confidence"),
+            "importance_score": _normalize_unit_score(
+                importance_score,
+                field_name="importance_score",
+            ),
+            "source_type": normalize_memory_source_type(source_type),
+            "source_session_id": source_session_id,
+            "source_message_id": source_message_id,
+            "source_execution_id": source_execution_id,
+            "version": 1,
+            "access_count": 0,
+            "last_accessed_at": None,
+            "expires_at": expires_at,
+            "deleted_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        statement = insert(MemoryRecord).values(**values)
+        conflict_columns, conflict_predicate = self._conflict_target(
+            agent_id=agent_id,
+        )
+        update_columns = {
+            column_name: getattr(statement.excluded, column_name)
+            for column_name in (
+                "kind",
+                "payload",
+                "content",
+                "confidence",
+                "importance_score",
+                "source_type",
+                "source_session_id",
+                "source_message_id",
+                "source_execution_id",
+                "expires_at",
+                "deleted_at",
+                "updated_at",
             )
-        else:
-            row.version += 1
-        row.user_id = user_id
-        row.agent_id = agent_id
-        row.session_id = session_id
-        row.kind = normalize_memory_kind(kind)
-        row.content = content.strip()
-        row.payload = payload or {}
-        row.confidence = _clamp(confidence, minimum=0.0, maximum=1.0)
-        row.importance_score = max(float(importance_score), 0.0)
-        row.source_type = normalize_memory_source_type(source_type)
-        row.source_session_id = source_session_id
-        row.source_message_id = source_message_id
-        row.source_execution_id = source_execution_id
-        row.expires_at = expires_at
-        row.deleted_at = None
-        row.touch_updated_at(now)
-        self.session.add(row)
+        }
+        update_columns["version"] = MemoryRecord.version + 1
+        row = self.session.execute(
+            statement.on_conflict_do_update(
+                index_elements=conflict_columns,
+                index_where=conflict_predicate,
+                set_=update_columns,
+            ).returning(MemoryRecord),
+            execution_options={"populate_existing": True},
+        ).scalar_one()
+        entry = self._to_entry(row)
         if self.auto_commit:
             self.session.commit()
         else:
             self.session.flush()
-        self.session.refresh(row)
-        return self._to_entry(row)
+        return entry
 
     def get(
         self,
@@ -110,7 +138,7 @@ class MemoryRepository:
         if row is None:
             return None
         if touch:
-            self._record_access([row])
+            return self._record_access([row])[row.id]
         return self._to_entry(row)
 
     def list_scope(
@@ -134,7 +162,8 @@ class MemoryRepository:
             ).all()
         )
         if touch:
-            self._record_access(rows)
+            touched = self._record_access(rows)
+            return [touched[row.id] for row in rows]
         return [self._to_entry(row) for row in rows]
 
     def search(
@@ -147,40 +176,75 @@ class MemoryRepository:
         limit: int = 8,
         touch: bool = True,
     ) -> list[MemoryEntry]:
-        candidates = self.list_scope(
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            limit=100,
-            touch=touch,
-        )
         terms = _memory_query_terms(query_text)
         if not terms:
-            return candidates[:limit]
-        scored: list[tuple[int, MemoryEntry]] = []
-        for entry in candidates:
-            haystack = f"{entry.kind} {entry.content} {entry.payload}".casefold()
-            score = sum(1 for term in terms if term in haystack)
-            if score:
-                scored.append((score, entry))
-        scored.sort(key=lambda item: (item[0], item[1].updated_at or utcnow()), reverse=True)
-        return [entry for _, entry in scored[:limit]]
+            rows = list(
+                self.session.exec(
+                    self._scoped_query(
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                    )
+                    .order_by(MemoryRecord.updated_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+        else:
+            # Rank across the complete active scope in PostgreSQL. Truncating
+            # candidates before matching makes older exact memories
+            # permanently unreachable once a scope grows past the cap.
+            haystack = func.lower(
+                func.concat(
+                    cast(MemoryRecord.kind, String),
+                    " ",
+                    MemoryRecord.content,
+                    " ",
+                    cast(MemoryRecord.payload, String),
+                )
+            )
+            matches = [haystack.contains(term, autoescape=True) for term in terms]
+            score = sum(
+                (case((term_match, 1), else_=0) for term_match in matches),
+                start=literal(0),
+            )
+            rows = list(
+                self.session.exec(
+                    self._scoped_query(
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                    )
+                    .where(or_(*matches))
+                    .order_by(score.desc(), MemoryRecord.updated_at.desc())
+                    .limit(limit)
+                ).all()
+            )
 
-    def _find_active(
-        self,
-        *,
-        key: str,
-        user_id: str,
-        agent_id: str | None,
-        session_id: str | None,
-    ) -> MemoryRecord | None:
-        return self.session.exec(
-            self._scoped_query(
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-            ).where(MemoryRecord.memory_key == key)
-        ).first()
+        # A search scans candidates, but only returned matches count as an
+        # access. This keeps access statistics meaningful and avoids turning
+        # read-only retrieval into a write-heavy operation.
+        if touch:
+            touched = self._record_access(rows)
+            return [touched[row.id] for row in rows]
+        return [self._to_entry(row) for row in rows]
+
+    @staticmethod
+    def _conflict_target(*, agent_id: str | None):
+        if agent_id is not None:
+            return (
+                (MemoryRecord.user_id, MemoryRecord.agent_id, MemoryRecord.memory_key),
+                and_(
+                    MemoryRecord.agent_id.is_not(None),
+                    MemoryRecord.deleted_at.is_(None),
+                ),
+            )
+        return (
+            (MemoryRecord.user_id, MemoryRecord.session_id, MemoryRecord.memory_key),
+            and_(
+                MemoryRecord.session_id.is_not(None),
+                MemoryRecord.deleted_at.is_(None),
+            ),
+        )
 
     @staticmethod
     def _active_query():
@@ -215,14 +279,41 @@ class MemoryRepository:
         if (agent_id is None) == (session_id is None):
             raise ValueError("exactly one of agent_id or session_id is required")
 
-    def _record_access(self, rows: list[MemoryRecord]) -> None:
+    def _record_access(self, rows: list[MemoryRecord]) -> dict[str, MemoryEntry]:
         if not rows:
-            return
+            return {}
         now = utcnow()
+        updated_rows = self.session.execute(
+            update(MemoryRecord)
+            .where(MemoryRecord.id.in_([row.id for row in rows]))
+            .values(
+                access_count=MemoryRecord.access_count + 1,
+                last_accessed_at=now,
+            )
+            .returning(
+                MemoryRecord.id,
+                MemoryRecord.access_count,
+                MemoryRecord.last_accessed_at,
+            ),
+            execution_options={"synchronize_session": False},
+        ).all()
+        access_by_id = {
+            row_id: (access_count, last_accessed_at)
+            for row_id, access_count, last_accessed_at in updated_rows
+        }
         for row in rows:
-            row.touch_accessed_at(now)
-            self.session.add(row)
-        self.session.commit()
+            access = access_by_id.get(row.id)
+            if access is None:
+                continue
+            access_count, last_accessed_at = access
+            set_committed_value(row, "access_count", access_count)
+            set_committed_value(row, "last_accessed_at", last_accessed_at)
+        entries = {row.id: self._to_entry(row) for row in rows}
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return entries
 
     @staticmethod
     def _to_entry(row: MemoryRecord) -> MemoryEntry:
@@ -258,5 +349,8 @@ def _memory_query_terms(value: str) -> list[str]:
     return list(dict.fromkeys(terms))[:24]
 
 
-def _clamp(value: float, *, minimum: float, maximum: float) -> float:
-    return min(max(float(value), minimum), maximum)
+def _normalize_unit_score(value: float, *, field_name: str) -> float:
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f"{field_name} must be finite")
+    return min(max(normalized, 0.0), 1.0)

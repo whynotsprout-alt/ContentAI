@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -35,6 +36,7 @@ class ResearchPackageRepository:
     @staticmethod
     def persist(
         *,
+        bind: Engine | None = None,
         session_id: str,
         execution_id: str,
         agent_version_id: str,
@@ -48,22 +50,27 @@ class ResearchPackageRepository:
         removed_unknown_reference_count: int,
     ) -> ResearchPackage:
         digest = topic_digest(topic)
-        with Session(get_engine()) as session:
+        persistence_bind = bind if bind is not None else get_engine()
+        with Session(persistence_bind) as session:
             row = session.exec(
                 select(ResearchPackage).where(
                     ResearchPackage.execution_id == execution_id,
                     ResearchPackage.topic_hash == digest,
                 )
             ).first()
-            if row is None:
-                row = ResearchPackage(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    agent_version_id=agent_version_id,
-                    topic=topic,
-                    topic_hash=digest,
-                    rendered_content=rendered_content,
-                )
+            if row is not None:
+                # Checkpoints and tool messages retain only this durable
+                # package identity. Replacing its evidence in place would
+                # silently change what an earlier tool result means.
+                return row
+            row = ResearchPackage(
+                session_id=session_id,
+                execution_id=execution_id,
+                agent_version_id=agent_version_id,
+                topic=topic,
+                topic_hash=digest,
+                rendered_content=rendered_content,
+            )
             row.package_data = package_data
             row.sources = sources
             row.provider_diagnostics = provider_diagnostics
@@ -77,16 +84,43 @@ class ResearchPackageRepository:
             session.add(row)
             try:
                 session.commit()
-            except IntegrityError:
+            except IntegrityError as exc:
                 session.rollback()
-                row = session.exec(
+                if _constraint_name(exc) != "ux_researchpackage_execution_topic":
+                    # Only the expected idempotent insert race may be recovered
+                    # by loading the winner. Foreign-key/check failures must
+                    # retain their original cause instead of becoming a
+                    # misleading NoResultFound below.
+                    raise
+                winner = session.exec(
                     select(ResearchPackage).where(
                         ResearchPackage.execution_id == execution_id,
                         ResearchPackage.topic_hash == digest,
                     )
-                ).one()
+                ).first()
+                if winner is None:
+                    # The winning row (or its parent execution) may have been
+                    # deleted between the conflicting INSERT and this read.
+                    # Preserve the original constraint failure instead of
+                    # masking it with a lookup exception.
+                    raise
+                row = winner
             session.refresh(row)
             return row
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    diagnostic_name = getattr(
+        getattr(exc.orig, "diag", None),
+        "constraint_name",
+        None,
+    )
+    if diagnostic_name:
+        return str(diagnostic_name)
+    message = str(exc)
+    if "ux_researchpackage_execution_topic" in message:
+        return "ux_researchpackage_execution_topic"
+    return None
 
 
 __all__ = ["ResearchPackageRepository", "topic_digest"]

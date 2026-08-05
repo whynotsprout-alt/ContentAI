@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlmodel import Session
 
-from contentai.agent.runtime.checkpoint import checkpoint_interrupts
+from contentai.agent.runtime.checkpoint import execution_checkpoint_config
 from contentai.agent.tools.memory import normalize_remember_input
 from contentai.memory.long_term import is_sensitive_memory
 from contentai.models.base import utcnow
@@ -74,12 +74,29 @@ def pending_interrupt_descriptors(
     thread_id: str,
     execution_id: str,
 ) -> dict[str, str]:
+    checkpoint = checkpointer.get_tuple(
+        execution_checkpoint_config(
+            thread_id=thread_id,
+            execution_id=execution_id,
+        )
+    )
+    return checkpoint_tuple_interrupt_descriptors(checkpoint)
+
+
+def checkpoint_tuple_interrupt_descriptors(checkpoint: Any) -> dict[str, str]:
+    """Purely project pending interrupt IDs and hashes from one checkpoint tuple."""
+    interrupts: list[Any] = []
+    if checkpoint is not None:
+        for task in getattr(checkpoint, "pending_writes", ()) or ():
+            if len(task) >= 3 and task[1] == "__interrupt__":
+                value = task[2]
+                interrupts.extend(value if isinstance(value, list | tuple) else [value])
+        if not interrupts:
+            for task in getattr(checkpoint, "tasks", ()) or ():
+                interrupts.extend(list(getattr(task, "interrupts", ()) or ()))
+
     output: dict[str, str] = {}
-    for interrupt in checkpoint_interrupts(
-        checkpointer,
-        thread_id=thread_id,
-        execution_id=execution_id,
-    ):
+    for interrupt in interrupts:
         interrupt_id = (
             interrupt.get("id") if isinstance(interrupt, dict) else getattr(interrupt, "id", None)
         )
@@ -237,6 +254,7 @@ def public_interrupt_from_projection(value: Any) -> PublicInterrupt | None:
 
 
 __all__ = [
+    "checkpoint_tuple_interrupt_descriptors",
     "interrupt_identity",
     "load_resume_value",
     "mark_resume_consumed",

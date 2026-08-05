@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from pwdlib import PasswordHash
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from contentai.core.config import Settings
@@ -58,7 +59,12 @@ class AuthService:
             email_verified_at=now,
         )
         session.add(user)
-        session.commit()
+        try:
+            self._commit_or_rollback(session)
+        except IntegrityError as exc:
+            if self._is_constraint(exc, "ux_appuser_email_normalized"):
+                raise AuthServiceError("Email is already registered", status_code=409) from exc
+            raise
         session.refresh(user)
         return user
 
@@ -79,7 +85,14 @@ class AuthService:
             email_verified_at=now,
         )
         session.add(user)
-        session.commit()
+        try:
+            self._commit_or_rollback(session)
+        except IntegrityError as exc:
+            if self._is_constraint(exc, "ux_appuser_email_normalized"):
+                # Another process may have won the bootstrap race. The existing
+                # account is authoritative and must not be modified here.
+                return self.get_user_by_email(session, email)
+            raise
         session.refresh(user)
         return user
 
@@ -106,7 +119,7 @@ class AuthService:
                 user.failed_login_count = 0
             user.updated_at = now
             session.add(user)
-            session.commit()
+            self._commit_or_rollback(session)
             raise AuthServiceError("邮箱或密码错误", status_code=401)
         now = utcnow()
         if user.status != "active" or user.email_verified_at is None:
@@ -117,7 +130,7 @@ class AuthService:
             and user.temporary_password_expires_at <= now
         ):
             self.revoke_all_sessions(session, user.id, commit=False)
-            session.commit()
+            self._commit_or_rollback(session)
             raise AuthServiceError("Temporary password has expired.", status_code=401)
         user.failed_login_count = 0
         user.locked_until = None
@@ -131,7 +144,7 @@ class AuthService:
             ip_address=ip_address,
             now=now,
         )
-        session.commit()
+        self._commit_or_rollback(session)
         return issued
 
     def logout(self, session: Session, session_id: str | None) -> None:
@@ -141,7 +154,7 @@ class AuthService:
         if auth_session is not None and auth_session.revoked_at is None:
             auth_session.revoked_at = utcnow()
             session.add(auth_session)
-            session.commit()
+            self._commit_or_rollback(session)
 
     def change_password(
         self,
@@ -168,7 +181,7 @@ class AuthService:
             and user.temporary_password_expires_at <= now
         ):
             self.revoke_all_sessions(session, user.id, commit=False)
-            session.commit()
+            self._commit_or_rollback(session)
             raise AuthServiceError("Temporary password has expired.", status_code=401)
         user.password_hash = self.password_hash.hash(new_password)
         user.password_changed_at = now
@@ -184,7 +197,7 @@ class AuthService:
             ip_address=ip_address,
             now=now,
         )
-        session.commit()
+        self._commit_or_rollback(session)
         return issued
 
     def revoke_all_sessions(self, session: Session, user_id: str, *, commit: bool = True) -> None:
@@ -199,7 +212,7 @@ class AuthService:
             item.revoked_at = now
             session.add(item)
         if commit:
-            session.commit()
+            self._commit_or_rollback(session)
 
     def get_user_by_email(
         self,
@@ -256,3 +269,16 @@ class AuthService:
             must_change_password=user.must_change_password,
             temporary_password_expires_at=user.temporary_password_expires_at,
         )
+
+    @staticmethod
+    def _is_constraint(exc: IntegrityError, constraint_name: str) -> bool:
+        diagnostic_name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        return diagnostic_name == constraint_name or constraint_name in str(exc)
+
+    @staticmethod
+    def _commit_or_rollback(session: Session) -> None:
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise

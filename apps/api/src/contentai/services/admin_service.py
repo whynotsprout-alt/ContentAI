@@ -31,7 +31,10 @@ from contentai.models.schemas.chat import ChatMessageResponse
 from contentai.models.user import AdminAuditLog, AppUser, ModelUsage
 from contentai.services.auth_service import AuthService, AuthServiceError
 from contentai.services.errors import ResponseItemTooLargeError
-from contentai.services.execution_settlement import settle_execution_cancellation
+from contentai.services.execution_settlement import (
+    current_database_time,
+    settle_execution_cancellation,
+)
 from contentai.services.pagination import (
     MAX_RESPONSE_BYTES,
     apply_ascending_cursor,
@@ -186,7 +189,7 @@ class AdminService:
             request_id=request_id,
             detail={"status": user.status},
         )
-        session.commit()
+        self._commit_or_rollback(session)
         session.refresh(user)
         return self.user_summary(session, user)
 
@@ -216,7 +219,7 @@ class AdminService:
             detail={"role": user.role},
         )
         session.add(user)
-        session.commit()
+        self._commit_or_rollback(session)
         session.refresh(user)
         return self.user_summary(session, user)
 
@@ -259,7 +262,7 @@ class AdminService:
             request_id=request_id,
             detail={"expires_at": expires_at.isoformat().replace("+00:00", "Z")},
         )
-        session.commit()
+        self._commit_or_rollback(session)
         return TemporaryPasswordResponse(
             temporary_password=temporary_password,
             expires_at=expires_at,
@@ -356,7 +359,7 @@ class AdminService:
             request_id=request_id,
             detail={"session_id": chat.id},
         )
-        session.commit()
+        self._commit_or_rollback(session)
         return detail
 
     def list_session_messages(
@@ -527,6 +530,14 @@ class AdminService:
         )
 
     @staticmethod
+    def _commit_or_rollback(session: Session) -> None:
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+    @staticmethod
     def _ensure_not_last_admin(session: Session, user_id: str) -> None:
         session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
@@ -548,7 +559,6 @@ class AdminService:
 
     @staticmethod
     def _disable_user_runtime(session: Session, user_id: str) -> None:
-        now = utcnow()
         executions = session.exec(
             select(AgentExecution)
             .join(AgentInvocation, AgentExecution.invocation_id == AgentInvocation.id)
@@ -560,6 +570,7 @@ class AdminService:
             )
             .with_for_update()
         ).all()
+        now = current_database_time(session)
         for execution in executions:
             if execution.status == RunStatus.running:
                 execution.cancel_requested_at = execution.cancel_requested_at or now

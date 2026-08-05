@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
 
+import contentai.db.session as database_session
 import pytest
 from contentai.core.config import Settings
 from contentai.db.session import (
+    build_engine,
     calculate_connection_budget,
     engine_options_for_role,
     get_engine,
@@ -28,7 +32,7 @@ from contentai.services.service_heartbeat import (
     service_instance_id,
     upsert_service_heartbeat,
 )
-from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID, resolve_test_database_url
 from pydantic import ValidationError
 from sqlalchemy import delete, text
 from sqlalchemy.pool import NullPool
@@ -39,7 +43,7 @@ def _settings(**database: object) -> Settings:
     return Settings(
         env="test",
         database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
+            "url": resolve_test_database_url(),
             **database,
         },
     )
@@ -183,6 +187,49 @@ def test_engine_options_follow_runtime_role_and_migration_uses_null_pool() -> No
     assert worker["pool_size"] == 4
     assert worker["max_overflow"] == 2
     assert migration == {"poolclass": NullPool}
+
+
+def test_migration_engine_can_be_built_with_null_pool() -> None:
+    engine = build_engine(_settings(runtime_role="migration"))
+
+    try:
+        assert isinstance(engine.pool, NullPool)
+    finally:
+        engine.dispose()
+
+
+def test_get_engine_builds_once_for_concurrent_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    build_started = Event()
+    allow_build_to_finish = Event()
+    fake_engine = object()
+    build_calls = 0
+
+    def delayed_build(_settings: Settings) -> object:
+        nonlocal build_calls
+        build_calls += 1
+        build_started.set()
+        assert allow_build_to_finish.wait(timeout=10)
+        return fake_engine
+
+    monkeypatch.setattr(database_session, "_engines", {})
+    monkeypatch.setattr(database_session, "build_engine", delayed_build)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        first = executor.submit(database_session.get_engine, settings)
+        assert build_started.wait(timeout=10)
+        remaining = [
+            executor.submit(database_session.get_engine, settings) for _index in range(7)
+        ]
+        allow_build_to_finish.set()
+        engines = [first.result(timeout=10)] + [
+            future.result(timeout=10) for future in remaining
+        ]
+
+    assert build_calls == 1
+    assert all(engine is fake_engine for engine in engines)
 
 
 def test_compose_worker_concurrency_uses_the_budget_declarations() -> None:

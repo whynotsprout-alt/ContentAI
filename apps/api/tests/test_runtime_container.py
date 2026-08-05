@@ -91,6 +91,7 @@ def _runtime_configuration(
         "base_url": "https://models.example.test/v1",
         "api_key": SecretStr("test-secret"),
         "model_name": "test-model",
+        "api_mode": "chat_completions",
         "temperature": 0.2,
         "context_window_tokens": 32_000,
         "chat_max_tokens": 8_000,
@@ -290,6 +291,7 @@ def test_gateway_receives_complete_execution_configuration(monkeypatch) -> None:
         "contentai.agent.runtime.container.ModelConfigurationService.get_runtime_by_id",
         lambda _service, _session, model_config_id: _runtime_configuration(
             model_config_id,
+            api_mode="responses",
             temperature=0.7,
             context_window_tokens=200_000,
             chat_max_tokens=12_000,
@@ -312,6 +314,7 @@ def test_gateway_receives_complete_execution_configuration(monkeypatch) -> None:
     assert observed["base_url"] == "https://models.example.test/v1"
     assert observed["api_key"].get_secret_value() == "test-secret"
     assert observed["model_name"] == "test-model"
+    assert observed["api_mode"] == "responses"
     assert observed["temperature"] == 0.7
     assert observed["context_window_tokens"] == 200_000
     assert observed["chat_max_tokens"] == 12_000

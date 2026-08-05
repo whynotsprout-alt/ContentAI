@@ -6,6 +6,7 @@ import math
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -18,20 +19,24 @@ from contentai.agent.runtime.errors import (
     MODEL_STREAM_INTERRUPTED_CODE,
     MODEL_STREAM_INTERRUPTED_MESSAGE,
     classify_runtime_error,
+    is_retryable_model_stream_error,
+    model_retry_delay_seconds,
+)
+from contentai.agent.runtime.model_invocation import (
+    InvocationAttempt,
+    ainvoke_model,
+    invoke_model,
 )
 from contentai.core.config import Settings
-from langchain_core.messages import AIMessageChunk, HumanMessage
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import tool
+from model_config_helpers import resolve_test_database_url
 from pydantic import SecretStr
 
 
 def _settings() -> Settings:
-    return Settings(
-        database={
-            "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"
-        }
-    )
+    return Settings(database={"url": resolve_test_database_url()})
 
 
 def _gateway(*, client: Any | None = None) -> ModelGateway:
@@ -78,6 +83,7 @@ def test_openai_client_uses_exact_selected_root_model_and_safe_secret(monkeypatc
     assert observed["temperature"] == 0.37
     assert observed["max_tokens"] == 321
     assert observed["stream_usage"] is True
+    assert observed["use_responses_api"] is False
     assert isinstance(observed["http_client"], httpx.Client)
     assert isinstance(observed["http_async_client"], httpx.AsyncClient)
     assert observed["http_client"].follow_redirects is False
@@ -108,6 +114,259 @@ def test_openai_client_omits_temperature_in_auto_mode(monkeypatch) -> None:
     client.build_chat_model(temperature=None, max_tokens=128)
 
     assert "temperature" not in observed
+
+
+def test_runtime_deadline_timeout_reaches_langchain_provider_call(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_generate(
+        _self: Any,
+        _messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        _ = stop, run_manager
+        observed.update(kwargs)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content="ok"))]
+        )
+
+    monkeypatch.setattr(client_module._UsageAwareChatOpenAI, "_generate", fake_generate)
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="selected-model",
+    )
+    try:
+        model = client.build_chat_model(temperature=None, max_tokens=128)
+        response = invoke_model(
+            model,
+            [HumanMessage(content="ping")],
+            timeout_seconds=17.5,
+        )
+    finally:
+        client.close()
+
+    assert response.content == "ok"
+    assert observed["timeout"] == 17.5
+
+
+def test_unknown_sync_signature_type_error_never_replays_partial_output() -> None:
+    class UnknownSignatureModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, _messages: object, **kwargs: Any) -> None:
+            self.calls += 1
+            config = kwargs.get("config")
+            if isinstance(config, dict):
+                for callback in config.get("callbacks", []):
+                    callback.on_llm_new_token(token="partial")
+            raise TypeError("got an unexpected keyword argument 'config'")
+
+    UnknownSignatureModel.invoke.__signature__ = object()
+    model = UnknownSignatureModel()
+    attempt = InvocationAttempt()
+
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        invoke_model(
+            model,
+            [],
+            callbacks=[attempt],
+            include_empty_callbacks=True,
+        )
+
+    assert attempt.emitted_tokens is True
+    assert attempt.output_observable is False
+    assert model.calls == 1
+
+
+def test_positional_only_config_is_not_passed_as_a_keyword() -> None:
+    class PositionalOnlyConfigModel:
+        def invoke(
+            self,
+            messages: object,
+            config: object = None,
+            /,
+            **kwargs: object,
+        ) -> tuple[object, object, dict[str, object]]:
+            return messages, config, kwargs
+
+    attempt = InvocationAttempt()
+    messages = [HumanMessage(content="ping")]
+
+    result = invoke_model(
+        PositionalOnlyConfigModel(),
+        messages,
+        callbacks=[attempt],
+        include_empty_callbacks=True,
+    )
+
+    assert result == (messages, None, {})
+    assert attempt.output_observable is False
+
+
+def test_positional_only_timeout_is_not_passed_as_a_keyword() -> None:
+    class PositionalOnlyTimeoutModel:
+        def invoke(
+            self,
+            messages: object,
+            timeout: float | None = None,
+            /,
+            **kwargs: object,
+        ) -> tuple[object, object, dict[str, object]]:
+            return messages, timeout, kwargs
+
+    messages = [HumanMessage(content="ping")]
+
+    result = invoke_model(
+        PositionalOnlyTimeoutModel(),
+        messages,
+        timeout_seconds=17.5,
+    )
+
+    assert result == (messages, None, {})
+
+
+def test_variadic_sync_config_support_is_treated_as_unobservable() -> None:
+    class VariadicConfigModel:
+        def invoke(self, _messages: object, **_ignored: Any) -> None:
+            raise httpx.RemoteProtocolError("output may already have escaped")
+
+    attempt = InvocationAttempt()
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        invoke_model(
+            VariadicConfigModel(),
+            [],
+            callbacks=[attempt],
+            include_empty_callbacks=True,
+        )
+
+    assert attempt.output_observable is False
+
+
+def test_unknown_async_signature_type_error_never_replays_partial_output() -> None:
+    class UnknownSignatureModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, _messages: object, **kwargs: Any) -> None:
+            self.calls += 1
+            config = kwargs.get("config")
+            if isinstance(config, dict):
+                for callback in config.get("callbacks", []):
+                    callback.on_llm_new_token(token="partial")
+            raise TypeError("got an unexpected keyword argument 'config'")
+
+    UnknownSignatureModel.ainvoke.__signature__ = object()
+    model = UnknownSignatureModel()
+    attempt = InvocationAttempt()
+
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        asyncio.run(
+            ainvoke_model(
+                model,
+                [],
+                callbacks=[attempt],
+                include_empty_callbacks=True,
+            )
+        )
+
+    assert attempt.emitted_tokens is True
+    assert attempt.output_observable is False
+    assert model.calls == 1
+
+
+def test_variadic_async_config_support_is_treated_as_unobservable() -> None:
+    class VariadicConfigModel:
+        async def ainvoke(self, _messages: object, **_ignored: Any) -> None:
+            raise httpx.RemoteProtocolError("output may already have escaped")
+
+    attempt = InvocationAttempt()
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        asyncio.run(
+            ainvoke_model(
+                VariadicConfigModel(),
+                [],
+                callbacks=[attempt],
+                include_empty_callbacks=True,
+            )
+        )
+
+    assert attempt.output_observable is False
+
+
+def test_explicit_chat_mode_overrides_model_name_responses_inference(monkeypatch) -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            observed.update(kwargs)
+
+    monkeypatch.setattr(
+        "contentai.agent.infrastructure.llm.client._UsageAwareChatOpenAI", FakeChatOpenAI
+    )
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="gpt-5.4-pro",
+    )
+
+    client.build_chat_model(temperature=None, max_tokens=128)
+
+    assert observed["use_responses_api"] is False
+    client.close()
+
+
+def test_responses_runtime_payload_stays_aligned_with_probe_contract() -> None:
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="responses-model",
+        api_mode="responses",
+    )
+    try:
+        model = client.build_chat_model(temperature=None, max_tokens=1)
+        payload = model._get_request_payload(
+            [HumanMessage(content="ping")],
+            stream=False,
+        )
+    finally:
+        client.close()
+
+    assert payload == {
+        "model": "responses-model",
+        "stream": False,
+        "max_output_tokens": 1,
+        "input": [{"content": "ping", "role": "user", "type": "message"}],
+    }
+
+
+def test_chat_completions_runtime_payload_stays_aligned_with_probe_contract() -> None:
+    client = LangChainChatClient(
+        base_url="https://models.example.test/v1",
+        api_key=SecretStr("test-key"),
+        model_name="chat-model",
+        api_mode="chat_completions",
+    )
+    try:
+        model = client.build_chat_model(temperature=None, max_tokens=1)
+        payload = model._get_request_payload(
+            [HumanMessage(content="ping")],
+            stream=False,
+        )
+    finally:
+        client.close()
+
+    assert payload == {
+        "model": "chat-model",
+        "stream": False,
+        "max_completion_tokens": 1,
+        "messages": [{"content": "ping", "role": "user"}],
+    }
 
 
 def test_stream_usage_falls_back_once_when_endpoint_rejects_stream_options(
@@ -210,6 +469,7 @@ def test_responses_api_sync_stream_does_not_receive_chat_completion_stream_usage
         base_url="https://models.example.test/v1",
         api_key=SecretStr("test-key"),
         model_name="gpt-5.4-pro",
+        api_mode="responses",
     )
     try:
         model = client.build_chat_model(temperature=0, max_tokens=128)
@@ -244,6 +504,7 @@ def test_responses_api_async_stream_does_not_receive_chat_completion_stream_usag
         base_url="https://models.example.test/v1",
         api_key=SecretStr("test-key"),
         model_name="gpt-5.4-pro",
+        api_mode="responses",
     )
     try:
         model = client.build_chat_model(temperature=0, max_tokens=128)
@@ -658,6 +919,8 @@ def test_every_gateway_scenario_uses_execution_selected_model_and_tuning():
     assert {call["model"] for call in observed} == {"selected-model-v7"}
     assert observed[0]["temperature"] == 0.7
     assert observed[0]["max_tokens"] == 12_000
+    assert observed[0]["max_retries"] == 0
+    assert all(call["max_retries"] == 0 for call in observed[1:4])
     assert all(call["temperature"] == 0.7 for call in observed[1:4])
     assert all(call["max_tokens"] == 6_000 for call in observed[1:4])
     assert observed[4]["temperature"] == 0.7
@@ -710,6 +973,7 @@ def test_research_final_gateway_builds_selection_schema_with_streaming_disabled(
 
     assert gateway.build_research_final_model() == "selection-model"
     assert observed["schema"].__name__ == "ResearchFinalSelection"
+    assert observed["max_retries"] == 0
     assert observed["disable_streaming"] is True
 
 
@@ -817,12 +1081,117 @@ def test_remote_model_error_body_and_secrets_are_not_public() -> None:
     assert "Authorization" not in detail.message
 
 
+def _model_http_status_error(
+    status_code: int,
+    *,
+    headers: dict[str, str] | None = None,
+) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://models.example.test/v1/chat/completions")
+    response = httpx.Response(status_code, request=request, headers=headers)
+    return httpx.HTTPStatusError(
+        f"provider returned HTTP {status_code}",
+        request=request,
+        response=response,
+    )
+
+
+@pytest.mark.parametrize("status_code", [408, 409, 429, 500, 503, 599])
+def test_transient_model_http_status_errors_are_retryable(status_code: int) -> None:
+    error = _model_http_status_error(status_code)
+
+    assert is_retryable_model_stream_error(error) is True
+    assert classify_runtime_error(error).retryable is True
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 404, 422, 499, 600])
+def test_permanent_model_http_status_errors_are_not_retryable(status_code: int) -> None:
+    assert is_retryable_model_stream_error(_model_http_status_error(status_code)) is False
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Retry-After": "3"}, 3.0),
+        ({"retry-after-ms": "1500", "Retry-After": "9"}, 1.5),
+        ({"retry-after-ms": "invalid", "Retry-After": "4"}, 4.0),
+    ],
+)
+def test_model_retry_delay_honors_provider_headers(
+    headers: dict[str, str],
+    expected: float,
+) -> None:
+    error = _model_http_status_error(429, headers=headers)
+
+    assert model_retry_delay_seconds(
+        error,
+        attempt=1,
+        base_seconds=0.25,
+        max_seconds=30.0,
+        random_value=0.0,
+    ) == expected
+
+
+def test_model_retry_delay_parses_http_date() -> None:
+    now = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
+    error = _model_http_status_error(
+        503,
+        headers={"Retry-After": "Tue, 04 Aug 2026 12:00:07 GMT"},
+    )
+
+    assert model_retry_delay_seconds(
+        error,
+        attempt=1,
+        base_seconds=0.25,
+        max_seconds=30.0,
+        random_value=0.0,
+        now=now,
+    ) == 7.0
+
+
+def test_model_retry_delay_falls_back_to_exponential_backoff_with_bounded_jitter() -> None:
+    error = _model_http_status_error(503, headers={"Retry-After": "invalid"})
+
+    lower = model_retry_delay_seconds(
+        error,
+        attempt=3,
+        base_seconds=0.25,
+        max_seconds=30.0,
+        random_value=0.0,
+    )
+    upper = model_retry_delay_seconds(
+        error,
+        attempt=3,
+        base_seconds=0.25,
+        max_seconds=30.0,
+        random_value=1.0,
+    )
+
+    assert lower == 1.0
+    assert upper == 1.25
+
+
+def test_model_retry_delay_caps_large_provider_hint() -> None:
+    error = _model_http_status_error(429, headers={"Retry-After": "999"})
+
+    assert model_retry_delay_seconds(
+        error,
+        attempt=1,
+        base_seconds=0.25,
+        max_seconds=5.0,
+        random_value=1.0,
+    ) == 5.0
+
+
 @pytest.mark.parametrize(
     "error",
     [
         httpx.RemoteProtocolError("incomplete chunked read"),
         httpx.ReadTimeout("timed out"),
         httpx.ConnectError("connection refused"),
+        httpx.ReadError("read failed"),
+        httpx.WriteError("write failed"),
+        httpx.PoolTimeout("pool exhausted"),
+        httpx.ProxyError("proxy failed"),
     ],
 )
 def test_model_stream_transport_errors_are_retryable(error: Exception):

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import backgroundVideo from '@/assets/backgrounds/web-background.mp4';
 import backgroundImage from '@/assets/backgrounds/web-background-poster.jpg';
 
@@ -10,7 +10,14 @@ const props = defineProps<{
 }>();
 
 const video = ref<HTMLVideoElement | null>(null);
-const motionAllowed = ref(false);
+function canUseMotion(mode: AmbientBackdropMode) {
+  if (typeof window === 'undefined') return false;
+  return mode === 'hero'
+    && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    && window.innerWidth >= 768;
+}
+
+const motionAllowed = ref(canUseMotion(props.mode));
 const videoReady = ref(false);
 const videoFailed = ref(false);
 let reducedMotionQuery: MediaQueryList | null = null;
@@ -30,7 +37,7 @@ async function resumeVideo() {
 }
 
 function syncMotionPreference() {
-  motionAllowed.value = !reducedMotionQuery?.matches;
+  motionAllowed.value = canUseMotion(props.mode) && !reducedMotionQuery?.matches;
   if (!motionAllowed.value) {
     videoReady.value = false;
     pauseVideo();
@@ -63,6 +70,8 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange);
   syncMotionPreference();
 });
+
+watch(() => props.mode, syncMotionPreference);
 
 onBeforeUnmount(() => {
   reducedMotionQuery?.removeEventListener('change', syncMotionPreference);

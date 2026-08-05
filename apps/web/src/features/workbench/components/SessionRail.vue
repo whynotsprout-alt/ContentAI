@@ -76,7 +76,13 @@ function relativeDate(value: string) {
         class="session-card"
         :class="{ active: session.session_id === activeSessionId }"
       >
-        <button class="session-select" type="button" @click="emit('select', session.session_id)">
+        <button
+          class="session-select"
+          type="button"
+          :aria-current="session.session_id === activeSessionId ? 'page' : undefined"
+          :title="displayTitle(session)"
+          @click="emit('select', session.session_id)"
+        >
           <span class="session-title">{{ displayTitle(session) }}</span>
           <span class="session-meta">
             {{ session.message_count }} 条消息 · {{ relativeDate(session.updated_at) }}

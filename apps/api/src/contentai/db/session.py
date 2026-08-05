@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from threading import RLock
 
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
@@ -19,16 +20,21 @@ from contentai.core.config.database import (
     calculate_connection_budget as _calculate_connection_budget,
 )
 
-type EngineFingerprint = tuple[str, str, float, int]
+type EngineFingerprint = tuple[str, str, float, int, int, int]
 
-_engine: Engine | None = None
-_engine_fingerprint: EngineFingerprint | None = None
+_engines: dict[EngineFingerprint, Engine] = {}
+_engine_lock = RLock()
 
 
 def build_engine(settings: Settings) -> Engine:
     if settings.database.url is None:
         raise RuntimeError("Database URL is not configured.")
     options = engine_options_for_role(settings.database)
+    # NullPool does not accept QueuePool-only arguments such as
+    # ``pool_timeout``. Keep migration connections unpooled and only pass
+    # pool tuning arguments to roles that use a queue-based pool.
+    if "poolclass" in options:
+        return create_engine(settings.database.url, hide_parameters=True, **options)
     return create_engine(
         settings.database.url,
         hide_parameters=True,
@@ -54,15 +60,14 @@ def calculate_connection_budget(database_settings: object) -> ConnectionBudget:
 
 
 def get_engine(settings: Settings | None = None) -> Engine:
-    global _engine, _engine_fingerprint
-
     resolved_settings = settings or get_settings()
     fingerprint = _settings_fingerprint(resolved_settings)
-    if _engine is None or _engine_fingerprint != fingerprint:
-        close_database()
-        _engine = build_engine(resolved_settings)
-        _engine_fingerprint = fingerprint
-    return _engine
+    with _engine_lock:
+        engine = _engines.get(fingerprint)
+        if engine is None:
+            engine = build_engine(resolved_settings)
+            _engines[fingerprint] = engine
+        return engine
 
 
 def init_database(settings: Settings | None = None) -> None:
@@ -108,17 +113,19 @@ def get_session() -> Iterator[Session]:
 
 
 def close_database() -> None:
-    global _engine, _engine_fingerprint
-    if _engine is not None:
-        _engine.dispose()
-    _engine = None
-    _engine_fingerprint = None
+    with _engine_lock:
+        for engine in _engines.values():
+            engine.dispose()
+        _engines.clear()
 
 
 def _settings_fingerprint(settings: Settings) -> EngineFingerprint:
+    profile = pool_profile_for_role(settings.database.runtime_role)
     return (
         settings.database.url or "",
         settings.database.runtime_role,
         settings.database.pool_timeout,
         settings.database.pool_recycle_seconds,
+        profile.pool_size,
+        profile.max_overflow,
     )

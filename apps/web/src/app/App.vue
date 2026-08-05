@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { AlertTriangle, KeyRound, LoaderCircle, Trash2, X } from '@lucide/vue';
 import { useRouter } from 'vue-router';
-import type { ChatSessionSummary } from '@/shared/services/api';
+import type { ChatSessionSummary, ResumeDecision } from '@/shared/services/api';
 import { authApi } from '@/shared/services/api';
 import { useAuthStore } from '@/features/auth/auth.store';
 import { useWorkbenchStore } from '@/features/workbench/stores/workbench.store';
@@ -31,11 +31,9 @@ const passwordNotice = ref('');
 let agentManagerReturnFocus: HTMLElement | null = null;
 
 const interruptSummary = computed(() => {
-  const payload = store.interruptPayload;
-  const interrupts = Array.isArray(payload.interrupts) ? payload.interrupts : [];
-  const first = interrupts[0] as { value?: unknown } | undefined;
-  if (!first?.value) return 'Agent 需要你的确认或补充信息后继续。';
-  return typeof first.value === 'string' ? first.value : JSON.stringify(first.value);
+  const actions = store.interrupt?.actions ?? [];
+  if (!actions.length) return 'Agent 需要你的确认后继续。';
+  return actions.map((action) => action.purpose).join('；');
 });
 
 function openAgentManager(template: 'finance' | 'ai' | null = null) {
@@ -90,8 +88,8 @@ async function submitMessage(message: string) {
   return store.submit(message);
 }
 
-async function resumeRun(message: string) {
-  return store.resume(message);
+async function resumeRun(decision: ResumeDecision) {
+  return store.resume(decision);
 }
 
 async function cancelRun() {
@@ -138,6 +136,10 @@ async function logout() {
 }
 
 onMounted(() => {
+  if (auth.needsPasswordChange) {
+    void router.replace('/change-password');
+    return;
+  }
   void store.boot().catch((value) => {
     store.error = value instanceof Error ? value.message : String(value);
   });

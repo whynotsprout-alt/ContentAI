@@ -1,5 +1,6 @@
 import asyncio
 
+import contentai.services.agent_service as agent_service_module
 import pytest
 from client import ApiClient as TestClient
 from contentai.api.app import _normalize_origins, _shutdown, app, create_app
@@ -8,6 +9,7 @@ from contentai.db.session import get_engine
 from contentai.models.schemas import AgentVersionCreate
 from contentai.services.agent_service import AgentService
 from contentai.services.service_heartbeat import REQUIRED_WORKER_QUEUES, upsert_service_heartbeat
+from model_config_helpers import resolve_test_database_url
 from pydantic import ValidationError
 from sqlalchemy import inspect
 from sqlmodel import Session
@@ -51,8 +53,8 @@ def test_ready_endpoint_reflects_lifespan_state():
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "database": True,
-        "alembic_version": "202608030002",
-        "alembic_head": "202608030002",
+        "alembic_version": "202608040009",
+        "alembic_head": "202608040009",
         "database_revision_current": True,
         "checkpoint": True,
         "checkpoint_tables": {
@@ -110,7 +112,7 @@ def test_lifespan_uses_app_settings_for_database_and_agent_service(monkeypatch):
     _seed_required_service_heartbeats()
     test_settings = Settings(
         env="test",
-        database={"url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test"},
+        database={"url": resolve_test_database_url()},
     )
     created_app = create_app(test_settings)
     initialized_settings = []
@@ -179,7 +181,7 @@ def test_lifespan_awaits_agent_service_async_close(monkeypatch):
     assert close_order == ["agent", "database"]
 
 
-def test_agent_service_async_close_awaits_runtime_after_runner_close():
+def test_agent_service_async_close_awaits_runtime_after_runner_close(monkeypatch):
     close_order: list[str] = []
 
     class DummyRunner:
@@ -194,10 +196,71 @@ def test_agent_service_async_close_awaits_runtime_after_runner_close():
     service = AgentService.__new__(AgentService)
     service.runner = DummyRunner()
     service.runtime = DummyRuntime()
+    monkeypatch.setattr(
+        agent_service_module,
+        "close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
 
     asyncio.run(service.aclose())
 
-    assert close_order == ["runner", "runtime"]
+    assert close_order == ["runner", "runtime", "event-stream"]
+
+
+def test_agent_service_sync_close_clears_event_cache_after_close_failures(monkeypatch):
+    close_order: list[str] = []
+
+    class FailingRunner:
+        def close(self):
+            close_order.append("runner")
+            raise RuntimeError("runner close failed")
+
+    class FailingRuntime:
+        def close(self):
+            close_order.append("runtime")
+            raise RuntimeError("runtime close failed")
+
+    service = AgentService.__new__(AgentService)
+    service.runner = FailingRunner()
+    service.runtime = FailingRuntime()
+    monkeypatch.setattr(
+        agent_service_module,
+        "close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
+
+    with pytest.raises(RuntimeError, match="runner close failed"):
+        service.close()
+
+    assert close_order == ["runner", "runtime", "event-stream"]
+
+
+def test_agent_service_async_close_clears_event_cache_after_runner_failure(monkeypatch):
+    close_order: list[str] = []
+
+    class FailingRunner:
+        def close(self):
+            close_order.append("runner")
+            raise RuntimeError("runner close failed")
+
+    class DummyRuntime:
+        async def aclose(self):
+            await asyncio.sleep(0)
+            close_order.append("runtime")
+
+    service = AgentService.__new__(AgentService)
+    service.runner = FailingRunner()
+    service.runtime = DummyRuntime()
+    monkeypatch.setattr(
+        agent_service_module,
+        "close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
+
+    with pytest.raises(RuntimeError, match="runner close failed"):
+        asyncio.run(service.aclose())
+
+    assert close_order == ["runner", "runtime", "event-stream"]
 
 
 def test_shutdown_awaits_agent_runtime_after_runner_close_failure(monkeypatch):
@@ -219,15 +282,19 @@ def test_shutdown_awaits_agent_runtime_after_runner_close_failure(monkeypatch):
     created_app = create_app()
     created_app.state.agent_service = service
     created_app.state.ready = True
+    monkeypatch.setattr(
+        "contentai.api.app.close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
     monkeypatch.setattr("contentai.api.app.close_database", lambda: close_order.append("database"))
 
     asyncio.run(_shutdown(created_app))
 
     assert created_app.state.ready is False
-    assert close_order == ["runner", "runtime", "database"]
+    assert close_order == ["runner", "runtime", "event-stream", "database"]
 
 
-def test_agent_service_close_then_async_close_is_idempotent():
+def test_agent_service_close_then_async_close_is_idempotent(monkeypatch):
     close_order: list[str] = []
 
     class DummyRunner:
@@ -245,12 +312,17 @@ def test_agent_service_close_then_async_close_is_idempotent():
     service = AgentService.__new__(AgentService)
     service.runner = DummyRunner()
     service.runtime = DummyRuntime()
+    monkeypatch.setattr(
+        agent_service_module,
+        "close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
 
     service.close()
     asyncio.run(service.aclose())
     asyncio.run(service.aclose())
 
-    assert close_order == ["runner", "runtime-sync", "runtime-async"]
+    assert close_order == ["runner", "runtime-sync", "event-stream", "runtime-async"]
 
 
 def test_shutdown_continues_after_async_hook_failure(monkeypatch):
@@ -270,12 +342,16 @@ def test_shutdown_continues_after_async_hook_failure(monkeypatch):
     created_app.state.conversation_service = FailingConversationService()
     created_app.state.agent_service = DummyAgentService()
     created_app.state.ready = True
+    monkeypatch.setattr(
+        "contentai.api.app.close_cached_event_streams",
+        lambda: close_order.append("event-stream"),
+    )
     monkeypatch.setattr("contentai.api.app.close_database", lambda: close_order.append("database"))
 
     asyncio.run(_shutdown(created_app))
 
     assert created_app.state.ready is False
-    assert close_order == ["conversation", "agent", "database"]
+    assert close_order == ["conversation", "agent", "event-stream", "database"]
 
 
 def test_settings_reject_sqlite_database_url():
@@ -339,7 +415,7 @@ def test_non_test_env_rejects_test_database():
         Settings(
             env="development",
             database={
-                "url": "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/contentai_test",
+                "url": resolve_test_database_url(),
             },
         )
 

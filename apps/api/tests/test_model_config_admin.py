@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from decimal import Decimal
 from importlib import import_module
 
 import pytest
@@ -73,6 +74,23 @@ class FakeProbe:
         )
 
 
+class ModeAwareProbe(FakeProbe):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.api_modes: list[str] = []
+
+    def probe(
+        self,
+        base_url: str,
+        api_key: str,
+        model_name: str | None = None,
+        *,
+        api_mode: str = "chat_completions",
+    ):
+        self.api_modes.append(api_mode)
+        return super().probe(base_url, api_key, model_name)
+
+
 @pytest.fixture
 def admin_client() -> ApiClient:
     app = create_app()
@@ -125,6 +143,7 @@ def test_admin_get_returns_no_store_safe_active_metadata(admin_client: ApiClient
         "id": "default-model-config",
         "version": 1,
         "provider": "openai_compatible",
+        "api_mode": "chat_completions",
         "base_url": "https://models.test.invalid/v1",
         "model_name": "test-model",
         "input_price_per_million_usd": 5.0,
@@ -175,23 +194,77 @@ def test_probe_reuses_active_key_and_never_returns_it(admin_client: ApiClient) -
         "/api/admin/model-config/probe",
         headers=_admin_headers(),
         json={
-            "base_url": "https://api.example.test/v1",
+            "base_url": "https://models.test.invalid/v1/alternate",
             "model_name": "custom-model",
         },
     )
 
     assert response.status_code == 200
     assert probe.calls == [
-        ("https://api.example.test/v1", TEST_MODEL_CONFIG_API_KEY, "custom-model")
+        (
+            "https://models.test.invalid/v1/alternate",
+            TEST_MODEL_CONFIG_API_KEY,
+            "custom-model",
+        )
     ]
     assert response.json() == {
-        "base_url": "https://api.example.test/v1",
+        "base_url": "https://models.test.invalid/v1/alternate",
         "models": ["a-model", "z-model"],
         "models_truncated": False,
         "model_validated": True,
         "latency_ms": 12,
     }
     assert TEST_MODEL_CONFIG_API_KEY not in response.text
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://attacker.example.test/v1",
+        "https://models.test.invalid:444/v1",
+        "http://models.test.invalid/v1",
+    ],
+)
+def test_probe_requires_explicit_key_when_endpoint_origin_changes(
+    admin_client: ApiClient,
+    base_url: str,
+) -> None:
+    probe = FakeProbe()
+    _set_probe(admin_client, probe)
+
+    response = admin_client.post(
+        "/api/admin/model-config/probe",
+        headers=_admin_headers(),
+        json={"base_url": base_url, "model_name": "custom-model"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "MODEL_CREDENTIALS_REQUIRED"
+    assert probe.calls == []
+    assert TEST_MODEL_CONFIG_API_KEY not in response.text
+
+
+def test_responses_probe_rejects_legacy_prober_without_calling_it(
+    admin_client: ApiClient,
+) -> None:
+    probe = FakeProbe()
+    _set_probe(admin_client, probe)
+
+    response = admin_client.post(
+        "/api/admin/model-config/probe",
+        headers=_admin_headers(),
+        json={
+            "api_mode": "responses",
+            "base_url": "https://api.example.test/v1",
+            "api_key": "request-secret-key",
+            "model_name": "custom-model",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "MODEL_PROBE_FAILED"
+    assert probe.calls == []
+    assert "request-secret-key" not in response.text
 
 
 def test_first_probe_and_save_require_api_key(admin_client: ApiClient) -> None:
@@ -272,7 +345,7 @@ def test_save_creates_new_immutable_version_and_secret_free_audit(
     assert RUNTIME_PAYLOAD.items() <= audits[0].detail.items()
 
 
-def test_blank_key_reuses_active_secret_for_probe_and_new_version(
+def test_price_upper_bound_matches_numeric_column_exactly(
     admin_client: ApiClient,
 ) -> None:
     probe = FakeProbe()
@@ -282,7 +355,95 @@ def test_blank_key_reuses_active_secret_for_probe_and_new_version(
         "/api/admin/model-config",
         headers=_admin_headers(),
         json={
-            "base_url": "https://new.example.test/v1",
+            "base_url": "https://price-boundary.example.test/v1",
+            "api_key": "price-boundary-key",
+            "model_name": "price-boundary-model",
+            "input_price_per_million_usd": "999999.999999",
+            "output_price_per_million_usd": "999999.999999",
+            **RUNTIME_PAYLOAD,
+            "expected_version": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    with Session(get_engine()) as session:
+        active = session.exec(
+            select(ModelConfiguration).where(ModelConfiguration.is_active.is_(True))
+        ).one()
+    assert active.input_price_per_million_usd == Decimal("999999.999999")
+    assert active.output_price_per_million_usd == Decimal("999999.999999")
+
+
+@pytest.mark.parametrize("invalid_price", ["1000000", "0.0000001"])
+def test_price_validation_rejects_values_the_numeric_column_cannot_store_exactly(
+    admin_client: ApiClient,
+    invalid_price: str,
+) -> None:
+    probe = FakeProbe()
+    _set_probe(admin_client, probe)
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json={
+            "base_url": "https://invalid-price.example.test/v1",
+            "model_name": "invalid-price-model",
+            "input_price_per_million_usd": invalid_price,
+            **RUNTIME_PAYLOAD,
+            "expected_version": 1,
+        },
+    )
+
+    assert response.status_code == 422
+    assert probe.calls == []
+
+
+def test_update_without_api_mode_preserves_existing_responses_configuration(
+    admin_client: ApiClient,
+) -> None:
+    """Legacy update clients must not reset an explicitly selected endpoint."""
+    with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE modelconfiguration SET api_mode = 'responses' "
+                "WHERE id = 'default-model-config'"
+            )
+        )
+
+    probe = ModeAwareProbe()
+    _set_probe(admin_client, probe)
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json={
+            "base_url": "https://models.test.invalid/v1/responses",
+            "model_name": "test-model",
+            **RUNTIME_PAYLOAD,
+            "expected_version": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["api_mode"] == "responses"
+    assert probe.api_modes == ["responses"]
+    with Session(get_engine()) as session:
+        active = session.exec(
+            select(ModelConfiguration).where(ModelConfiguration.is_active.is_(True))
+        ).one()
+    assert active.api_mode == "responses"
+
+
+def test_blank_key_reuses_active_secret_for_same_origin_path_change(
+    admin_client: ApiClient,
+) -> None:
+    probe = FakeProbe()
+    _set_probe(admin_client, probe)
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json={
+            "base_url": "https://models.test.invalid/v2",
             "api_key": "   ",
             "model_name": "custom-model",
             **RUNTIME_PAYLOAD,
@@ -298,6 +459,42 @@ def test_blank_key_reuses_active_secret_for_probe_and_new_version(
         ).one()
     protector = ModelConfigurationSecretProtector(get_settings().model_config_encryption_key)
     assert protector.decrypt(active.api_key_ciphertext) == TEST_MODEL_CONFIG_API_KEY
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://attacker.example.test/v1",
+        "https://models.test.invalid:444/v1",
+        "http://models.test.invalid/v1",
+    ],
+)
+def test_blank_key_cannot_reuse_active_secret_across_origins(
+    admin_client: ApiClient,
+    base_url: str,
+) -> None:
+    probe = FakeProbe()
+    _set_probe(admin_client, probe)
+
+    response = admin_client.put(
+        "/api/admin/model-config",
+        headers=_admin_headers(),
+        json={
+            "base_url": base_url,
+            "api_key": "   ",
+            "model_name": "custom-model",
+            **RUNTIME_PAYLOAD,
+            "expected_version": 1,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "MODEL_CREDENTIALS_REQUIRED"
+    assert probe.calls == []
+    assert TEST_MODEL_CONFIG_API_KEY not in response.text
+    with Session(get_engine()) as session:
+        versions = session.exec(select(ModelConfiguration)).all()
+    assert [(item.version, item.is_active) for item in versions] == [(1, True)]
 
 
 def test_failed_save_probe_leaves_active_version_unchanged(admin_client: ApiClient) -> None:

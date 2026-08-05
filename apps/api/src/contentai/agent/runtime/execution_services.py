@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from contentai.agent.context.assembler import AgentContext, ContextAssembler
 from contentai.agent.runtime.checkpoint import checkpoint_messages
@@ -16,6 +16,8 @@ from contentai.agent.runtime.events import (
     PersistentAgentEventWriter,
     now_utc,
 )
+from contentai.agent.runtime.model_invocation import invoke_model
+from contentai.agent.runtime.schemas import MAX_ASSISTANT_CONTENT_LENGTH
 from contentai.agent.runtime.turn_context import (
     DurableTurnContext,
 )
@@ -29,10 +31,14 @@ from contentai.agent.workflows.research_repository import ResearchPackageReposit
 from contentai.core.hotspot_sources import DEFAULT_HOTSPOT_SOURCES, partition_hotspot_sources
 from contentai.db.session import get_engine
 from contentai.memory import LongTermMemory, MemoryRepository, ShortTermMemory
-from contentai.memory.execution_state import ExecutionStateManager
+from contentai.memory.execution_state import (
+    ExecutionCancelled,
+    ExecutionLeaseLost,
+    ExecutionStateManager,
+)
 from contentai.memory.message_persister import MessagePersister, message_to_text
 from contentai.models.agent import AgentProfile, AgentVersion
-from contentai.models.base import utcnow
+from contentai.models.base import new_id, utcnow
 from contentai.models.chat import (
     AgentExecution,
     AgentInvocation,
@@ -41,6 +47,10 @@ from contentai.models.chat import (
     ExecutionOutbox,
 )
 from contentai.models.enums import MessageRole, MessageType
+from contentai.services.execution_settlement import (
+    current_database_time,
+    owns_active_execution_attempt,
+)
 from contentai.services.usage_service import ModelUsageCallback, UsageContext
 from langchain_core.messages import (
     AIMessage,
@@ -99,6 +109,38 @@ class ExecutionTurnResult:
     streamed_assistant_text: str
     interrupt_payload: dict[str, Any] | None
     assistant_message: ChatMessage | None = None
+    pending_events: tuple[tuple[str, dict[str, Any]], ...] = ()
+
+
+@dataclass
+class _AssistantStreamState:
+    text: str = ""
+    mode: Literal["unknown", "delta", "cumulative"] = "unknown"
+
+
+def _execution_stream_graph_config(
+    runtime_config: dict[str, Any],
+    *,
+    additional_configurable: dict[str, Any],
+    checkpoint_id: str | None,
+    expected_worker_id: str | None,
+    expected_attempt_id: str | None,
+) -> dict[str, Any]:
+    stream_graph_config = dict(runtime_config)
+    configurable = stream_graph_config.get("configurable")
+    if not isinstance(configurable, dict):
+        configurable = {}
+    configurable = dict(configurable)
+    configurable.update(additional_configurable)
+    if checkpoint_id is not None:
+        configurable["checkpoint_id"] = checkpoint_id
+    if expected_worker_id is not None or expected_attempt_id is not None:
+        if not expected_worker_id or not expected_attempt_id:
+            raise RuntimeError("EXECUTION_ATTEMPT_FENCE_INVALID")
+        configurable["__worker_id"] = expected_worker_id
+        configurable["__attempt_id"] = expected_attempt_id
+    stream_graph_config["configurable"] = configurable
+    return stream_graph_config
 
 
 class AgentRuntimeEventService:
@@ -115,6 +157,8 @@ class AgentRuntimeEventService:
         thread_id: str | None = None,
         request_id: str | None = None,
         conversation_id: str | None = None,
+        expected_worker_id: str | None = None,
+        expected_attempt_id: str | None = None,
     ) -> PersistentAgentEventWriter:
         writer_settings = self._settings if settings is None else settings
         return PersistentAgentEventWriter(
@@ -125,6 +169,8 @@ class AgentRuntimeEventService:
             thread_id=thread_id,
             request_id=request_id,
             conversation_id=conversation_id,
+            expected_worker_id=expected_worker_id,
+            expected_attempt_id=expected_attempt_id,
         )
 
     def emit_execution_started(self, event_writer: Any, execution: AgentExecution) -> None:
@@ -154,16 +200,8 @@ class AgentRuntimeEventService:
 
     def emit_execution_completed(self, event_writer: Any, execution: AgentExecution) -> None:
         try:
-            event_writer.emit("message_finish", {"execution_id": execution.id})
-            event_writer.emit(
-                "attempt_end",
-                {
-                    "execution_id": execution.id,
-                    "attempt_id": execution.current_attempt_id,
-                    "status": "completed",
-                },
-            )
-            event_writer.emit("run_finish", {"execution_id": execution.id})
+            for event_name, payload in self.execution_completed_events(execution):
+                event_writer.emit(event_name, payload)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to emit execution_completed for %s.",
@@ -172,15 +210,8 @@ class AgentRuntimeEventService:
             )
 
     def emit_execution_cancelled(self, event_writer: Any, execution: AgentExecution) -> None:
-        event_writer.emit(
-            "attempt_end",
-            {
-                "execution_id": execution.id,
-                "attempt_id": execution.current_attempt_id,
-                "status": "cancelled",
-            },
-        )
-        event_writer.emit("run_cancel", {"execution_id": execution.id})
+        for event_name, payload in self.execution_cancelled_events(execution):
+            event_writer.emit(event_name, payload)
 
     def emit_execution_failed(
         self,
@@ -191,23 +222,13 @@ class AgentRuntimeEventService:
         error_code: str | None = None,
         retryable: bool = False,
     ) -> None:
-        event_writer.emit(
-            "attempt_end",
-            {
-                "execution_id": execution.id,
-                "attempt_id": execution.current_attempt_id,
-                "status": "failed",
-            },
-        )
-        event_writer.emit(
-            "run_error",
-            {
-                "execution_id": execution.id,
-                "error": error,
-                "error_code": error_code,
-                "retryable": retryable,
-            },
-        )
+        for event_name, payload in self.execution_failed_events(
+            execution,
+            error,
+            error_code=error_code,
+            retryable=retryable,
+        ):
+            event_writer.emit(event_name, payload)
 
     def emit_waiting_input(
         self,
@@ -215,18 +236,89 @@ class AgentRuntimeEventService:
         execution: AgentExecution,
         interrupt: dict[str, Any],
     ) -> None:
-        event_writer.emit(
-            "attempt_end",
-            {
-                "execution_id": execution.id,
-                "attempt_id": execution.current_attempt_id,
-                "status": "waiting_input",
-            },
-        )
-        event_writer.emit(
-            "run_interrupt",
-            {"execution_id": execution.id, "interrupt": interrupt},
-        )
+        for event_name, payload in self.waiting_input_events(execution, interrupt):
+            event_writer.emit(event_name, payload)
+
+    @staticmethod
+    def execution_completed_events(
+        execution: AgentExecution,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            ("message_finish", {"execution_id": execution.id}),
+            (
+                "attempt_end",
+                {
+                    "execution_id": execution.id,
+                    "attempt_id": execution.current_attempt_id,
+                    "status": "completed",
+                },
+            ),
+            ("run_finish", {"execution_id": execution.id}),
+        ]
+
+    @staticmethod
+    def execution_cancelled_events(
+        execution: AgentExecution,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (
+                "attempt_end",
+                {
+                    "execution_id": execution.id,
+                    "attempt_id": execution.current_attempt_id,
+                    "status": "cancelled",
+                },
+            ),
+            ("run_cancel", {"execution_id": execution.id}),
+        ]
+
+    @staticmethod
+    def execution_failed_events(
+        execution: AgentExecution,
+        error: str,
+        *,
+        error_code: str | None = None,
+        retryable: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (
+                "attempt_end",
+                {
+                    "execution_id": execution.id,
+                    "attempt_id": execution.current_attempt_id,
+                    "status": "failed",
+                },
+            ),
+            (
+                "run_error",
+                {
+                    "execution_id": execution.id,
+                    "error": error,
+                    "error_code": error_code,
+                    "retryable": retryable,
+                },
+            ),
+        ]
+
+    @staticmethod
+    def waiting_input_events(
+        execution: AgentExecution,
+        interrupt: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (
+                "attempt_end",
+                {
+                    "execution_id": execution.id,
+                    "attempt_id": execution.current_attempt_id,
+                    "status": "waiting_input",
+                },
+            ),
+            (
+                "run_interrupt",
+                {"execution_id": execution.id, "interrupt": interrupt},
+            ),
+        ]
 
     def emit_marker(
         self,
@@ -296,10 +388,12 @@ class AgentExecutionEngine:
         resume_value: Any,
         turn_context: DurableTurnContext,
         continue_from_checkpoint: bool = False,
+        checkpoint_id: str | None = None,
         event_writer: Any,
         event_service: AgentRuntimeEventService,
         request_id: str | None = None,
         expected_worker_id: str | None = None,
+        expected_attempt_id: str | None = None,
     ) -> ExecutionTurnResult:
         agent_profile = db_session.get(AgentProfile, invocation.agent_id)
         if agent_profile is None:
@@ -361,6 +455,8 @@ class AgentExecutionEngine:
                 )
             ]
 
+        database_bind = db_session.get_bind()
+        database_engine = getattr(database_bind, "engine", database_bind)
         tool_context = ToolRuntimeContext(
             execution_id=execution.id,
             conversation_id=chat.id,
@@ -372,6 +468,7 @@ class AgentExecutionEngine:
             topic_scoring_prompt=agent_version.topic_scoring_prompt,
             hotspot_filter_model=runtime.gateway.build_hotspot_filter_model(),
             research_model_gateway=runtime.gateway,
+            database_engine=database_engine,
             model_usage_callback_factory=build_model_usage_callbacks,
             event_writer=event_writer,
             tool_policies={
@@ -392,22 +489,25 @@ class AgentExecutionEngine:
                 )
             ),
             api_keys=self._build_tool_api_keys(),
-            long_term_memory=LongTermMemory(MemoryRepository(db_session)),
+            long_term_memory=LongTermMemory(
+                MemoryRepository(db_session, auto_commit=False)
+            ),
             side_effect_dispatcher=self.container.side_effect_dispatcher,
             side_effect_receipt_poller=self.container.side_effect_receipt_poller,
-            cancellation_check=lambda: self.state_manager.ensure_execution_not_cancelled(
+            cancellation_check=lambda: self._ensure_execution_not_cancelled(
                 db_session,
                 execution,
                 expected_worker_id=expected_worker_id,
+                expected_attempt_id=expected_attempt_id,
             ),
         )
-        stream_graph_config = dict(runtime.config)
-        configurable = stream_graph_config.get("configurable")
-        if not isinstance(configurable, dict):
-            configurable = {}
-        configurable = dict(configurable)
-        configurable.update(tool_context.as_graph_configurable())
-        stream_graph_config["configurable"] = configurable
+        stream_graph_config = _execution_stream_graph_config(
+            runtime.config,
+            additional_configurable=tool_context.as_graph_configurable(),
+            checkpoint_id=checkpoint_id,
+            expected_worker_id=expected_worker_id,
+            expected_attempt_id=expected_attempt_id,
+        )
 
         def run_general_chat() -> tuple[list[BaseMessage], str, dict[str, Any] | None]:
             callbacks = list(stream_graph_config.get("callbacks") or [])
@@ -435,6 +535,7 @@ class AgentExecutionEngine:
                     state=state,
                     config=stream_graph_config,
                     expected_worker_id=expected_worker_id,
+                    expected_attempt_id=expected_attempt_id,
                 )
 
         event_service.emit_marker(
@@ -476,11 +577,16 @@ class AgentExecutionEngine:
                 research_package=final_research_package,
             )
 
-        self.state_manager.ensure_execution_not_cancelled(
+        self._ensure_execution_not_cancelled(
             db_session,
             execution,
             expected_worker_id=expected_worker_id,
+            expected_attempt_id=expected_attempt_id,
         )
+        prepare_settlement = getattr(event_writer, "prepare_settlement", None)
+        if callable(prepare_settlement):
+            prepare_settlement()
+        pending_events: list[tuple[str, dict[str, Any]]] = []
         persist_started_at = time.perf_counter()
         persisted_assistant = self.message_persister.persist_graph_messages(
             db_session,
@@ -488,23 +594,27 @@ class AgentExecutionEngine:
             invocation_id=invocation.id,
             execution_id=execution.id,
             messages=new_messages,
-            event_writer=event_writer,
-            streamed_assistant_text=streamed_assistant_text,
         )
-        event_service.emit_marker(
-            event_writer=event_writer,
-            execution_id=execution.id,
-            marker="persist_messages_ms",
-            value=int((time.perf_counter() - persist_started_at) * 1000),
-            messages_count=len(new_messages),
-            persisted_assistant=bool(persisted_assistant),
+        pending_events.append(
+            (
+                "agent_runtime_marker",
+                {
+                    "execution_id": execution.id,
+                    "marker": "persist_messages_ms",
+                    "value": int((time.perf_counter() - persist_started_at) * 1000),
+                    "messages_count": len(new_messages),
+                    "persisted_assistant": bool(persisted_assistant),
+                },
+            )
         )
 
         if not persisted_assistant:
-            self.state_manager.ensure_execution_not_cancelled(
+            self._ensure_execution_not_cancelled(
                 db_session,
                 execution,
                 expected_worker_id=expected_worker_id,
+                expected_attempt_id=expected_attempt_id,
+                use_current_transaction=True,
             )
             fallback_started_at = time.perf_counter()
             if not assistant_text:
@@ -517,20 +627,24 @@ class AgentExecutionEngine:
                 invocation_id=invocation.id,
                 execution_id=execution.id,
                 content=assistant_text,
-                event_writer=event_writer,
-                emit_delta=not streamed_assistant_text,
             )
-            event_service.emit_marker(
-                event_writer=event_writer,
-                execution_id=execution.id,
-                marker="persist_assistant_fallback_ms",
-                value=int((time.perf_counter() - fallback_started_at) * 1000),
+            pending_events.append(
+                (
+                    "agent_runtime_marker",
+                    {
+                        "execution_id": execution.id,
+                        "marker": "persist_assistant_fallback_ms",
+                        "value": int((time.perf_counter() - fallback_started_at) * 1000),
+                    },
+                )
             )
 
-        self.state_manager.ensure_execution_not_cancelled(
+        self._ensure_execution_not_cancelled(
             db_session,
             execution,
             expected_worker_id=expected_worker_id,
+            expected_attempt_id=expected_attempt_id,
+            use_current_transaction=True,
         )
         return ExecutionTurnResult(
             new_messages=new_messages,
@@ -538,6 +652,7 @@ class AgentExecutionEngine:
             streamed_assistant_text=streamed_assistant_text,
             interrupt_payload=None,
             assistant_message=persisted_assistant,
+            pending_events=tuple(pending_events),
         )
 
     def _build_graph_input(
@@ -591,13 +706,15 @@ class AgentExecutionEngine:
         event_writer: Any,
         event_service: AgentRuntimeEventService,
         expected_worker_id: str | None = None,
+        expected_attempt_id: str | None = None,
     ) -> tuple[list[BaseMessage], str, dict[str, Any] | None]:
         stream_input = (
             graph_input if isinstance(graph_input, Command) or graph_input is None else state
         )
         new_messages: list[BaseMessage] = []
         streamed_assistant_parts: list[str] = []
-        streamed_assistant_by_id: dict[str, str] = {}
+        streamed_assistant_by_id: dict[str, _AssistantStreamState] = {}
+        streamed_assistant_length = 0
         stream_message_id: str = ""
 
         graph_started_at = time.perf_counter()
@@ -628,10 +745,11 @@ class AgentExecutionEngine:
                     last_status_poll_at is None
                     or status_poll_at - last_status_poll_at >= 1.0
                 ):
-                    self.state_manager.ensure_execution_not_cancelled(
+                    self._ensure_execution_not_cancelled(
                         db_session,
                         execution,
                         expected_worker_id=expected_worker_id,
+                        expected_attempt_id=expected_attempt_id,
                     )
                     last_status_poll_at = status_poll_at
             stream_mode, payload = _stream_mode_and_payload(item)
@@ -646,8 +764,10 @@ class AgentExecutionEngine:
                     event_writer=event_writer,
                     streamed_assistant_parts=streamed_assistant_parts,
                     streamed_assistant_by_id=streamed_assistant_by_id,
+                    streamed_assistant_length=streamed_assistant_length,
                 )
                 if chunk:
+                    streamed_assistant_length += len(chunk)
                     if llm_started_at is None or llm_message_id != stream_message_id:
                         if llm_started_at is not None:
                             llm_total_ms += event_service.emit_llm_inference_metric(
@@ -691,8 +811,11 @@ class AgentExecutionEngine:
                 update_messages = _messages_from_update_payload(payload)
                 if update_messages:
                     update_text = _assistant_text_from_messages(update_messages)
-                    if update_text and not streamed_assistant_parts:
-                        streamed_assistant_parts.append(update_text)
+                    if update_text:
+                        _ensure_assistant_stream_length(len(update_text))
+                        if not streamed_assistant_parts:
+                            streamed_assistant_parts.append(update_text)
+                            streamed_assistant_length = len(update_text)
 
                 if update_nodes:
                     graph_iterations += 1
@@ -769,6 +892,65 @@ class AgentExecutionEngine:
         )
         return new_messages, "".join(streamed_assistant_parts), None
 
+    def _ensure_execution_not_cancelled(
+        self,
+        db_session: Session,
+        execution: AgentExecution,
+        *,
+        expected_worker_id: str | None,
+        expected_attempt_id: str | None,
+        use_current_transaction: bool = False,
+    ) -> None:
+        if expected_attempt_id is None:
+            self.state_manager.ensure_execution_not_cancelled(
+                db_session,
+                execution,
+                expected_worker_id=expected_worker_id,
+            )
+            return
+        if use_current_transaction:
+            self._ensure_locked_execution_not_cancelled(
+                db_session,
+                execution_id=execution.id,
+                expected_worker_id=expected_worker_id,
+                expected_attempt_id=expected_attempt_id,
+            )
+            return
+        with Session(db_session.get_bind()) as fresh_session:
+            self._ensure_locked_execution_not_cancelled(
+                fresh_session,
+                execution_id=execution.id,
+                expected_worker_id=expected_worker_id,
+                expected_attempt_id=expected_attempt_id,
+            )
+
+    @staticmethod
+    def _ensure_locked_execution_not_cancelled(
+        session: Session,
+        *,
+        execution_id: str,
+        expected_worker_id: str | None,
+        expected_attempt_id: str,
+    ) -> None:
+        fresh_execution = session.exec(
+            select(AgentExecution)
+            .where(AgentExecution.id == execution_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if fresh_execution is None:
+            raise ExecutionLeaseLost()
+        if fresh_execution.cancel_requested_at is not None:
+            raise ExecutionCancelled()
+        authorization_time = current_database_time(session)
+        if not owns_active_execution_attempt(
+            fresh_execution,
+            expected_worker_id=expected_worker_id,
+            expected_attempt_id=expected_attempt_id,
+            now=authorization_time,
+        ):
+            raise ExecutionLeaseLost()
+
 
 class PostExecutionDispatcher(Protocol):
     def dispatch(self, execution_id: str, request_id: str | None = None) -> None: ...
@@ -795,6 +977,83 @@ class CeleryPostExecutionDispatcher:
             queue=self.settings.agent.celery_background_queue,
             retry=False,
         )
+
+
+_POSTPROCESS_RECEIPT_SCHEMA_VERSION = 1
+_POSTPROCESS_STEP_NAMES = (
+    "memory_extraction",
+    "short_summary",
+    "session_title",
+)
+_POSTPROCESS_RECEIPT_STATUSES = frozenset({"completed", "skipped"})
+
+
+class _PostprocessClaimLost(RuntimeError):
+    """The worker no longer owns the postprocess outbox row."""
+
+
+class _PostprocessReceiptInvalid(RuntimeError):
+    """A postprocess receipt failed its versioned schema validation."""
+
+
+def _new_postprocess_receipt() -> dict[str, Any]:
+    return {
+        "schema_version": _POSTPROCESS_RECEIPT_SCHEMA_VERSION,
+        "steps": {},
+    }
+
+
+def _parse_postprocess_receipt(payload: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(payload, dict):
+        raise _PostprocessReceiptInvalid("postprocess receipt must be an object")
+    if set(payload) != {"schema_version", "steps"}:
+        raise _PostprocessReceiptInvalid("postprocess receipt fields are invalid")
+    version = payload["schema_version"]
+    if type(version) is not int or version != _POSTPROCESS_RECEIPT_SCHEMA_VERSION:
+        raise _PostprocessReceiptInvalid("postprocess receipt schema version is invalid")
+    raw_steps = payload["steps"]
+    if not isinstance(raw_steps, dict):
+        raise _PostprocessReceiptInvalid("postprocess receipt steps must be an object")
+
+    steps: dict[str, dict[str, str]] = {}
+    for name, raw_receipt in raw_steps.items():
+        if name not in _POSTPROCESS_STEP_NAMES:
+            raise _PostprocessReceiptInvalid("postprocess receipt contains an unknown step")
+        if not isinstance(raw_receipt, dict) or set(raw_receipt) != {
+            "status",
+            "completed_at",
+        }:
+            raise _PostprocessReceiptInvalid("postprocess step receipt fields are invalid")
+        status = raw_receipt["status"]
+        completed_at = raw_receipt["completed_at"]
+        if not isinstance(status, str) or status not in _POSTPROCESS_RECEIPT_STATUSES:
+            raise _PostprocessReceiptInvalid("postprocess step receipt status is invalid")
+        if not isinstance(completed_at, str) or not completed_at.strip():
+            raise _PostprocessReceiptInvalid("postprocess step receipt timestamp is invalid")
+        try:
+            datetime.fromisoformat(completed_at)
+        except ValueError as exc:
+            raise _PostprocessReceiptInvalid(
+                "postprocess step receipt timestamp is invalid"
+            ) from exc
+        steps[name] = {"status": status, "completed_at": completed_at}
+    return steps
+
+
+def _serialize_postprocess_receipt(
+    steps: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": _POSTPROCESS_RECEIPT_SCHEMA_VERSION,
+        "steps": {
+            name: {
+                "status": steps[name]["status"],
+                "completed_at": steps[name]["completed_at"],
+            }
+            for name in _POSTPROCESS_STEP_NAMES
+            if name in steps
+        },
+    }
 
 
 class AgentPostExecutionService:
@@ -831,6 +1090,7 @@ class AgentPostExecutionService:
                 model_config_id=execution.model_config_id,
                 kind="postprocess",
                 request_id=request_id or "",
+                payload=_new_postprocess_receipt(),
             )
         elif outbox.status not in {"published", "completed", "failed"}:
             now = utcnow()
@@ -849,24 +1109,15 @@ class AgentPostExecutionService:
         execution: AgentExecution,
         request_id: str | None = None,
     ) -> None:
+        _ = event_service, event_writer
         try:
             if self.dispatcher is not None:
                 self.dispatcher.dispatch(execution.id, request_id)
-            event_service.emit_marker(
-                event_writer=event_writer,
-                execution_id=execution.id,
-                marker="post_execution_dispatched",
-            )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Post-execution task scheduling failed for %s.",
                 execution.id,
                 exc_info=True,
-            )
-            event_service.emit_marker(
-                event_writer=event_writer,
-                execution_id=execution.id,
-                marker="post_execution_dispatch_failed",
             )
 
     def process(
@@ -876,6 +1127,7 @@ class AgentPostExecutionService:
         model_config_id: str,
         request_id: str | None = None,
     ) -> None:
+        claim_token: str | None = None
         try:
             with Session(get_engine(self.settings)) as session:
                 execution = session.get(AgentExecution, execution_id)
@@ -904,6 +1156,17 @@ class AgentPostExecutionService:
                     return
                 if outbox.status in {"completed", "failed"}:
                     return
+                try:
+                    receipt_steps = _parse_postprocess_receipt(outbox.payload)
+                except _PostprocessReceiptInvalid as exc:
+                    outbox.status = "failed"
+                    outbox.locked_by = None
+                    outbox.locked_until = None
+                    outbox.last_error = f"Invalid postprocess receipt: {exc}"[:2000]
+                    outbox.updated_at = now
+                    session.add(outbox)
+                    session.commit()
+                    return
                 if outbox.processing_attempts >= int(
                     self.settings.agent.postprocess_max_attempts
                 ):
@@ -917,7 +1180,8 @@ class AgentPostExecutionService:
                     return
                 outbox.status = "processing"
                 outbox.processing_attempts += 1
-                outbox.locked_by = "background-worker"
+                claim_token = new_id("postclaim")
+                outbox.locked_by = claim_token
                 outbox.locked_until = now + timedelta(
                     seconds=int(self.settings.agent.worker_soft_time_limit_seconds)
                 )
@@ -960,15 +1224,39 @@ class AgentPostExecutionService:
                     "model_config_id": execution.model_config_id,
                 }
 
-            model_gateway = self.container.gateway_for_model_config(
-                context["model_config_id"]
-            )
+            model_gateway: Any | None = None
+            gateway_loaded = False
+
+            def get_model_gateway() -> Any:
+                nonlocal gateway_loaded, model_gateway
+                if not gateway_loaded:
+                    model_gateway = self.container.gateway_for_model_config(
+                        context["model_config_id"]
+                    )
+                    gateway_loaded = True
+                return model_gateway
+
             postprocess_failures: list[str] = []
 
-            def run_postprocess_step(name: str, action: Any) -> None:
+            def run_postprocess_step(
+                name: str,
+                action: Any,
+                *,
+                skipped: bool = False,
+            ) -> None:
+                if name in receipt_steps:
+                    return
+                self._refresh_processing_claim(
+                    execution_id=execution_id,
+                    model_config_id=model_config_id,
+                    claim_token=claim_token,
+                )
                 try:
-                    action()
+                    if not skipped:
+                        action()
                 except Exception as exc:  # noqa: BLE001
+                    if isinstance(exc, _PostprocessClaimLost | _PostprocessReceiptInvalid):
+                        raise
                     message = classify_runtime_error(exc).message
                     postprocess_failures.append(f"{name}: {message}")
                     logger.warning(
@@ -977,17 +1265,35 @@ class AgentPostExecutionService:
                         name,
                         type(exc).__name__,
                     )
+                    return
+                self._write_step_receipt(
+                    execution_id=execution_id,
+                    model_config_id=model_config_id,
+                    claim_token=claim_token,
+                    step_name=name,
+                    status="skipped" if skipped else "completed",
+                )
+                receipt_steps[name] = {
+                    "status": "skipped" if skipped else "completed",
+                    "completed_at": utcnow().isoformat(),
+                }
 
             if self.settings.agent.memory_after_turn_enabled:
                 run_postprocess_step(
                     "memory_extraction",
                     lambda: _extract_memory_background(
                         **context,
-                        model_gateway=model_gateway,
+                        model_gateway=get_model_gateway(),
                         settings=self.settings,
                         request_id=request_id,
                         conversation_id=context["session_id"],
                     ),
+                )
+            else:
+                run_postprocess_step(
+                    "memory_extraction",
+                    lambda: None,
+                    skipped=True,
                 )
             run_postprocess_step(
                 "short_summary",
@@ -1004,11 +1310,35 @@ class AgentPostExecutionService:
                     user_id=context["user_id"],
                     user_message=context["user_message"],
                     settings=self.settings,
-                    model_gateway=model_gateway,
+                    model_gateway=get_model_gateway(),
                 ),
             )
             if postprocess_failures:
                 raise RuntimeError("; ".join(postprocess_failures))
+            self._complete_processing(
+                execution_id=execution_id,
+                model_config_id=model_config_id,
+                claim_token=claim_token,
+            )
+        except _PostprocessClaimLost:
+            logger.warning(
+                "Post-execution claim lost: execution=%s",
+                execution_id,
+            )
+            return
+        except _PostprocessReceiptInvalid as exc:
+            logger.warning(
+                "Post-execution receipt invalid: execution=%s error=%s",
+                execution_id,
+                exc,
+            )
+            self._mark_processing_failure(
+                execution_id,
+                f"Invalid postprocess receipt: {exc}",
+                claim_token=claim_token,
+                terminal=True,
+            )
+            return
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Post-execution processing failed: execution=%s error_type=%s",
@@ -1018,32 +1348,158 @@ class AgentPostExecutionService:
             self._mark_processing_failure(
                 execution_id,
                 classify_runtime_error(exc).message,
+                claim_token=claim_token,
             )
             return
 
+    def _refresh_processing_claim(
+        self,
+        *,
+        execution_id: str,
+        model_config_id: str,
+        claim_token: str | None,
+    ) -> None:
+        if not claim_token:
+            raise _PostprocessClaimLost("postprocess claim token is missing")
         with Session(get_engine(self.settings)) as session:
-            execution = session.get(AgentExecution, execution_id)
-            if execution is None:
-                return
-            execution.postprocess_completed_at = utcnow()
-            execution.touch_updated_at()
-            session.add(execution)
             outbox = session.exec(
-                select(ExecutionOutbox).where(
+                select(ExecutionOutbox)
+                .where(
                     ExecutionOutbox.execution_id == execution_id,
                     ExecutionOutbox.kind == "postprocess",
                 )
+                .with_for_update()
             ).first()
-            if outbox is not None:
-                outbox.status = "completed"
-                outbox.locked_by = None
-                outbox.locked_until = None
-                outbox.last_error = ""
-                outbox.updated_at = utcnow()
-                session.add(outbox)
+            now = utcnow()
+            self._assert_processing_claim(
+                outbox,
+                model_config_id=model_config_id,
+                claim_token=claim_token,
+                now=now,
+            )
+            outbox.locked_until = now + timedelta(
+                seconds=int(self.settings.agent.worker_soft_time_limit_seconds)
+            )
+            outbox.updated_at = now
+            session.add(outbox)
             session.commit()
 
-    def _mark_processing_failure(self, execution_id: str, error: str) -> None:
+    def _write_step_receipt(
+        self,
+        *,
+        execution_id: str,
+        model_config_id: str,
+        claim_token: str | None,
+        step_name: str,
+        status: str,
+    ) -> None:
+        if step_name not in _POSTPROCESS_STEP_NAMES:
+            raise _PostprocessReceiptInvalid("postprocess step name is invalid")
+        if status not in _POSTPROCESS_RECEIPT_STATUSES:
+            raise _PostprocessReceiptInvalid("postprocess step status is invalid")
+        if not claim_token:
+            raise _PostprocessClaimLost("postprocess claim token is missing")
+        with Session(get_engine(self.settings)) as session:
+            outbox = session.exec(
+                select(ExecutionOutbox)
+                .where(
+                    ExecutionOutbox.execution_id == execution_id,
+                    ExecutionOutbox.kind == "postprocess",
+                )
+                .with_for_update()
+            ).first()
+            now = utcnow()
+            self._assert_processing_claim(
+                outbox,
+                model_config_id=model_config_id,
+                claim_token=claim_token,
+                now=now,
+            )
+            steps = _parse_postprocess_receipt(outbox.payload)
+            if step_name in steps:
+                return
+            steps[step_name] = {
+                "status": status,
+                "completed_at": now.isoformat(),
+            }
+            outbox.payload = _serialize_postprocess_receipt(steps)
+            outbox.updated_at = now
+            session.add(outbox)
+            session.commit()
+
+    def _complete_processing(
+        self,
+        *,
+        execution_id: str,
+        model_config_id: str,
+        claim_token: str | None,
+    ) -> None:
+        if not claim_token:
+            raise _PostprocessClaimLost("postprocess claim token is missing")
+        with Session(get_engine(self.settings)) as session:
+            outbox = session.exec(
+                select(ExecutionOutbox)
+                .where(
+                    ExecutionOutbox.execution_id == execution_id,
+                    ExecutionOutbox.kind == "postprocess",
+                )
+                .with_for_update()
+            ).first()
+            now = utcnow()
+            self._assert_processing_claim(
+                outbox,
+                model_config_id=model_config_id,
+                claim_token=claim_token,
+                now=now,
+            )
+            steps = _parse_postprocess_receipt(outbox.payload)
+            if set(steps) != set(_POSTPROCESS_STEP_NAMES):
+                raise RuntimeError("postprocess receipts are incomplete")
+            execution = session.exec(
+                select(AgentExecution)
+                .where(AgentExecution.id == execution_id)
+                .with_for_update()
+            ).first()
+            if execution is None:
+                return
+            if execution.model_config_id != model_config_id:
+                raise _PostprocessClaimLost("postprocess execution model mismatch")
+            execution.postprocess_completed_at = now
+            execution.touch_updated_at(now)
+            outbox.status = "completed"
+            outbox.locked_by = None
+            outbox.locked_until = None
+            outbox.last_error = ""
+            outbox.updated_at = now
+            session.add(execution)
+            session.add(outbox)
+            session.commit()
+
+    @staticmethod
+    def _assert_processing_claim(
+        outbox: ExecutionOutbox | None,
+        *,
+        model_config_id: str,
+        claim_token: str,
+        now: datetime,
+    ) -> None:
+        if outbox is None:
+            raise _PostprocessClaimLost("postprocess outbox is missing")
+        if outbox.model_config_id != model_config_id:
+            raise _PostprocessClaimLost("postprocess model configuration mismatch")
+        if outbox.status != "processing" or outbox.locked_by != claim_token:
+            raise _PostprocessClaimLost("postprocess claim is no longer owned")
+        if outbox.locked_until is None or outbox.locked_until <= now:
+            raise _PostprocessClaimLost("postprocess claim lease expired")
+
+    def _mark_processing_failure(
+        self,
+        execution_id: str,
+        error: str,
+        *,
+        claim_token: str | None = None,
+        terminal: bool = False,
+    ) -> None:
         with Session(get_engine(self.settings)) as session:
             outbox = session.exec(
                 select(ExecutionOutbox)
@@ -1055,9 +1511,11 @@ class AgentPostExecutionService:
             ).first()
             if outbox is None or outbox.status in {"completed", "failed"}:
                 return
+            if claim_token is not None and outbox.locked_by != claim_token:
+                return
             now = utcnow()
             max_attempts = int(self.settings.agent.postprocess_max_attempts)
-            if outbox.processing_attempts >= max_attempts:
+            if terminal or outbox.processing_attempts >= max_attempts:
                 outbox.status = "failed"
             else:
                 outbox.status = "pending"
@@ -1129,108 +1587,86 @@ def _extract_memory_background(
     trace_id: str | None = None,
     model_config_id: str | None = None,
 ) -> None:
-    _ = model_config_id
+    _ = model_config_id, thread_id, request_id, conversation_id, trace_id
     started_at = time.perf_counter()
-    with Session(get_engine(settings)) as session:
-        writer = PersistentAgentEventWriter(
-            execution_id,
-            session.get_bind(),
-            settings=settings,
-            trace_id=trace_id,
-            thread_id=thread_id,
-            request_id=request_id,
-            conversation_id=conversation_id,
-        )
-        try:
-            repository = MemoryRepository(session)
-            long_term = LongTermMemory(repository)
-            extracted = long_term.remember_after_turn(
-                agent_id=agent_id,
+    engine = get_engine(settings)
+    try:
+        with Session(engine) as read_session:
+            existing_memories = LongTermMemory(
+                MemoryRepository(read_session, auto_commit=False)
+            ).list_all(
+                agent_id,
                 user_id=user_id,
-                session_id=session_id,
-                account_name=account_name,
-                account_positioning=account_positioning,
-                user_message=user_message,
-                source_message_id=source_message_id,
-                source_execution_id=execution_id,
-                assistant_response=assistant_text,
-                tool_results=tool_results,
-                model_gateway=model_gateway,
-                callbacks=[
-                    ModelUsageCallback(
-                        settings,
-                        UsageContext(
-                            user_id=user_id,
-                            session_id=session_id,
-                            execution_id=execution_id,
-                            category="memory_extraction",
-                        ),
-                    )
-                ],
+                limit=20,
+                touch=False,
             )
-            _emit_postprocess_marker(
-                writer,
-                execution_id=execution_id,
-                marker="memory_extraction_ms",
-                value=int((time.perf_counter() - started_at) * 1000),
-                memories=len(extracted),
-            )
-            writer.emit(
-                "memory_extracted",
-                {
-                    "execution_id": execution_id,
-                    "count": len(extracted),
-                    "scope": {
-                        "user_id": user_id,
-                        "agent_id": agent_id,
-                        "session_id": session_id,
-                    },
-                    "memories": [
-                        {
-                            "key": item.key,
-                            "kind": item.kind,
-                            "content": item.content[:500],
-                        }
-                        for item in extracted
+
+        with Session(engine) as write_session:
+            try:
+                repository = MemoryRepository(write_session, auto_commit=False)
+                long_term = LongTermMemory(repository)
+                extracted = long_term.remember_after_turn(
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    account_name=account_name,
+                    account_positioning=account_positioning,
+                    user_message=user_message,
+                    source_message_id=source_message_id,
+                    source_execution_id=execution_id,
+                    assistant_response=assistant_text,
+                    tool_results=tool_results,
+                    model_gateway=model_gateway,
+                    existing_memories=existing_memories,
+                    callbacks=[
+                        ModelUsageCallback(
+                            settings,
+                            UsageContext(
+                                user_id=user_id,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                                category="memory_extraction",
+                            ),
+                        )
                     ],
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Background memory extraction failed: execution=%s error_type=%s",
-                execution_id,
-                type(exc).__name__,
-            )
-            _emit_postprocess_marker(
-                writer,
-                execution_id=execution_id,
-                marker="memory_extraction_ms",
-                value=int((time.perf_counter() - started_at) * 1000),
-                failed=True,
-            )
-            writer.emit(
-                "memory_extraction_failed",
-                {
-                    "execution_id": execution_id,
-                    "error": classify_runtime_error(exc).message,
-                },
-            )
-            raise
-        finally:
-            writer.close()
+                )
+                write_session.commit()
+            except Exception:
+                write_session.rollback()
+                raise
+
+        logger.info(
+            "Background memory extraction completed: execution=%s duration_ms=%s memories=%s",
+            execution_id,
+            int((time.perf_counter() - started_at) * 1000),
+            len(extracted),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Background memory extraction failed: execution=%s error_type=%s duration_ms=%s",
+            execution_id,
+            type(exc).__name__,
+            int((time.perf_counter() - started_at) * 1000),
+        )
+        raise
 
 
 def _refresh_short_summary_background(*, session_id: str, settings: Any) -> None:
     with Session(get_engine(settings)) as session:
-        chat = session.get(ChatSession, session_id)
-        if chat is None:
-            return
-        repository = MemoryRepository(session)
-        ShortTermMemory(repository).refresh_summary(
-            session,
-            session_id=session_id,
-            user_id=chat.user_id,
-        )
+        try:
+            chat = session.get(ChatSession, session_id)
+            if chat is None:
+                return
+            repository = MemoryRepository(session, auto_commit=False)
+            ShortTermMemory(repository).refresh_summary(
+                session,
+                session_id=session_id,
+                user_id=chat.user_id,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
 
 def _update_title_background(
@@ -1284,12 +1720,12 @@ def _generate_session_title(
     )
     try:
         model = model_gateway.build_structured_output_model(SessionTitleResult)
-        try:
-            result = model.invoke(prompt, config={"callbacks": callbacks or []})
-        except TypeError as exc:
-            if "config" not in str(exc):
-                raise
-            result = model.invoke(prompt)
+        result = invoke_model(
+            model,
+            prompt,
+            callbacks=callbacks,
+            include_empty_callbacks=True,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Session title generation failed: error_type=%s", type(exc).__name__)
         raise RuntimeError("Session title generation failed.") from None
@@ -1318,26 +1754,14 @@ def _fallback_session_title(content: str) -> str:
     return normalized
 
 
-def _emit_postprocess_marker(
-    writer: Any,
-    *,
-    execution_id: str,
-    marker: str,
-    **payload: Any,
-) -> None:
-    writer.emit(
-        "agent_runtime_marker",
-        {"execution_id": execution_id, "marker": marker, **payload},
-    )
-
-
 def _emit_message_chunk(
     *,
     payload: Any,
     execution_id: str,
     event_writer: Any,
     streamed_assistant_parts: list[str],
-    streamed_assistant_by_id: dict[str, str],
+    streamed_assistant_by_id: dict[str, _AssistantStreamState],
+    streamed_assistant_length: int,
 ) -> tuple[str, str]:
     message, metadata = _extract_message_payload(payload)
     if message is None:
@@ -1372,12 +1796,12 @@ def _emit_message_chunk(
         return getattr(message, "id", "") or "", ""
 
     message_id = message_id or f"lc-{execution_id}-assistant"
-    normalized = streamed_assistant_by_id.get(message_id, "")
-    delta = _message_text_delta(previous=normalized, current=chunk_text)
+    stream_state = streamed_assistant_by_id.setdefault(message_id, _AssistantStreamState())
+    delta = _message_text_delta(state=stream_state, current=chunk_text)
     if not delta:
         return message_id, ""
 
-    streamed_assistant_by_id[message_id] = normalized + delta
+    _ensure_assistant_stream_length(streamed_assistant_length + len(delta))
     streamed_assistant_parts.append(delta)
     event_writer.emit(
         "assistant_message_delta",
@@ -1582,31 +2006,43 @@ def _interrupt_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     return {"interrupts": normalized}
 
 
-def _message_text_delta(*, previous: str, current: str) -> str:
+def _message_text_delta(*, state: _AssistantStreamState, current: str) -> str:
     if not current:
         return ""
+    previous = state.text
     if not previous:
+        state.text = current
         return current
-    if current == previous:
-        return ""
-    if current.startswith(previous):
+
+    if state.mode == "cumulative":
+        if previous.startswith(current):
+            return ""
+        if current.startswith(previous):
+            state.text = current
+            return current[len(previous) :]
+        state.mode = "delta"
+        state.text = previous + current
+        return current
+
+    # A strict prefix-growing second chunk is the only signal legacy cumulative
+    # streams provide. Once a stream proves to be delta-based, keep that mode
+    # sticky so repeated or overlapping token text is never discarded.
+    if state.mode == "unknown" and current.startswith(previous) and current != previous:
+        state.mode = "cumulative"
+        state.text = current
         return current[len(previous) :]
-    if previous.endswith(current):
-        return ""
-    overlap = _suffix_prefix_overlap(previous, current)
-    if overlap:
-        return current[overlap:]
-    if current.endswith(previous):
-        return ""
+
+    state.mode = "delta"
+    state.text = previous + current
     return current
 
 
-def _suffix_prefix_overlap(previous: str, current: str) -> int:
-    max_overlap = min(len(previous), len(current))
-    for size in range(max_overlap, 0, -1):
-        if previous[-size:] == current[:size]:
-            return size
-    return 0
+def _ensure_assistant_stream_length(length: int) -> None:
+    if length > MAX_ASSISTANT_CONTENT_LENGTH:
+        raise ValueError(
+            "Assistant response exceeds the maximum supported length of "
+            f"{MAX_ASSISTANT_CONTENT_LENGTH} characters."
+        )
 
 
 def _utc_elapsed_ms(started_at: datetime | None, ended_at: datetime | None) -> int:

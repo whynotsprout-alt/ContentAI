@@ -16,6 +16,7 @@ import { createModelConfigRequestGuard } from '@/features/admin/modelConfigReque
 import {
   ApiError,
   adminApi,
+  type AdminModelApiMode,
   type AdminModelConfiguration,
   type AdminModelProbePayload,
   type AdminModelUpdatePayload
@@ -25,6 +26,7 @@ const active = ref<AdminModelConfiguration | null>(null);
 const baseUrl = ref('');
 const apiKey = ref('');
 const modelName = ref('');
+const apiMode = ref<AdminModelApiMode>('chat_completions');
 const inputPrice = ref('5');
 const outputPrice = ref('25');
 const temperature = ref<number | null>(0.2);
@@ -48,7 +50,8 @@ let applyingServerState = false;
 const readConnectionDraft = () => ({
   baseUrl: baseUrl.value,
   apiKey: apiKey.value,
-  modelName: modelName.value
+  modelName: modelName.value,
+  apiMode: apiMode.value
 });
 const readSaveDraft = () => ({
   ...readConnectionDraft(),
@@ -157,6 +160,7 @@ function setTemperatureMode(mode: 'auto' | 'custom') {
 
 function payload(includeModel: boolean): AdminModelProbePayload {
   return {
+    api_mode: apiMode.value,
     base_url: baseUrl.value.trim(),
     ...(apiKey.value.trim() ? { api_key: apiKey.value } : {}),
     ...(includeModel && modelName.value.trim() ? { model_name: modelName.value.trim() } : {})
@@ -179,6 +183,7 @@ async function loadConfiguration(options: { preserveForm?: boolean; background?:
       try {
         baseUrl.value = result.base_url ?? '';
         modelName.value = result.model_name ?? '';
+        apiMode.value = result.api_mode ?? 'chat_completions';
         inputPrice.value = String(result.input_price_per_million_usd ?? 5);
         outputPrice.value = String(result.output_price_per_million_usd ?? 25);
         apiKey.value = '';
@@ -298,6 +303,7 @@ async function saveConfiguration() {
       active.value = result;
       baseUrl.value = result.base_url ?? requestPayload.base_url;
       modelName.value = result.model_name ?? requestPayload.model_name;
+      apiMode.value = result.api_mode ?? requestPayload.api_mode ?? apiMode.value ?? 'chat_completions';
       inputPrice.value = String(result.input_price_per_million_usd ?? requestPayload.input_price_per_million_usd);
       outputPrice.value = String(result.output_price_per_million_usd ?? requestPayload.output_price_per_million_usd);
       apiKey.value = '';
@@ -345,6 +351,19 @@ watch([baseUrl, apiKey], () => {
   probing.value = false;
   models.value = [];
   modelsTruncated.value = false;
+  latencyMs.value = null;
+  successMessage.value = '';
+  if (errorKind.value === 'probe') {
+    errorMessage.value = '';
+    errorKind.value = '';
+  }
+}, { flush: 'sync' });
+
+watch(apiMode, () => {
+  if (applyingServerState) return;
+  probeGuard.invalidate();
+  saveGuard.invalidate();
+  probing.value = false;
   latencyMs.value = null;
   successMessage.value = '';
   if (errorKind.value === 'probe') {
@@ -441,6 +460,15 @@ onMounted(() => void loadConfiguration());
             <span class="model-secret-control"><KeyRound :size="16" /><input v-model="apiKey" type="password" autocomplete="new-password" :required="!configured" placeholder="sk-…" /></span>
             <small v-if="configured">已保存 {{ active?.api_key_hint }}；留空表示不更换已保存的 Key。</small>
             <small v-else>首次配置必须填写 Key。保存后只显示不可逆的非敏感提示。</small>
+          </label>
+
+          <label class="model-field" for="model-api-mode">
+            <span>API 模式</span>
+            <select id="model-api-mode" v-model="apiMode">
+              <option value="chat_completions">Chat Completions（/chat/completions）</option>
+              <option value="responses">Responses API（/responses）</option>
+            </select>
+            <small>探测与运行时会固定使用此 endpoint，不会根据模型名称自动切换。</small>
           </label>
 
           <div class="model-field">

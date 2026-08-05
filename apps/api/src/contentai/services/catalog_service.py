@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from contentai.core.config import Settings, get_settings
 from contentai.core.security import AGENT_WILDCARD, AuthContext
 from contentai.models.agent import AgentProfile, AgentVersion
 from contentai.models.chat import AgentExecution, AgentInvocation, ChatSession
@@ -11,9 +14,11 @@ from contentai.models.memory import MemoryRecord
 from contentai.models.schemas import (
     AgentProfileCreate,
     AgentProfileDetail,
+    AgentProfileListResponse,
     AgentProfileSummary,
     AgentProfileUpdate,
     AgentVersionCreate,
+    AgentVersionReference,
     AgentVersionSummary,
 )
 from contentai.services.errors import (
@@ -22,23 +27,59 @@ from contentai.services.errors import (
     AgentNotFoundError,
     AgentPermissionError,
     AgentValidationError,
+    AgentVersionConflictError,
+)
+from contentai.services.pagination import (
+    apply_descending_cursor,
+    encode_cursor,
+    fit_response_items,
+    signer_from_settings,
 )
 
 
 class CatalogService:
-    def list_agents(self, session: Session, auth: AuthContext) -> list[AgentProfileSummary]:
-        query = (
-            select(AgentProfile)
-            .where(AgentProfile.user_id == auth.user_id)
-            .order_by(AgentProfile.updated_at.desc(), AgentProfile.id)
-        )
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._cursor_signer = signer_from_settings(settings or get_settings())
+
+    def list_agents(
+        self,
+        session: Session,
+        auth: AuthContext,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> AgentProfileListResponse:
+        scope = self._list_scope(auth)
+        statement = select(AgentProfile).where(AgentProfile.user_id == auth.user_id)
         if AGENT_WILDCARD not in auth.allowed_agent_ids:
-            if not auth.allowed_agent_ids:
-                return []
-            query = query.where(AgentProfile.id.in_(auth.allowed_agent_ids))
-        profiles = session.exec(query).all()
-        versions = self._latest_versions_by_agent(session, [profile.id for profile in profiles])
-        return [self._to_summary(profile, versions.get(profile.id)) for profile in profiles]
+            statement = statement.where(AgentProfile.id.in_(auth.allowed_agent_ids))
+        statement = apply_descending_cursor(
+            statement,
+            AgentProfile.created_at,
+            AgentProfile.id,
+            cursor,
+            scope=scope,
+            signer=self._cursor_signer,
+        ).order_by(AgentProfile.created_at.desc(), AgentProfile.id.desc())
+        profiles = list(session.exec(statement.limit(limit + 1)).all())
+        has_more = len(profiles) > limit
+        profiles = profiles[:limit]
+        versions = self._latest_version_refs_by_agent(
+            session, [profile.id for profile in profiles]
+        )
+        items = [self._to_summary(profile, versions.get(profile.id)) for profile in profiles]
+        items, budget_more = fit_response_items(items)
+        has_more = has_more or budget_more
+        next_cursor = None
+        if has_more and items:
+            boundary = profiles[len(items) - 1]
+            next_cursor = encode_cursor(
+                boundary.created_at,
+                boundary.id,
+                scope=scope,
+                signer=self._cursor_signer,
+            )
+        return AgentProfileListResponse(items=items, next_cursor=next_cursor)
 
     def get_agent(
         self,
@@ -52,7 +93,7 @@ class CatalogService:
         self._ensure_agent_allowed(agent_id, auth)
         versions = self._versions_for_agent(session, profile.id)
         current = versions[-1] if versions else None
-        return AgentProfileDetail(**self._to_summary(profile, current).model_dump())
+        return self._to_detail(profile, current)
 
     def create_agent(
         self,
@@ -71,23 +112,28 @@ class CatalogService:
             description=payload.description,
         )
         session.add(profile)
-        session.flush()
-        version = AgentVersion(
-            agent_id=profile.id,
-            version=1,
-            topic_scoring_prompt=payload.topic_scoring_prompt,
-            content_prompt=payload.content_prompt,
-            hotspot_sources=payload.hotspot_sources,
-        )
-        session.add(version)
         try:
+            # The profile unique key can race between the preflight check and
+            # flush; keep both writes inside the same integrity-error boundary.
+            session.flush()
+            version = AgentVersion(
+                agent_id=profile.id,
+                version=1,
+                topic_scoring_prompt=payload.topic_scoring_prompt,
+                content_prompt=payload.content_prompt,
+                hotspot_sources=payload.hotspot_sources,
+            )
+            session.add(version)
             session.commit()
         except IntegrityError as exc:
             session.rollback()
             self._raise_integrity_error(exc)
+        except Exception:
+            session.rollback()
+            raise
         session.refresh(profile)
         session.refresh(version)
-        return AgentProfileDetail(**self._to_summary(profile, version).model_dump())
+        return self._to_detail(profile, version)
 
     def update_agent(
         self,
@@ -96,7 +142,10 @@ class CatalogService:
         payload: AgentProfileUpdate,
         auth: AuthContext,
     ) -> AgentProfileDetail:
-        profile = self._get_profile_for_auth(session, agent_id, auth)
+        # Deletion takes this same lock. Serializing both paths prevents an
+        # updater from retaining a stale ORM instance while a concurrent
+        # delete removes its row.
+        profile = self._get_profile_for_auth(session, agent_id, auth, for_update=True)
         if profile is None:
             raise AgentNotFoundError(agent_id)
         self._ensure_agent_allowed(agent_id, auth)
@@ -117,12 +166,20 @@ class CatalogService:
             profile.description = updates["description"]
         session.add(profile)
         try:
+            session.flush()
+            versions = self._versions_for_agent(session, profile.id)
+            current = versions[-1] if versions else None
+            result = self._to_detail(profile, current)
             session.commit()
         except IntegrityError as exc:
             session.rollback()
             self._raise_integrity_error(exc)
-        session.refresh(profile)
-        return self.get_agent(session, profile.id, auth)
+        except Exception:
+            session.rollback()
+            raise
+        # Return the immutable response captured while the profile lock was
+        # still held. A post-commit refresh could itself race with deletion.
+        return result
 
     def create_agent_version(
         self,
@@ -131,7 +188,9 @@ class CatalogService:
         payload: AgentVersionCreate,
         auth: AuthContext,
     ) -> AgentVersionSummary:
-        profile = self._get_profile_for_auth(session, agent_id, auth)
+        # Serialize version allocation per agent. The unique constraint remains
+        # the final guard, but locking the profile prevents max(version)+1 races.
+        profile = self._get_profile_for_auth(session, agent_id, auth, for_update=True)
         if profile is None:
             raise AgentNotFoundError(agent_id)
         self._ensure_agent_allowed(agent_id, auth)
@@ -145,22 +204,35 @@ class CatalogService:
         )
         session.add(profile)
         session.add(version)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            self._raise_integrity_error(exc)
+        except Exception:
+            session.rollback()
+            raise
         session.refresh(version)
         return self._to_version_summary(version)
 
     def delete_agent(self, session: Session, agent_id: str, auth: AuthContext) -> None:
-        profile = self._get_profile_for_auth(session, agent_id, auth)
+        # Updates lock the same profile row, so deletion and the final
+        # reference check cannot pass an in-flight update.
+        profile = self._get_profile_for_auth(session, agent_id, auth, for_update=True)
         if profile is None:
             raise AgentNotFoundError(agent_id)
         self._ensure_agent_allowed(agent_id, auth)
         if self._agent_has_references(session, agent_id):
             raise AgentInUseError("Agent has chat history or memories and cannot be deleted")
-        for version in self._versions_for_agent(session, agent_id):
-            session.delete(version)
-        session.flush()
-        session.delete(profile)
-        session.commit()
+        try:
+            for version in self._versions_for_agent(session, agent_id):
+                session.delete(version)
+            session.flush()
+            session.delete(profile)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
     @staticmethod
     def _agent_has_references(session: Session, agent_id: str) -> bool:
@@ -190,13 +262,16 @@ class CatalogService:
         session: Session,
         agent_id: str,
         auth: AuthContext,
+        *,
+        for_update: bool = False,
     ) -> AgentProfile | None:
-        return session.exec(
-            select(AgentProfile).where(
-                AgentProfile.id == agent_id,
-                AgentProfile.user_id == auth.user_id,
-            )
-        ).first()
+        statement = select(AgentProfile).where(
+            AgentProfile.id == agent_id,
+            AgentProfile.user_id == auth.user_id,
+        )
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return session.exec(statement).first()
 
     @staticmethod
     def _ensure_name_available(
@@ -231,10 +306,10 @@ class CatalogService:
         )
 
     @staticmethod
-    def _latest_versions_by_agent(
+    def _latest_version_refs_by_agent(
         session: Session,
         agent_ids: list[str],
-    ) -> dict[str, AgentVersion]:
+    ) -> dict[str, AgentVersionReference]:
         if not agent_ids:
             return {}
         latest = (
@@ -247,13 +322,20 @@ class CatalogService:
             .subquery()
         )
         rows = session.exec(
-            select(AgentVersion).join(
+            select(AgentVersion.id, AgentVersion.agent_id, AgentVersion.version).join(
                 latest,
                 (AgentVersion.agent_id == latest.c.agent_id)
                 & (AgentVersion.version == latest.c.version),
             )
         ).all()
-        return {row.agent_id: row for row in rows}
+        return {
+            agent_id: AgentVersionReference(
+                id=version_id,
+                agent_id=agent_id,
+                version=version,
+            )
+            for version_id, agent_id, version in rows
+        }
 
     @staticmethod
     def _next_version_number(session: Session, agent_id: str) -> int:
@@ -265,9 +347,21 @@ class CatalogService:
     @staticmethod
     def _to_summary(
         profile: AgentProfile,
-        current_version: AgentVersion | None,
+        current_version: AgentVersionReference | None,
     ) -> AgentProfileSummary:
         return AgentProfileSummary(
+            id=profile.id,
+            name=profile.name,
+            description=profile.description,
+            current_version=current_version,
+        )
+
+    @staticmethod
+    def _to_detail(
+        profile: AgentProfile,
+        current_version: AgentVersion | None,
+    ) -> AgentProfileDetail:
+        return AgentProfileDetail(
             id=profile.id,
             name=profile.name,
             description=profile.description,
@@ -277,6 +371,16 @@ class CatalogService:
                 else None
             ),
         )
+
+    @staticmethod
+    def _list_scope(auth: AuthContext) -> str:
+        permission_scope = (
+            "*"
+            if AGENT_WILDCARD in auth.allowed_agent_ids
+            else "\x00".join(sorted(auth.allowed_agent_ids))
+        )
+        permission_digest = hashlib.sha256(permission_scope.encode("utf-8")).hexdigest()
+        return f"catalog.agents:{auth.user_id}:{permission_digest}"
 
     @staticmethod
     def _to_version_summary(version: AgentVersion) -> AgentVersionSummary:
@@ -294,6 +398,10 @@ class CatalogService:
         constraint_name = CatalogService._extract_constraint_name(exc)
         if constraint_name == "ux_agentprofile_user_name":
             raise AgentAlreadyExistsError("Agent name already exists for this user") from exc
+        if constraint_name == "ux_agentversion_agent_version":
+            raise AgentVersionConflictError(
+                "Agent version allocation conflicted; please retry"
+            ) from exc
         raise exc
 
     @staticmethod
@@ -304,4 +412,6 @@ class CatalogService:
             return diag_constraint
         if "ux_agentprofile_user_name" in str(exc):
             return "ux_agentprofile_user_name"
+        if "ux_agentversion_agent_version" in str(exc):
+            return "ux_agentversion_agent_version"
         return None

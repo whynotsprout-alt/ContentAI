@@ -43,6 +43,7 @@ def prepare_topic_research(topic: str) -> dict[str, object]:
         }
     runtime.ensure_not_cancelled()
     research_package = ResearchPackageRepository.persist(
+        bind=runtime.database_engine,
         session_id=runtime.conversation_id,
         execution_id=runtime.execution_id,
         agent_version_id=runtime.agent_version_id,

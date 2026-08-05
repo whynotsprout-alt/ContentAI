@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from sqlmodel import Session, select
 
@@ -19,8 +17,6 @@ class MessagePersister:
         invocation_id: str,
         execution_id: str,
         messages: list[BaseMessage],
-        event_writer: Any,
-        streamed_assistant_text: str = "",
     ) -> ChatMessage | None:
         for message in reversed(messages):
             if isinstance(message, HumanMessage) or not isinstance(message, AIMessage):
@@ -34,8 +30,6 @@ class MessagePersister:
                 invocation_id=invocation_id,
                 execution_id=execution_id,
                 content=content,
-                event_writer=event_writer,
-                emit_delta=not streamed_assistant_text,
             )
         return None
 
@@ -47,10 +41,7 @@ class MessagePersister:
         invocation_id: str,
         execution_id: str,
         content: str,
-        event_writer: Any,
-        emit_delta: bool = True,
         commit: bool = False,
-        pending_events: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> ChatMessage:
         existing = db_session.exec(
             select(ChatMessage).where(

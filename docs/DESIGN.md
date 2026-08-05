@@ -59,7 +59,7 @@ flowchart LR
 内容流程由系统提示词、当前会话消息和两个公开工具协作完成，不保存 `stage` 字段。Metaso 与 Anspire 搜索工具仅供研究编排层调用，不暴露给主 Agent。
 
 - `fetch_hotspots`：采集 → 每来源截断 → 逻辑平台轮询公平合并 → 全局去重与稳定 `candidate_id` → 一次性结构化评分 → 仅返回达标选题。成功缓存默认 180 秒，失败短缓存 15 秒。
-- `prepare_topic_research`：并发调用固定 endpoint 的 Metaso 与 Anspire → 规范化并按 URL 去重 → 清理/隔离不可信供应商文本 → 以独立 JSON 证据块输入研究子模型 → 固定模板归纳 → 机械清理未知引用 → 幂等持久化 `ResearchPackage`。研究不访问结果 URL，不做域名独立性、原始信源或证据充分性判断。
+- `prepare_topic_research`：并发调用固定 endpoint 的 Metaso 与 Anspire → 规范化并按 URL 去重 → 清理/隔离不可信供应商文本 → 以独立 JSON 证据块输入研究子模型 → 固定模板归纳 → 机械清理未知引用 → 按 `(execution_id, topic_hash)` 首次写入且不可变地持久化 `ResearchPackage`，顺序或并发重试返回首个 durable winner。研究不访问结果 URL，不做域名独立性、原始信源或证据充分性判断。
 - 主模型将工具结果整理为 Assistant 消息。首次跳过研究的劝告、后续坚持以及选题切换都从会话消息历史判断。
 
 两个搜索 API 使用可取消的异步 HTTP、关闭自动重定向，并共享 30 秒搜索 deadline；结构化归纳最多 135 秒，研究总 deadline 为 180 秒。搜索结果 URL 仅作为引用数据，服务端不会请求或解析 DNS。资料包只保存清理限长后的搜索字段，不存在网页正文数据。
@@ -90,8 +90,9 @@ flowchart LR
 
 ## 数据库与部署
 
-- `202607210001_v050_initial_schema.py` 是空数据库基线，后续迁移补充模型定价/用量成本和运行参数；当前 head 为 `202608030002`，不含历史版本原地兼容回填。
+- `202607210001_v050_initial_schema.py` 是空数据库基线，后续迁移补充模型定价/用量成本、运行参数、显式 API 模式、用量 token 与成本一致性、ChatMessage invocation/execution lineage、Memory 分数与计数约束、execution/current-attempt 复合 lineage、Agent catalog keyset 分页索引、checkpoint revision fence，以及 Redis 事件流的 DB committed/terminal 水位；当前 head 为 `202608040009`。已发布 revision 不原地改写，历史脏数据由升级预检、后续迁移显式修复或 fail-fast。
 - LangGraph checkpoint/store 表由 `PostgresSaver.setup()` 初始化，并从 Alembic autogenerate 比较中明确排除。
+- 每次 checkpoint `put`/`put_writes` 在同一数据库连接和事务中锁定 execution，校验 worker/attempt/lease 与父 head，并原子推进 `checkpoint_revision`；接管的业务行锁因此与旧 writer 互斥。
 - Alembic 配置从显式环境变量、当前工作目录或 wheel 包资源定位，不依赖仓库根目录。
 - 容器启动顺序为 PostgreSQL 健康 → 一次性 migration 成功 → API、Dispatcher、Worker 和 Beat 启动。
 - readiness 检查数据库 revision、checkpoint schema、Redis、队列连接及 outbox 最老积压时间。
@@ -101,7 +102,7 @@ flowchart LR
 
 ### 模型配置与密钥边界
 
-- `ModelConfiguration` 保留唯一 active 配置及不可变历史版本；API Key 只以 Fernet 密文、指纹和受限提示保存，读取接口不返回明文或密文。
+- `ModelConfiguration` 保留唯一 active 配置及不可变历史版本，并持久化 `chat_completions` / `responses` 显式 API 模式；API Key 只以 Fernet 密文、指纹和受限提示保存，读取接口不返回明文或密文。
 - `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 是部署级 Fernet 主密钥。migration、API、dispatcher、各 worker 与 beat 都从 Compose 共享应用环境取得同一值；缺失或不是有效 Fernet key 时，开发和生产均拒绝启动。
-- 更新采用 `expected_version` 乐观并发控制，并在持久化前重新 probe；并发写冲突返回 `MODEL_CONFIG_CHANGED`。每个 execution/outbox 关联其创建时的 `model_config_id`，从而把切换隔离到新 execution。
+- 更新采用 `expected_version` 乐观并发控制，并在持久化前按显式 API 模式重新 probe；probe 与 LangChain 运行时固定使用同一 endpoint，不允许按模型名自动切换。旧更新请求省略模式时保留 active 值，无法验证 Responses 的旧三参数 prober 会 fail-closed。并发写冲突返回 `MODEL_CONFIG_CHANGED`。每个 execution/outbox 关联其创建时的 `model_config_id`，从而把切换隔离到新 execution。
 - 失败路径使用稳定错误码，不透传远端错误正文；模型配置路径的响应禁止缓存，输入验证也会脱敏。

@@ -12,6 +12,7 @@ from contentai.agent.external_content import (
     looks_like_instruction_injection,
     sanitize_external_text,
 )
+from contentai.agent.runtime.model_invocation import invoke_model
 
 MAX_FILTER_CANDIDATES = 200
 
@@ -142,17 +143,12 @@ def _invoke_filter_model(
     *,
     callbacks: list[Any] | None,
 ) -> Any:
-    try:
-        return model.invoke(messages, config={"callbacks": callbacks or []})
-    except TypeError as exc:
-        if not _does_not_accept_config(exc):
-            raise
-        return model.invoke(messages)
-
-
-def _does_not_accept_config(exc: TypeError) -> bool:
-    message = str(exc).casefold()
-    return "config" in message and "unexpected keyword argument" in message
+    return invoke_model(
+        model,
+        messages,
+        callbacks=callbacks,
+        include_empty_callbacks=True,
+    )
 
 
 def _coerce_result(value: Any) -> HotspotFilterResult:

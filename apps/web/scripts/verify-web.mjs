@@ -47,6 +47,26 @@ const agent = {
   current_version: agentVersion
 };
 
+const agentSummary = {
+  ...agent,
+  current_version: {
+    id: agentVersion.id,
+    agent_id: agentVersion.agent_id,
+    version: agentVersion.version
+  }
+};
+
+const secondAgentSummary = {
+  id: 'agent-ai',
+  name: 'AI 产品观察',
+  description: '跟踪 AI 产品和行业应用。',
+  current_version: {
+    id: 'version-ai-1',
+    agent_id: 'agent-ai',
+    version: 1
+  }
+};
+
 const workbenchSessionSummary = {
   session_id: 'session-market',
   agent_id: agent.id,
@@ -175,6 +195,7 @@ const modelConfiguration = {
   id: 'model-config-7',
   version: 7,
   provider: 'openai_compatible',
+  api_mode: 'chat_completions',
   base_url: 'https://gateway.example.test/v1',
   model_name: 'gpt-4.1-mini',
   input_price_per_million_usd: 5,
@@ -372,10 +393,21 @@ async function installApiMocks(page, state) {
       state.authenticated = true;
       return fulfillJson(route, authUser);
     }
-    if (path === '/api/agents' && method === 'GET') return fulfillJson(route, [agent]);
+    if (path === '/api/agents' && method === 'GET') {
+      if (url.searchParams.get('cursor') === 'agent-page-2') {
+        return fulfillJson(route, { items: [secondAgentSummary], next_cursor: null });
+      }
+      return fulfillJson(route, {
+        items: [agentSummary],
+        next_cursor: '  agent-page-2  '
+      });
+    }
     if (path === `/api/agents/${agent.id}` && method === 'GET') return fulfillJson(route, agent);
     if (path === '/api/chat/sessions' && method === 'GET') {
-      return fulfillJson(route, [workbenchSessionSummary, secondSessionSummary]);
+      return fulfillJson(route, {
+        items: [workbenchSessionSummary, secondSessionSummary],
+        next_cursor: null
+      });
     }
     if (path === `/api/chat/sessions/${workbenchSessionSummary.session_id}` && method === 'GET') {
       return fulfillJson(route, workbenchSession);
@@ -533,6 +565,14 @@ async function runDesktopAcceptance(browser) {
 
     await expectVisible(page.locator('.workbench-shell'), '工作台');
     await expectVisible(page.getByText(agent.name, { exact: true }), '当前内容账号');
+    assert.deepEqual(
+      state.apiCalls.filter((call) => call.startsWith('GET /api/agents?')),
+      [
+        'GET /api/agents?limit=200',
+        'GET /api/agents?cursor=agent-page-2&limit=200'
+      ],
+      '工作台应去除 cursor 空白并合并两页轻摘要'
+    );
     await expectVisible(page.getByText('平台补贴与消费趋势', { exact: true }), '会话条目');
     await expectVisible(page.getByText('你以为平台又在撒钱，其实它们真正争夺的，是你下一次消费时第一个打开谁。', { exact: true }), '对话消息');
     await capture(page, '02-workbench-1440x900.png', screenshots);
@@ -553,6 +593,30 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('textbox', { name: '账号名称', exact: true }), '账号名称字段');
     await page.getByRole('textbox', { name: '账号名称', exact: true }).waitFor();
     assert.equal(await page.getByRole('textbox', { name: '账号名称', exact: true }).inputValue(), agent.name);
+    await expectVisible(page.getByText(secondAgentSummary.name, { exact: true }), '第二页内容账号');
+    assert.ok(
+      state.apiCalls.some((call) => call === `GET /api/agents/${agent.id}`),
+      '账号编辑器应读取完整详情'
+    );
+    await page.getByRole('tab', { name: '评分规则', exact: true }).click();
+    assert.equal(
+      await page.getByRole('textbox', { name: '选题评分提示词', exact: true }).inputValue(),
+      agentVersion.topic_scoring_prompt,
+      '选题提示词必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '内容规则', exact: true }).click();
+    assert.equal(
+      await page.getByRole('textbox', { name: '内容生成提示词', exact: true }).inputValue(),
+      agentVersion.content_prompt,
+      '内容提示词必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '热点来源', exact: true }).click();
+    assert.equal(
+      await page.getByRole('button', { name: '36Kr', exact: true }).getAttribute('aria-pressed'),
+      'true',
+      '热点来源必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '基础信息', exact: true }).click();
     const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(managerColumns, /^280px 184px /, `账号配置列宽不正确：${managerColumns}`);
     await capture(page, '03-agent-manager-1440x900.png', screenshots);
@@ -621,6 +685,7 @@ async function runDesktopAcceptance(browser) {
     assert.equal(await modelName.inputValue(), 'custom-model-draft', '冲突后应保留模型草稿');
     await expectVisible(page.getByText('v8', { exact: true }), '冲突后同步的配置版本');
     assert.deepEqual(state.modelPutPayloads, [{
+      api_mode: 'chat_completions',
       base_url: 'https://draft.example.test/v1',
       model_name: 'custom-model-draft',
       input_price_per_million_usd: 5,
@@ -642,9 +707,57 @@ async function runDesktopAcceptance(browser) {
 
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
-    await expectVisible(page.getByRole('heading', { name: '请在桌面浏览器中打开', exact: true }), '1024px 桌面门槛');
-    await expectHidden(page.locator('.desktop-application'), '1024px 应用界面');
-    await capture(page, '07-desktop-gate-1024x768.png', screenshots);
+    await expectVisible(page.locator('.workbench-shell'), '1024px 工作台');
+    assert.equal(await page.locator('.desktop-gate').count(), 0, '1024px 不应渲染桌面门槛');
+    const viewportOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    assert.equal(viewportOverflow, false, '1024px 不应出现页面级横向溢出');
+    await capture(page, '07-workbench-1024x768.png', screenshots);
+
+    for (const viewport of [
+      { width: 768, height: 900, file: '08-workbench-768x900.png' },
+      { width: 390, height: 640, file: '09-workbench-390x640.png' }
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await expectVisible(page.locator('.workbench-shell'), `${viewport.width}px 工作台`);
+      assert.equal(await page.locator('.desktop-gate').count(), 0, `${viewport.width}px 不应渲染桌面门槛`);
+      const narrowOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+      assert.equal(narrowOverflow, false, `${viewport.width}px 不应出现页面级横向溢出`);
+      await capture(page, viewport.file, screenshots);
+    }
+
+    const mobileAgentTrigger = page.locator('.workbench-nav [data-agent-manager-trigger]');
+    assert.equal(await mobileAgentTrigger.count(), 1, '手机端应保留内容账号管理入口');
+    await mobileAgentTrigger.click();
+    await expectVisible(page.locator('.agent-manager'), '手机端内容账号管理');
+    const managerBounds = await page.locator('.accessible-dialog-fullscreen').evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, viewport: window.innerWidth };
+    });
+    assert.ok(managerBounds.left >= -1 && managerBounds.right <= managerBounds.viewport + 1, '手机端账号管理弹窗不应横向裁切');
+    await capture(page, '10-agent-manager-390x640.png', screenshots);
+    await page.keyboard.press('Escape');
+    await expectHidden(page.locator('.agent-manager'), '手机端内容账号管理');
+
+    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.admin-workspace'), '手机端用户管理');
+    const mobileUserRow = page.locator('.admin-table tbody tr');
+    await mobileUserRow.first().waitFor({ state: 'visible' });
+    assert.equal(await mobileUserRow.count(), 1, '手机端用户列表应渲染测试用户');
+    await mobileUserRow.click();
+    await expectVisible(page.locator('.admin-detail-panel h2'), '手机端用户详情');
+    const adminBounds = await page.locator('.admin-topbar').evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, viewport: window.innerWidth };
+    });
+    assert.ok(adminBounds.left >= -1 && adminBounds.right <= adminBounds.viewport + 1, '手机端后台导航不应横向裁切');
+    await capture(page, '11-admin-users-390x640.png', screenshots);
+
+    await page.locator('.admin-open-audit').click();
+    await expectVisible(page.locator('.admin-audit-window'), '手机端会话审计');
+    const auditColumns = await page.locator('.admin-audit-body').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.ok(!auditColumns.includes('300px'), `手机端审计窗口应为单列布局：${auditColumns}`);
+    await capture(page, '12-admin-audit-390x640.png', screenshots);
+    await page.keyboard.press('Escape');
 
     assert.deepEqual(state.unexpectedApiCalls, [], `存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `页面脚本错误：${state.pageErrors.join(' | ')}`);
@@ -696,6 +809,7 @@ async function runMotionBackdropAcceptance(browser) {
   ));
   try {
     await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.ambient-backdrop__video').waitFor({ state: 'attached' });
     assert.equal(await page.locator('.ambient-backdrop__poster').isVisible(), true, '动态背景的静态后备应保持可见');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-material'), 'web-background');
     assert.equal(await page.locator('.ambient-backdrop__video').count(), 1, '未减少动画模式应加载本地视频节点');

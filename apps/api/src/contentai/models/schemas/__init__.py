@@ -16,9 +16,11 @@ from contentai.models.schemas.admin import (
 from contentai.models.schemas.agent import (
     AgentProfileCreate,
     AgentProfileDetail,
+    AgentProfileListResponse,
     AgentProfileSummary,
     AgentProfileUpdate,
     AgentVersionCreate,
+    AgentVersionReference,
     AgentVersionSummary,
 )
 from contentai.models.schemas.auth import (
@@ -47,7 +49,9 @@ from contentai.models.schemas.chat import (
     PublicInterrupt,
     PublicInterruptAction,
     PublicMemoryProposal,
+    StreamErrorEventV3,
     StreamEventV3,
+    StreamPublicEventV3,
     UserReplyRequest,
 )
 from contentai.models.schemas.memory import ConversationMemory, MemoryItem
@@ -55,13 +59,17 @@ from contentai.models.schemas.memory import ConversationMemory, MemoryItem
 __all__ = [
     "AgentProfileCreate",
     "AgentProfileDetail",
+    "AgentProfileListResponse",
     "AgentProfileSummary",
     "AgentProfileUpdate",
     "AgentVersionCreate",
+    "AgentVersionReference",
     "AgentVersionSummary",
     "AgentExecutionState",
     "AgentMessageRequest",
+    "StreamErrorEventV3",
     "StreamEventV3",
+    "StreamPublicEventV3",
     "ChatExecutionResponse",
     "ChatMessageResponse",
     "ChatRequest",

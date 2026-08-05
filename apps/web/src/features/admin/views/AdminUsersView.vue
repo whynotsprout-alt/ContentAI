@@ -26,6 +26,7 @@ const status = ref('');
 const cursorHistory = ref<string[]>([]);
 const nextCursor = ref<string | null>(null);
 const loading = ref(false);
+const userLoading = ref(false);
 const actionLoading = ref(false);
 const error = ref('');
 const notice = ref('');
@@ -49,6 +50,7 @@ let listController: AbortController | null = null;
 let userController: AbortController | null = null;
 let sessionController: AbortController | null = null;
 let paginationController: AbortController | null = null;
+let loadingUserId: string | null = null;
 
 const pageNumber = computed(() => cursorHistory.value.length + 1);
 const currentCursor = computed(() => cursorHistory.value[cursorHistory.value.length - 1] ?? '');
@@ -70,11 +72,48 @@ function abort(controller: AbortController | null) {
   controller?.abort();
 }
 
+function invalidateAuditRequests() {
+  sessionRequestGeneration += 1;
+  paginationRequestGeneration += 1;
+  abort(sessionController);
+  abort(paginationController);
+  sessionController = null;
+  paginationController = null;
+}
+
+function clearUserAuditState() {
+  sessions.value = [];
+  sessionsNextCursor.value = null;
+  selectedSession.value = null;
+  messagesNextCursor.value = null;
+  usage.value = [];
+  sessionLoading.value = false;
+  auditPaginationLoading.value = false;
+  auditOpen.value = false;
+}
+
+function clearSelectedUser() {
+  userRequestGeneration += 1;
+  abort(userController);
+  userController = null;
+  invalidateAuditRequests();
+  selected.value = null;
+  loadingUserId = null;
+  userLoading.value = false;
+  notice.value = '';
+  temporaryPassword.value = null;
+  confirmStatusChange.value = false;
+  confirmRoleChange.value = false;
+  clearUserAuditState();
+}
+
 async function load() {
   const generation = ++listRequestGeneration;
+  const selectedIdAtStart = selected.value?.id ?? null;
   abort(listController);
   listController = new AbortController();
   loading.value = true;
+  if (selectedIdAtStart) userLoading.value = true;
   error.value = '';
   try {
     const result = await adminApi.users(
@@ -84,23 +123,37 @@ async function load() {
     if (generation !== listRequestGeneration) return;
     users.value = result.items;
     nextCursor.value = result.next_cursor;
-    if (selected.value) selected.value = users.value.find((user) => user.id === selected.value?.id) ?? selected.value;
+    if (selected.value) {
+      const selectedId = selected.value.id;
+      const refreshedSelected = users.value.find((user) => user.id === selectedId);
+      if (refreshedSelected) {
+        selected.value = refreshedSelected;
+        if (loadingUserId !== selectedId) userLoading.value = false;
+      } else {
+        clearSelectedUser();
+      }
+    }
   } catch (value) {
     if (generation === listRequestGeneration && !isAbortError(value)) error.value = parseError(value);
   } finally {
-    if (generation === listRequestGeneration) loading.value = false;
+    if (generation === listRequestGeneration) {
+      loading.value = false;
+      if (selectedIdAtStart && selected.value?.id === selectedIdAtStart && loadingUserId !== selectedIdAtStart) {
+        userLoading.value = false;
+      }
+    }
   }
 }
 
 async function selectUser(user: AdminUser) {
   const generation = ++userRequestGeneration;
   abort(userController);
-  abort(sessionController);
-  abort(paginationController);
+  invalidateAuditRequests();
   userController = new AbortController();
-  sessionController = null;
-  paginationController = null;
   selected.value = user;
+  loadingUserId = user.id;
+  userLoading.value = true;
+  clearUserAuditState();
   notice.value = '';
   temporaryPassword.value = null;
   error.value = '';
@@ -115,10 +168,13 @@ async function selectUser(user: AdminUser) {
     sessions.value = sessionResult.items;
     sessionsNextCursor.value = sessionResult.next_cursor;
     usage.value = usageResult.items;
-    selectedSession.value = null;
-    messagesNextCursor.value = null;
   } catch (value) {
     if (generation === userRequestGeneration && !isAbortError(value)) error.value = parseError(value);
+  } finally {
+    if (generation === userRequestGeneration && loadingUserId === user.id) {
+      loadingUserId = null;
+      userLoading.value = false;
+    }
   }
 }
 
@@ -130,6 +186,7 @@ function onUserRowKeydown(event: KeyboardEvent, user: AdminUser) {
 
 async function selectSession(session: AdminSessionSummary) {
   const generation = ++sessionRequestGeneration;
+  paginationRequestGeneration += 1;
   abort(sessionController);
   abort(paginationController);
   sessionController = new AbortController();
@@ -324,7 +381,7 @@ onBeforeUnmount(() => {
           <div v-if="loading" class="admin-skeleton" aria-label="用户列表加载中"><span v-for="i in 6" :key="i"></span></div>
           <div v-else-if="!users.length" class="admin-empty"><Users :size="28" /><strong>暂无匹配用户</strong><span>调整搜索词或状态筛选后重试。</span></div>
           <div v-else class="admin-table-wrap">
-            <table class="admin-table"><caption class="sr-only">ContentAI 用户及全部模型 Token 与费用用量</caption><thead><tr><th>用户</th><th>状态</th><th>内容账号</th><th>会话</th><th>全部输入 Token</th><th>全部输出 Token</th><th>全部 Token</th><th>费用 (USD)</th></tr></thead><tbody>
+            <table class="admin-table"><caption class="sr-only">ContentAI 用户及全部模型 Token 与费用用量</caption><thead><tr><th scope="col">用户</th><th scope="col">状态</th><th scope="col">内容账号</th><th scope="col">会话</th><th scope="col">全部输入 Token</th><th scope="col">全部输出 Token</th><th scope="col">全部 Token</th><th scope="col">费用 (USD)</th></tr></thead><tbody>
               <tr v-for="user in users" :key="user.id" tabindex="0" :aria-selected="selected?.id === user.id" :class="{ selected: selected?.id === user.id }" @click="selectUser(user)" @keydown="onUserRowKeydown($event, user)">
                 <td data-label="用户"><strong>{{ user.email }}</strong><small>{{ user.role === 'admin' ? '管理员' : '普通用户' }}</small></td>
                 <td data-label="状态"><span class="semantic-status" :class="user.status">{{ statusText(user.status) }}</span></td><td data-label="内容账号">{{ user.agent_count }}</td><td data-label="会话">{{ user.conversation_count }}</td><td data-label="全部输入 Token" class="token-number">{{ formatTokens(user.input_tokens) }}</td><td data-label="全部输出 Token" class="token-number">{{ formatTokens(user.output_tokens) }}</td><td data-label="全部 Token" class="token-number strong">{{ formatTokens(user.total_tokens) }}</td><td data-label="费用 (USD)" class="token-number strong">{{ formatUsd(user.total_cost_usd) }}</td>
@@ -334,8 +391,9 @@ onBeforeUnmount(() => {
           <footer class="admin-pagination"><span>第 {{ pageNumber }} 页</span><div><button :disabled="!cursorHistory.length || loading" @click="previousPage">上一页</button><button :disabled="!nextCursor || loading" @click="nextPage">下一页</button></div></footer>
         </section>
 
-        <aside class="admin-detail-panel" aria-label="用户详情" aria-live="polite">
-          <div v-if="!selected" class="admin-empty"><Users :size="28" /><strong>选择一位用户</strong><span>详细状态和管理操作会显示在这里。</span></div>
+        <aside class="admin-detail-panel" aria-label="用户详情" :aria-busy="userLoading">
+          <div v-if="userLoading" class="admin-empty editor-loading" role="status"><LoaderCircle :size="20" class="spin" />正在加载用户详情</div>
+          <div v-else-if="!selected" class="admin-empty"><Users :size="28" /><strong>选择一位用户</strong><span>详细状态和管理操作会显示在这里。</span></div>
           <template v-else>
             <header class="admin-detail-header"><span class="detail-avatar">{{ selected.email.slice(0, 1).toUpperCase() }}</span><div><h2>{{ selected.email }}</h2><p>{{ selected.role === 'admin' ? '管理员' : '普通用户' }}</p></div></header>
             <dl class="admin-detail-list"><div><dt>状态</dt><dd>{{ statusText(selected.status) }}</dd></div><div><dt>邮箱验证</dt><dd>{{ selected.email_verified_at ? '已验证' : '未验证' }}</dd></div><div><dt>密码</dt><dd>{{ selected.password_set ? '已设置，无法查看原文' : '未设置' }}</dd></div><div><dt>注册时间</dt><dd>{{ formatDate(selected.created_at) }}</dd></div><div><dt>最近登录</dt><dd>{{ formatDate(selected.last_login_at) }}</dd></div><div class="usage-completeness"><dt>统计完整度</dt><dd><strong>{{ Math.round(selected.usage_coverage * 100) }}%</strong><small>成功调用 {{ formatCallCount(selected.completed_usage_call_count) }} 次 · 缺失 {{ formatCallCount(selected.missing_usage_call_count) }} 次 · 失败 {{ formatCallCount(selected.failed_usage_call_count) }} 次</small><small>全部调用 {{ formatCallCount(selected.usage_call_count) }} 次</small></dd></div></dl>

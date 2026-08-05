@@ -16,6 +16,25 @@ from psycopg_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+_FENCE_WORKER_KEY = "__worker_id"
+_FENCE_ATTEMPT_KEY = "__attempt_id"
+
+
+class CheckpointWriteFenceError(RuntimeError):
+    """The graph writer no longer owns the execution attempt or checkpoint head."""
+
+
+class CheckpointOwnershipLostError(CheckpointWriteFenceError):
+    """The worker, attempt, cancellation, status, or lease fence is no longer active."""
+
+
+class CheckpointSupersededError(CheckpointWriteFenceError):
+    """A checkpoint put was based on a business head that has already advanced."""
+
+
+class CheckpointStorageIntegrityError(CheckpointWriteFenceError):
+    """Checkpoint storage or its business revision violated an invariant."""
+
 
 class ExecutionScopedCheckpointer(BaseCheckpointSaver):
     """Persist root graph state in a physical execution namespace."""
@@ -68,7 +87,144 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         execution_id = ExecutionScopedCheckpointer._execution_id(requested)
         configurable["execution_id"] = execution_id
         configurable["checkpoint_ns"] = str(requested_configurable.get("checkpoint_ns") or "")
+        for key in (_FENCE_WORKER_KEY, _FENCE_ATTEMPT_KEY):
+            if key in requested_configurable:
+                configurable[key] = requested_configurable[key]
         return mapped
+
+    @staticmethod
+    def _required_fence(config: dict[str, Any]) -> tuple[str, str]:
+        configurable = config.get("configurable")
+        if not isinstance(configurable, dict):
+            raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+        values: list[str] = []
+        for key in (_FENCE_WORKER_KEY, _FENCE_ATTEMPT_KEY):
+            value = configurable.get(key)
+            if not isinstance(value, str) or not value or value != value.strip():
+                raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+            values.append(value)
+        return values[0], values[1]
+
+    @staticmethod
+    def _requested_checkpoint_id(config: dict[str, Any]) -> str | None:
+        configurable = config.get("configurable")
+        if not isinstance(configurable, dict):
+            raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+        value = configurable.get("checkpoint_id")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+        return value
+
+    def _connection_pool(self) -> ConnectionPool | None:
+        connection_source = getattr(self.delegate, "conn", None)
+        return connection_source if isinstance(connection_source, ConnectionPool) else None
+
+    def _fenced_write(
+        self,
+        config: dict[str, Any],
+        *,
+        next_checkpoint_id: str | None,
+        advance_head: bool,
+        write: Any,
+    ) -> Any:
+        pool = self._connection_pool()
+        if pool is None:
+            return write(self.delegate)
+
+        execution_id = self._execution_id(config)
+        worker_id, attempt_id = self._required_fence(config)
+        requested_checkpoint_id = self._requested_checkpoint_id(config)
+        physical = self._physical(config)
+        configurable = physical["configurable"]
+        thread_id = str(configurable.get("thread_id") or "").strip()
+        if not thread_id:
+            raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+
+        with pool.connection() as connection, connection.transaction():
+            row = connection.execute(
+                """
+                SELECT latest_checkpoint_id, checkpoint_revision, status,
+                       worker_id, current_attempt_id, cancel_requested_at,
+                       lease_expires_at
+                FROM agentexecution
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise CheckpointOwnershipLostError("CHECKPOINT_WRITE_FENCE_REJECTED")
+            authorization_time = connection.execute(
+                "SELECT clock_timestamp() AS authorization_time"
+            ).fetchone()["authorization_time"]
+            if (
+                row["status"] != "running"
+                or row["worker_id"] != worker_id
+                or row["current_attempt_id"] != attempt_id
+                or row["cancel_requested_at"] is not None
+                or row["lease_expires_at"] is None
+                or row["lease_expires_at"] <= authorization_time
+            ):
+                raise CheckpointOwnershipLostError("CHECKPOINT_WRITE_FENCE_REJECTED")
+
+            stored_head = row["latest_checkpoint_id"]
+            revision = int(row["checkpoint_revision"])
+            effective_head = stored_head
+            writes_bootstrap_head: str | None = None
+            if requested_checkpoint_id is not None:
+                checkpoint_exists = connection.execute(
+                    """
+                    SELECT 1
+                    FROM checkpoints
+                    WHERE thread_id = %s
+                      AND checkpoint_ns = %s
+                      AND checkpoint_id = %s
+                    FOR KEY SHARE
+                    """,
+                    (thread_id, execution_id, requested_checkpoint_id),
+                ).fetchone()
+                if advance_head and checkpoint_exists is None:
+                    raise CheckpointStorageIntegrityError(
+                        "CHECKPOINT_PARENT_FENCE_REJECTED"
+                    )
+                if advance_head and stored_head is None and revision == 0:
+                    effective_head = requested_checkpoint_id
+                if not advance_head:
+                    if checkpoint_exists is None and requested_checkpoint_id == stored_head:
+                        raise CheckpointStorageIntegrityError(
+                            "CHECKPOINT_PARENT_FENCE_REJECTED"
+                        )
+                    if checkpoint_exists is not None and stored_head is None and revision == 0:
+                        writes_bootstrap_head = requested_checkpoint_id
+
+            if advance_head and requested_checkpoint_id != effective_head:
+                raise CheckpointSupersededError("CHECKPOINT_PARENT_FENCE_REJECTED")
+            if not advance_head and requested_checkpoint_id is None:
+                raise CheckpointWriteFenceError("CHECKPOINT_WRITE_FENCE_INVALID")
+
+            short_saver = PostgresSaver(connection, serde=self.serde)
+            result = write(short_saver)
+            durable_head = (
+                next_checkpoint_id
+                if advance_head
+                else writes_bootstrap_head or stored_head
+            )
+            updated = connection.execute(
+                """
+                UPDATE agentexecution
+                SET latest_checkpoint_id = %s,
+                    checkpoint_revision = checkpoint_revision + 1
+                WHERE id = %s
+                  AND checkpoint_revision = %s
+                  AND latest_checkpoint_id IS NOT DISTINCT FROM %s
+                """,
+                (durable_head, execution_id, revision, stored_head),
+            )
+            if updated.rowcount != 1:
+                raise CheckpointStorageIntegrityError("CHECKPOINT_HEAD_CAS_REJECTED")
+            return result
 
     def setup(self) -> None:
         self.delegate.setup()
@@ -122,8 +278,28 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         metadata: dict[str, Any],
         new_versions: dict[str, Any],
     ) -> dict[str, Any]:
-        stored = self.delegate.put(
-            self._physical(config), checkpoint, metadata, new_versions
+        checkpoint_id = checkpoint.get("id")
+        if (
+            not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or checkpoint_id != checkpoint_id.strip()
+        ):
+            raise CheckpointWriteFenceError("CHECKPOINT_ID_INVALID")
+        sanitized_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in {_FENCE_WORKER_KEY, _FENCE_ATTEMPT_KEY}
+        }
+        stored = self._fenced_write(
+            config,
+            next_checkpoint_id=checkpoint_id,
+            advance_head=True,
+            write=lambda saver: saver.put(
+                self._physical(config),
+                checkpoint,
+                sanitized_metadata,
+                new_versions,
+            ),
         )
         logical = self._logical(stored, config)
         if logical is None:
@@ -137,8 +313,13 @@ class ExecutionScopedCheckpointer(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        self.delegate.put_writes(
-            self._physical(config), writes, task_id, task_path
+        self._fenced_write(
+            config,
+            next_checkpoint_id=None,
+            advance_head=False,
+            write=lambda saver: saver.put_writes(
+                self._physical(config), writes, task_id, task_path
+            ),
         )
 
     def delete_thread(self, thread_id: str) -> None:
@@ -301,28 +482,53 @@ class RuntimePersistence:
         dry_run: bool,
         retention_cutoff: datetime | None = None,
     ) -> dict[str, dict[str, int | bool]]:
-        """Bounded maintenance for LangGraph checkpoint tables.
+        """Delete bounded checkpoint rows whose execution namespace is orphaned.
 
-        The table names are fixed because this is an administrative operation;
-        retention does not apply because checkpoint rows have no business timestamp.
+        Checkpoint rows have no business timestamp. ``retention_cutoff`` is therefore
+        applied indirectly by the caller deleting eligible ``AgentExecution`` rows
+        first; every execution row that survives that business purge protects its
+        matching ``checkpoint_ns`` here. The table names and ordering are a fixed
+        leaf-to-root administrative allowlist.
         """
-        del retention_cutoff
         self.get_checkpointer()
         assert self._pool is not None
         summary: dict[str, dict[str, int | bool]] = {}
         tables = (
             (
                 "checkpoint_writes",
-                "thread_id, checkpoint_ns, checkpoint_id, task_id, idx",
+                "candidate.thread_id, candidate.checkpoint_ns, "
+                "candidate.checkpoint_id, candidate.task_id, candidate.idx",
             ),
-            ("checkpoint_blobs", "thread_id, checkpoint_ns, channel, version"),
-            ("checkpoints", "thread_id, checkpoint_ns, checkpoint_id"),
+            (
+                "checkpoint_blobs",
+                "candidate.thread_id, candidate.checkpoint_ns, "
+                "candidate.channel, candidate.version",
+            ),
+            (
+                "checkpoints",
+                "candidate.thread_id, candidate.checkpoint_ns, "
+                "candidate.checkpoint_id",
+            ),
         )
         for table, order_by in tables:
+            orphan_candidate = (
+                "NOT EXISTS ("
+                "SELECT 1 FROM agentexecution AS execution "
+                "WHERE execution.id = candidate.checkpoint_ns"
+                ")"
+            )
+            orphan_target = (
+                "NOT EXISTS ("
+                "SELECT 1 FROM agentexecution AS execution "
+                "WHERE execution.id = target.checkpoint_ns"
+                ")"
+            )
             with self._pool.connection() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
-                        f"SELECT 1 FROM {table} ORDER BY {order_by} LIMIT %s",
+                        f"SELECT 1 FROM {table} AS candidate "
+                        f"WHERE {orphan_candidate} "
+                        f"ORDER BY {order_by} LIMIT %s",
                         (batch_size + 1,),
                     )
                     probed = cursor.fetchall()
@@ -330,8 +536,13 @@ class RuntimePersistence:
                     deleted = 0
                     if not dry_run and candidate_count:
                         cursor.execute(
-                            f"DELETE FROM {table} WHERE ctid IN "
-                            f"(SELECT ctid FROM {table} ORDER BY {order_by} LIMIT %s)",
+                            f"DELETE FROM {table} AS target "
+                            "WHERE target.ctid IN ("
+                            f"SELECT candidate.ctid FROM {table} AS candidate "
+                            f"WHERE {orphan_candidate} "
+                            f"ORDER BY {order_by} LIMIT %s"
+                            ") "
+                            f"AND {orphan_target}",
                             (batch_size,),
                         )
                         deleted = cursor.rowcount
@@ -422,6 +633,10 @@ def clear_execution_persistence(
 __all__ = [
     "RuntimePersistence",
     "ExecutionScopedCheckpointer",
+    "CheckpointOwnershipLostError",
+    "CheckpointStorageIntegrityError",
+    "CheckpointSupersededError",
+    "CheckpointWriteFenceError",
     "checkpoint_connection_string",
     "checkpoint_interrupts",
     "checkpoint_messages",
