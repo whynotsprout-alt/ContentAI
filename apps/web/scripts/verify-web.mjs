@@ -47,6 +47,26 @@ const agent = {
   current_version: agentVersion
 };
 
+const agentSummary = {
+  ...agent,
+  current_version: {
+    id: agentVersion.id,
+    agent_id: agentVersion.agent_id,
+    version: agentVersion.version
+  }
+};
+
+const secondAgentSummary = {
+  id: 'agent-ai',
+  name: 'AI 产品观察',
+  description: '跟踪 AI 产品和行业应用。',
+  current_version: {
+    id: 'version-ai-1',
+    agent_id: 'agent-ai',
+    version: 1
+  }
+};
+
 const workbenchSessionSummary = {
   session_id: 'session-market',
   agent_id: agent.id,
@@ -117,9 +137,26 @@ const targetUser = {
   input_tokens: 47667,
   output_tokens: 4728,
   total_tokens: 52395,
+  input_cost_usd: 0.238335,
+  output_cost_usd: 0.1182,
+  total_cost_usd: 0.356535,
+  chat_input_tokens: 42000,
+  chat_output_tokens: 4000,
+  chat_total_tokens: 46000,
+  chat_input_cost_usd: 0.21,
+  chat_output_cost_usd: 0.1,
+  chat_total_cost_usd: 0.31,
+  background_input_tokens: 5667,
+  background_output_tokens: 728,
+  background_total_tokens: 6395,
+  background_input_cost_usd: 0.028335,
+  background_output_cost_usd: 0.0182,
+  background_total_cost_usd: 0.046535,
   usage_call_count: 12,
+  completed_usage_call_count: 11,
   missing_usage_call_count: 1,
-  usage_coverage: 0.92
+  failed_usage_call_count: 1,
+  usage_coverage: 10 / 11
 };
 
 const adminSessionSummary = {
@@ -134,6 +171,14 @@ const adminSessionSummary = {
   updated_at: fixedNow
 };
 
+const olderAdminSession = {
+  ...adminSessionSummary,
+  session_id: 'admin-session-older',
+  title: '更早的审计会话',
+  message_count: 1,
+  updated_at: '2026-07-13T08:00:00.000Z'
+};
+
 const adminSessionDetail = {
   ...adminSessionSummary,
   messages: [
@@ -145,13 +190,39 @@ const adminSessionDetail = {
   ]
 };
 
+const modelConfiguration = {
+  configured: true,
+  id: 'model-config-7',
+  version: 7,
+  provider: 'openai_compatible',
+  api_mode: 'chat_completions',
+  base_url: 'https://gateway.example.test/v1',
+  model_name: 'gpt-4.1-mini',
+  input_price_per_million_usd: 5,
+  output_price_per_million_usd: 25,
+  temperature: null,
+  context_window_tokens: 32000,
+  chat_max_tokens: 8000,
+  structured_max_tokens: 8000,
+  api_key_hint: 'sk-…9X2Q',
+  validated_at: fixedNow,
+  created_at: fixedNow,
+  created_by_user_id: authUser.id,
+  created_by_email: authUser.email
+};
+
 const usageBuckets = [
   {
     bucket: '2026-07-15T00:00:00+00:00',
     input_tokens: 7900,
     output_tokens: 909,
     total_tokens: 8809,
+    input_cost_usd: 0.0395,
+    output_cost_usd: 0.022725,
+    total_cost_usd: 0.062225,
     call_count: 3,
+    completed_call_count: 3,
+    missing_usage_call_count: 0,
     failed_call_count: 0,
     average_latency_ms: 1280
   },
@@ -160,8 +231,13 @@ const usageBuckets = [
     input_tokens: 39767,
     output_tokens: 3819,
     total_tokens: 43586,
+    input_cost_usd: 0.198835,
+    output_cost_usd: 0.095475,
+    total_cost_usd: 0.29431,
     call_count: 9,
-    failed_call_count: 0,
+    completed_call_count: 8,
+    missing_usage_call_count: 1,
+    failed_call_count: 1,
     average_latency_ms: 1450
   }
 ];
@@ -216,7 +292,7 @@ async function waitForVite(server, timeoutMs = 30000) {
       const response = await fetch(baseUrl, { signal: AbortSignal.timeout(1200) });
       if (response.ok) {
         const html = await response.text();
-        if (html.includes('/src/main.ts')) return;
+        if (html.includes('/src/app/main.ts') && /ready in/i.test(server.output.join(''))) return;
         originMismatchCount += 1;
         lastError = new Error(`${baseUrl} 返回了其他站点，而不是当前 Vite 源码入口`);
         if (originMismatchCount >= 3 && /ready in/i.test(server.output.join(''))) {
@@ -317,10 +393,21 @@ async function installApiMocks(page, state) {
       state.authenticated = true;
       return fulfillJson(route, authUser);
     }
-    if (path === '/api/agents' && method === 'GET') return fulfillJson(route, [agent]);
+    if (path === '/api/agents' && method === 'GET') {
+      if (url.searchParams.get('cursor') === 'agent-page-2') {
+        return fulfillJson(route, { items: [secondAgentSummary], next_cursor: null });
+      }
+      return fulfillJson(route, {
+        items: [agentSummary],
+        next_cursor: '  agent-page-2  '
+      });
+    }
     if (path === `/api/agents/${agent.id}` && method === 'GET') return fulfillJson(route, agent);
     if (path === '/api/chat/sessions' && method === 'GET') {
-      return fulfillJson(route, [workbenchSessionSummary, secondSessionSummary]);
+      return fulfillJson(route, {
+        items: [workbenchSessionSummary, secondSessionSummary],
+        next_cursor: null
+      });
     }
     if (path === `/api/chat/sessions/${workbenchSessionSummary.session_id}` && method === 'GET') {
       return fulfillJson(route, workbenchSession);
@@ -336,19 +423,46 @@ async function installApiMocks(page, state) {
       });
     }
     if (path === '/api/admin/users' && method === 'GET') {
-      return fulfillJson(route, { items: [targetUser], page: 1, page_size: 20, total: 1 });
+      return fulfillJson(route, { items: [targetUser], next_cursor: null });
     }
     if (path === `/api/admin/users/${targetUser.id}` && method === 'GET') {
       return fulfillJson(route, targetUser);
     }
     if (path === `/api/admin/users/${targetUser.id}/sessions` && method === 'GET') {
-      return fulfillJson(route, { items: [adminSessionSummary], page: 1, page_size: 30, total: 1 });
+      return url.searchParams.has('cursor')
+        ? fulfillJson(route, { items: [olderAdminSession], next_cursor: null })
+        : fulfillJson(route, { items: [adminSessionSummary], next_cursor: 'session-cursor-1' });
     }
     if (path === '/api/admin/usage' && method === 'GET') {
       return fulfillJson(route, { items: usageBuckets });
     }
     if (path === `/api/admin/sessions/${adminSessionSummary.session_id}` && method === 'GET') {
       return fulfillJson(route, adminSessionDetail);
+    }
+    if (path === `/api/admin/sessions/${adminSessionSummary.session_id}/messages` && method === 'GET') {
+      return url.searchParams.has('cursor')
+        ? fulfillJson(route, { items: [{ id: 'audit-6', role: 'assistant', message_type: 'text', content: '补充加载的审计消息。', created_at: fixedNow }], next_cursor: null })
+        : fulfillJson(route, { items: adminSessionDetail.messages, next_cursor: 'message-cursor-1' });
+    }
+    if (path === '/api/admin/model-config' && method === 'GET') {
+      if (state.modelLoadFailure) {
+        return fulfillJson(route, { detail: { code: 'MODEL_PROVIDER_UNREACHABLE', message: 'safe load failure' } }, 502);
+      }
+      return fulfillJson(route, { ...modelConfiguration, version: state.modelVersion });
+    }
+    if (path === '/api/admin/model-config' && method === 'PUT') {
+      state.modelPutPayloads.push(request.postDataJSON());
+      state.modelVersion = 8;
+      return fulfillJson(route, { detail: { code: 'MODEL_CONFIG_CHANGED', message: 'configuration changed' } }, 409);
+    }
+    if (path === '/api/admin/model-config/probe' && method === 'POST') {
+      return fulfillJson(route, {
+        base_url: modelConfiguration.base_url,
+        models: ['gpt-4.1', 'gpt-4.1-mini', 'o4-mini'],
+        models_truncated: false,
+        model_validated: false,
+        latency_ms: 248
+      });
     }
 
     state.unexpectedApiCalls.push(`${method} ${path}${url.search}`);
@@ -361,8 +475,9 @@ async function installApiMocks(page, state) {
 }
 
 async function expectVisible(locator, label) {
-  await locator.waitFor({ state: 'visible' });
-  assert.equal(await locator.isVisible(), true, `${label} 应可见`);
+  const visibleLocator = locator.filter({ visible: true });
+  await visibleLocator.first().waitFor({ state: 'visible' });
+  assert.equal(await visibleLocator.first().isVisible(), true, `${label} 应可见`);
 }
 
 async function expectHidden(locator, label) {
@@ -404,16 +519,26 @@ async function runDesktopAcceptance(browser) {
     pageErrors: [],
     consoleErrors: [],
     failedResponses: [],
-    failedRequests: []
+    failedRequests: [],
+    modelVersion: 7,
+    modelLoadFailure: false,
+    modelPutPayloads: []
   };
   const screenshots = [];
   page.on('pageerror', (error) => state.pageErrors.push(error.message));
   page.on('console', (message) => {
-    if (message.type() === 'error') state.consoleErrors.push(message.text());
+    if (
+      message.type() === 'error'
+      && !/Failed to load resource: the server responded with a status of (401 \(Unauthorized\)|409 \(Conflict\)|502 \(Bad Gateway\))/.test(message.text())
+    ) {
+      state.consoleErrors.push(message.text());
+    }
   });
   page.on('response', (response) => {
     const expectedAnonymousMe = !state.authenticated && response.url().includes('/api/auth/me') && response.status() === 401;
-    if (response.status() >= 400 && !expectedAnonymousMe) {
+    const expectedModelConflict = response.request().method() === 'PUT' && response.url().includes('/api/admin/model-config') && response.status() === 409;
+    const expectedModelLoadFailure = state.modelLoadFailure && response.request().method() === 'GET' && response.url().includes('/api/admin/model-config') && response.status() === 502;
+    if (response.status() >= 400 && !expectedAnonymousMe && !expectedModelConflict && !expectedModelLoadFailure) {
       state.failedResponses.push(`${response.status()} ${response.url()}`);
     }
   });
@@ -439,7 +564,15 @@ async function runDesktopAcceptance(browser) {
     await page.waitForURL('**/app');
 
     await expectVisible(page.locator('.workbench-shell'), '工作台');
-    await expectVisible(page.getByText(agent.name, { exact: true }).first(), '当前内容账号');
+    await expectVisible(page.getByText(agent.name, { exact: true }), '当前内容账号');
+    assert.deepEqual(
+      state.apiCalls.filter((call) => call.startsWith('GET /api/agents?')),
+      [
+        'GET /api/agents?limit=200',
+        'GET /api/agents?cursor=agent-page-2&limit=200'
+      ],
+      '工作台应去除 cursor 空白并合并两页轻摘要'
+    );
     await expectVisible(page.getByText('平台补贴与消费趋势', { exact: true }), '会话条目');
     await expectVisible(page.getByText('你以为平台又在撒钱，其实它们真正争夺的，是你下一次消费时第一个打开谁。', { exact: true }), '对话消息');
     await capture(page, '02-workbench-1440x900.png', screenshots);
@@ -460,6 +593,30 @@ async function runDesktopAcceptance(browser) {
     await expectVisible(page.getByRole('textbox', { name: '账号名称', exact: true }), '账号名称字段');
     await page.getByRole('textbox', { name: '账号名称', exact: true }).waitFor();
     assert.equal(await page.getByRole('textbox', { name: '账号名称', exact: true }).inputValue(), agent.name);
+    await expectVisible(page.getByText(secondAgentSummary.name, { exact: true }), '第二页内容账号');
+    assert.ok(
+      state.apiCalls.some((call) => call === `GET /api/agents/${agent.id}`),
+      '账号编辑器应读取完整详情'
+    );
+    await page.getByRole('tab', { name: '评分规则', exact: true }).click();
+    assert.equal(
+      await page.getByRole('textbox', { name: '选题评分提示词', exact: true }).inputValue(),
+      agentVersion.topic_scoring_prompt,
+      '选题提示词必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '内容规则', exact: true }).click();
+    assert.equal(
+      await page.getByRole('textbox', { name: '内容生成提示词', exact: true }).inputValue(),
+      agentVersion.content_prompt,
+      '内容提示词必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '热点来源', exact: true }).click();
+    assert.equal(
+      await page.getByRole('button', { name: '36Kr', exact: true }).getAttribute('aria-pressed'),
+      'true',
+      '热点来源必须来自详情响应'
+    );
+    await page.getByRole('tab', { name: '基础信息', exact: true }).click();
     const managerColumns = await page.locator('.manager-layout').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
     assert.match(managerColumns, /^280px 184px /, `账号配置列宽不正确：${managerColumns}`);
     await capture(page, '03-agent-manager-1440x900.png', screenshots);
@@ -483,32 +640,137 @@ async function runDesktopAcceptance(browser) {
     await page.getByRole('button', { name: '管理后台', exact: true }).click();
     await page.waitForURL('**/admin/users');
     await expectVisible(page.getByRole('heading', { name: '用户', exact: true }), '管理后台标题');
+    await expectVisible(page.getByRole('columnheader', { name: '全部 Token', exact: true }), '全部 Token 列表口径');
     const userRow = page.locator('.admin-table tbody tr').filter({ hasText: targetUser.email });
     await expectVisible(userRow, '用户表格行');
     await userRow.click();
     await expectVisible(page.getByRole('heading', { name: targetUser.email, exact: true }), '用户详情');
+    const tokenBreakdown = page.getByLabel('Token 用量');
+    const costBreakdown = page.getByLabel('费用 (USD)');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '全部模型', exact: true }), '全部模型 Token 明细');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '对话', exact: true }), '对话 Token 明细');
+    await expectVisible(tokenBreakdown.getByRole('rowheader', { name: '后台处理', exact: true }), '后台处理 Token 明细');
+    await expectVisible(costBreakdown.getByText('$0.356535', { exact: true }), '全部模型费用明细');
+    await expectVisible(page.getByText('成功调用 11 次 · 缺失 1 次 · 失败 1 次', { exact: true }), 'Token 统计完整度明细');
+    await expectVisible(page.getByText('全部调用 12 次', { exact: true }), '全部模型调用次数');
     await expectVisible(page.getByRole('button', { name: /查看会话记录/ }), '会话审计入口');
     await capture(page, '04-admin-detail-1440x900.png', screenshots);
 
     await page.getByRole('button', { name: /查看会话记录/ }).click();
     await expectVisible(page.getByRole('heading', { name: `${targetUser.email} 的会话记录`, exact: true }), '会话审计窗口');
-    await expectVisible(page.getByText(adminSessionSummary.title, { exact: true }).first(), '审计会话标题');
+    await expectVisible(page.getByText(adminSessionSummary.title, { exact: true }), '审计会话标题');
     await expectVisible(page.getByText('今天值得跟进的是平台补贴、消费品牌财报和 AI 搜索产品更新。', { exact: true }), '审计消息');
+    await page.getByRole('button', { name: '加载更多会话', exact: true }).click();
+    await expectVisible(page.getByText(olderAdminSession.title, { exact: true }), '追加的审计会话');
+    await page.getByRole('button', { name: '加载更多消息', exact: true }).click();
+    await expectVisible(page.getByText('补充加载的审计消息。', { exact: true }), '追加的审计消息');
     await capture(page, '05-admin-audit-1440x900.png', screenshots);
+
+    await page.goto(`${baseUrl}/admin/models`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByRole('heading', { name: '模型管理', exact: true }), '模型管理标题');
+    await expectVisible(page.getByText('gpt-4.1-mini', { exact: true }), '当前模型');
+    await page.getByRole('button', { name: '刷新模型', exact: true }).click();
+    await expectVisible(page.getByText('已刷新 3 个可用模型。', { exact: true }), '模型刷新反馈');
+    await capture(page, '06-admin-models-1440x900.png', screenshots);
+
+    const modelBaseUrl = page.getByRole('textbox', { name: /Base URL/ });
+    const modelName = page.getByRole('combobox', { name: '模型 ID' });
+    await modelBaseUrl.fill('https://draft.example.test/v1');
+    await modelName.fill('custom-model-draft');
+    await page.getByRole('button', { name: '测试连接', exact: true }).click();
+    await expectVisible(page.getByText(/当前模型尚未完成推理验证/), '未验证模型反馈');
+    await page.getByRole('button', { name: '保存并启用', exact: true }).click();
+    await expectVisible(page.getByText(/配置已被其他管理员更新/), '并发冲突反馈');
+    assert.equal(await modelBaseUrl.inputValue(), 'https://draft.example.test/v1', '冲突后应保留 Base URL 草稿');
+    assert.equal(await modelName.inputValue(), 'custom-model-draft', '冲突后应保留模型草稿');
+    await expectVisible(page.getByText('v8', { exact: true }), '冲突后同步的配置版本');
+    assert.deepEqual(state.modelPutPayloads, [{
+      api_mode: 'chat_completions',
+      base_url: 'https://draft.example.test/v1',
+      model_name: 'custom-model-draft',
+      input_price_per_million_usd: 5,
+      output_price_per_million_usd: 25,
+      temperature: null,
+      context_window_tokens: 32000,
+      chat_max_tokens: 8000,
+      structured_max_tokens: 8000,
+      expected_version: 7
+    }], '更新已有配置时空 Key 不应进入请求');
+
+    state.modelLoadFailure = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expectVisible(page.getByText('无法加载当前模型配置', { exact: true }), '模型配置加载错误');
+    await expectHidden(page.getByRole('button', { name: '保存并启用', exact: true }), '加载失败时保存入口');
+    state.modelLoadFailure = false;
+    await page.getByRole('button', { name: '重新加载', exact: true }).click();
+    await expectVisible(page.getByRole('button', { name: '保存并启用', exact: true }), '重新加载后的保存入口');
 
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.goto(`${baseUrl}/app`, { waitUntil: 'domcontentloaded' });
-    await expectVisible(page.getByRole('heading', { name: '请在桌面浏览器中打开', exact: true }), '1024px 桌面门槛');
-    await expectHidden(page.locator('.desktop-application'), '1024px 应用界面');
-    await capture(page, '06-desktop-gate-1024x768.png', screenshots);
+    await expectVisible(page.locator('.workbench-shell'), '1024px 工作台');
+    assert.equal(await page.locator('.desktop-gate').count(), 0, '1024px 不应渲染桌面门槛');
+    const viewportOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    assert.equal(viewportOverflow, false, '1024px 不应出现页面级横向溢出');
+    await capture(page, '07-workbench-1024x768.png', screenshots);
+
+    for (const viewport of [
+      { width: 768, height: 900, file: '08-workbench-768x900.png' },
+      { width: 390, height: 640, file: '09-workbench-390x640.png' }
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await expectVisible(page.locator('.workbench-shell'), `${viewport.width}px 工作台`);
+      assert.equal(await page.locator('.desktop-gate').count(), 0, `${viewport.width}px 不应渲染桌面门槛`);
+      const narrowOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+      assert.equal(narrowOverflow, false, `${viewport.width}px 不应出现页面级横向溢出`);
+      await capture(page, viewport.file, screenshots);
+    }
+
+    const mobileAgentTrigger = page.locator('.workbench-nav [data-agent-manager-trigger]');
+    assert.equal(await mobileAgentTrigger.count(), 1, '手机端应保留内容账号管理入口');
+    await mobileAgentTrigger.click();
+    await expectVisible(page.locator('.agent-manager'), '手机端内容账号管理');
+    const managerBounds = await page.locator('.accessible-dialog-fullscreen').evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, viewport: window.innerWidth };
+    });
+    assert.ok(managerBounds.left >= -1 && managerBounds.right <= managerBounds.viewport + 1, '手机端账号管理弹窗不应横向裁切');
+    await capture(page, '10-agent-manager-390x640.png', screenshots);
+    await page.keyboard.press('Escape');
+    await expectHidden(page.locator('.agent-manager'), '手机端内容账号管理');
+
+    await page.goto(`${baseUrl}/admin/users`, { waitUntil: 'domcontentloaded' });
+    await expectVisible(page.locator('.admin-workspace'), '手机端用户管理');
+    const mobileUserRow = page.locator('.admin-table tbody tr');
+    await mobileUserRow.first().waitFor({ state: 'visible' });
+    assert.equal(await mobileUserRow.count(), 1, '手机端用户列表应渲染测试用户');
+    await mobileUserRow.click();
+    await expectVisible(page.locator('.admin-detail-panel h2'), '手机端用户详情');
+    const adminBounds = await page.locator('.admin-topbar').evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, viewport: window.innerWidth };
+    });
+    assert.ok(adminBounds.left >= -1 && adminBounds.right <= adminBounds.viewport + 1, '手机端后台导航不应横向裁切');
+    await capture(page, '11-admin-users-390x640.png', screenshots);
+
+    await page.locator('.admin-open-audit').click();
+    await expectVisible(page.locator('.admin-audit-window'), '手机端会话审计');
+    const auditColumns = await page.locator('.admin-audit-body').evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.ok(!auditColumns.includes('300px'), `手机端审计窗口应为单列布局：${auditColumns}`);
+    await capture(page, '12-admin-audit-390x640.png', screenshots);
+    await page.keyboard.press('Escape');
 
     assert.deepEqual(state.unexpectedApiCalls, [], `存在未模拟 API：${state.unexpectedApiCalls.join(', ')}`);
     assert.deepEqual(state.pageErrors, [], `页面脚本错误：${state.pageErrors.join(' | ')}`);
+    assert.deepEqual(state.consoleErrors, [], `控制台错误：${state.consoleErrors.join(' | ')}`);
     assert.deepEqual(state.failedResponses, [], `存在失败响应：${state.failedResponses.join(' | ')}`);
     assert.deepEqual(state.failedRequests, [], `存在失败请求：${state.failedRequests.join(' | ')}`);
     assert.ok(state.apiCalls.some((call) => call === 'POST /api/auth/login'), '未覆盖登录 API');
     assert.ok(state.apiCalls.some((call) => call.startsWith(`GET /api/admin/users/${targetUser.id}/sessions`)), '未覆盖后台会话列表 API');
     assert.ok(state.apiCalls.some((call) => call === `GET /api/admin/sessions/${adminSessionSummary.session_id}`), '未覆盖会话审计 API');
+
+    assert.ok(state.apiCalls.some((call) => call === 'GET /api/admin/model-config'), '未覆盖模型配置 API');
+    assert.ok(state.apiCalls.some((call) => call === 'POST /api/admin/model-config/probe'), '未覆盖模型探测 API');
+    assert.ok(state.apiCalls.some((call) => call === 'PUT /api/admin/model-config'), '未覆盖模型并发更新 API');
 
     return { screenshots, apiCalls: state.apiCalls };
   } catch (error) {
@@ -547,6 +809,7 @@ async function runMotionBackdropAcceptance(browser) {
   ));
   try {
     await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.ambient-backdrop__video').waitFor({ state: 'attached' });
     assert.equal(await page.locator('.ambient-backdrop__poster').isVisible(), true, '动态背景的静态后备应保持可见');
     assert.equal(await page.locator('.ambient-backdrop').getAttribute('data-material'), 'web-background');
     assert.equal(await page.locator('.ambient-backdrop__video').count(), 1, '未减少动画模式应加载本地视频节点');
@@ -564,7 +827,12 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
-    await browser?.close();
+    if (browser) {
+      await Promise.race([
+        browser.close(),
+        new Promise((resolve) => setTimeout(resolve, 5000))
+      ]);
+    }
   } finally {
     await stopVite(server?.child);
   }
@@ -601,4 +869,5 @@ try {
   if (server?.output.length) console.error(server.output.join('').trim());
 } finally {
   await shutdown();
+  process.exit(process.exitCode ?? 0);
 }

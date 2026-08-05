@@ -9,7 +9,7 @@ source "$ENV_FILE"
 set +a
 COMPOSE=(docker compose --env-file "$ENV_FILE")
 
-DEST="${1:-$ROOT/backups}"
+DEST="${1:-${CONTENTAI_BACKUP_DIR:-$ROOT/../contentai-backups}}"
 mkdir -p "$DEST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 FILE="$DEST/contentai-$STAMP.sql.gz"
@@ -17,5 +17,5 @@ FILE="$DEST/contentai-$STAMP.sql.gz"
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --clean --if-exists \
   | gzip -9 > "$FILE"
 test -s "$FILE"
-sha256sum "$FILE" > "$FILE.sha256"
+(cd "$(dirname "$FILE")" && sha256sum "$(basename "$FILE")" > "$(basename "$FILE").sha256")
 echo "$FILE"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.security import AGENT_WILDCARD, TOOL_WILDCARD, AuthContext
+from contentai.core.security import AGENT_WILDCARD, TOOL_WILDCARD, AuthContext
 from fastapi import HTTPException, Request
 
 

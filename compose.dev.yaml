@@ -29,6 +29,10 @@ services:
     environment:
       CONTENTAI_ENV: development
 
+  side-effect-worker:
+    environment:
+      CONTENTAI_ENV: development
+
   beat:
     environment:
       CONTENTAI_ENV: development

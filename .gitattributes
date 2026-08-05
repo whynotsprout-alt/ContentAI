@@ -4,3 +4,9 @@ tools/*.ps1 linguist-detectable=false
 *.mjs linguist-detectable=false
 *.cjs linguist-detectable=false
 *.md linguist-documentation
+
+# Keep source and deployment files stable across Windows and Linux checkouts.
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

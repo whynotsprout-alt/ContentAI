@@ -1,14 +1,34 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import SimpleNamespace
 
-from agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
-from agent.runtime.tool_execution import execute_tool_call
-from db.session import get_engine
+import pytest
+from contentai.agent.runtime.context import ToolRuntimeContext, tool_runtime_scope
+from contentai.agent.runtime.tool_execution import _start_audit, execute_tool_call
+from contentai.agent.tools.memory import recall_memory, remember
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
+from contentai.db.session import get_engine
+from contentai.memory import LongTermMemory, MemoryRepository
+from contentai.models.base import utcnow
+from contentai.models.chat import (
+    AgentExecution,
+    AgentInvocation,
+    ChatSession,
+    ToolExecution,
+)
+from contentai.models.enums import RunStatus, ToolExecutionStatus
+from contentai.models.memory import MemoryRecord
+from contentai.services.execution_resume import stable_json_hash
 from langchain_core.messages import ToolMessage
-from models.chat import AgentExecution, AgentInvocation, ChatSession, ToolExecution
-from models.enums import RunStatus, ToolExecutionStatus
+from model_config_helpers import DEFAULT_MODEL_CONFIG_ID
+from pydantic import ValidationError
+from sqlalchemy import text, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 
@@ -34,7 +54,9 @@ def _seed_execution(execution_id: str) -> None:
             AgentExecution(
                 id=execution_id,
                 invocation_id=invocation.id,
+                session_id=chat.id,
                 agent_version_id="default-agent-v1",
+                model_config_id=DEFAULT_MODEL_CONFIG_ID,
                 status=RunStatus.running,
             )
         )
@@ -58,12 +80,137 @@ def _runtime(
     )
 
 
+def test_tool_audit_preserves_unrelated_integrity_error() -> None:
+    with pytest.raises(IntegrityError):
+        _start_audit(
+            execution_id="missing-execution",
+            tool_name="test_tool",
+            tool_call_id="missing-execution-call",
+            tool_version="1",
+            arguments_hash="arguments-hash",
+            side_effecting=False,
+        )
+
+
 class RecordingEventWriter:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, object]]] = []
 
     def emit(self, event: str, payload: dict[str, object]) -> None:
         self.events.append((event, payload))
+
+
+@pytest.mark.parametrize(
+    ("sensitive_content", "forbidden_fragment"),
+    [
+        ("my API     key is never-log-this-value", "never-log-this-value"),
+        ("OPENAI_API_KEY=opaque-api-tool", "opaque-api-tool"),
+        (
+            "google_client_secret = opaque-client-tool",
+            "opaque-client-tool",
+        ),
+        ("GitHub-Access-Token: opaque-access-tool", "opaque-access-tool"),
+        ("RSA PRIVATE KEY = opaque-private-tool", "opaque-private-tool"),
+        ("googleClientSecret=opaque-camel-tool", "opaque-camel-tool"),
+    ],
+)
+def test_remember_rejects_sensitive_labels_without_persisting_or_logging(
+    sensitive_content: str,
+    forbidden_fragment: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    execution_id = "execution-sensitive-remember"
+    _seed_execution(execution_id)
+    with Session(get_engine()) as session:
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = LongTermMemory(MemoryRepository(session))
+        with tool_runtime_scope(runtime):
+            result = remember.invoke(
+                {"content": sensitive_content, "kind": "preference"}
+            )
+        persisted = session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == sensitive_content)
+        ).all()
+
+    assert result == {
+        "error": "Potentially sensitive content is not allowed for memory storage.",
+        "tool": "remember",
+    }
+    assert persisted == []
+    assert forbidden_fragment not in caplog.text
+
+
+def test_remember_rejects_bytes_kind_before_execution_without_persisting() -> None:
+    execution_id = "execution-bytes-kind"
+    content = "must not persist bytes kind"
+    _seed_execution(execution_id)
+    with Session(get_engine()) as session:
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = LongTermMemory(MemoryRepository(session))
+        with tool_runtime_scope(runtime):
+            with pytest.raises(ValidationError):
+                remember.invoke({"content": content, "kind": b"preference"})
+        persisted = session.exec(
+            select(MemoryRecord).where(MemoryRecord.content == content)
+        ).all()
+
+    assert persisted == []
+
+
+def test_runtime_recall_is_read_only_and_does_not_hold_the_memory_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id = "execution-runtime-recall"
+    memory_key = "runtime-recall-no-touch"
+    _seed_execution(execution_id)
+    engine = get_engine()
+    with Session(engine) as seed_session:
+        MemoryRepository(seed_session).upsert(
+            memory_key,
+            content="durable runtime recall preference",
+            user_id="local-user",
+            agent_id="default-agent",
+        )
+        seed_session.commit()
+        memory_id = seed_session.exec(
+            select(MemoryRecord.id).where(MemoryRecord.memory_key == memory_key)
+        ).one()
+
+    observed_touch: list[bool] = []
+    with Session(engine) as runner_session:
+        long_term = LongTermMemory(MemoryRepository(runner_session))
+        real_recall = long_term.recall
+
+        def tracked_recall(*args: object, **kwargs: object):
+            observed_touch.append(bool(kwargs.get("touch")))
+            return real_recall(*args, **kwargs)
+
+        monkeypatch.setattr(long_term, "recall", tracked_recall)
+        runtime = _runtime(execution_id, {})
+        runtime.long_term_memory = long_term
+        with tool_runtime_scope(runtime):
+            result = recall_memory.invoke({"query": "runtime recall preference"})
+
+        assert runner_session.in_transaction()
+        with Session(engine) as concurrent_session:
+            concurrent_session.exec(text("SET LOCAL lock_timeout = '250ms'"))
+            concurrent_session.execute(
+                update(MemoryRecord)
+                .where(MemoryRecord.id == memory_id)
+                .values(importance_score=0.5)
+            )
+            concurrent_session.commit()
+        runner_session.rollback()
+
+    assert observed_touch == [False]
+    assert [item["key"] for item in result["memories"]] == [memory_key]
+    with Session(engine) as session:
+        row = session.get(MemoryRecord, memory_id)
+        assert row is not None
+        assert row.access_count == 0
+        assert row.last_accessed_at is None
+        assert row.importance_score == 0.5
 
 
 def test_tool_output_is_bounded_and_audit_does_not_store_content() -> None:
@@ -142,11 +289,170 @@ def test_tool_timeout_returns_structured_error_and_marks_audit_failed() -> None:
         assert "TOOL_TIMEOUT" in audit.error
 
 
+def test_public_terminal_tool_error_propagates_to_execution_runner() -> None:
+    execution_id = "execution-terminal-tool-error"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "prepare_topic_research", "id": "call-evidence", "args": {}}
+    )
+
+    with tool_runtime_scope(
+        _runtime(
+            execution_id,
+            {"prepare_topic_research": {"timeout_seconds": 1, "max_output_chars": 100}},
+        )
+    ), pytest.raises(ContentEvidenceInvalidError):
+        execute_tool_call(
+            request,
+            lambda _request: (_ for _ in ()).throw(ContentEvidenceInvalidError()),
+        )
+
+
+def test_tool_provider_error_is_redacted_from_message_event_and_audit() -> None:
+    execution_id = "execution-redacted-tool-error"
+    _seed_execution(execution_id)
+    writer = RecordingEventWriter()
+    request = SimpleNamespace(
+        tool_call={"name": "prepare_topic_research", "id": "call-redacted", "args": {}}
+    )
+    secret = "sk-tool-provider-secret"
+    remote_body = "provider response body must stay private"
+
+    def fail(_request: object) -> object:
+        raise RuntimeError(f"401 Authorization: Bearer {secret}; body={remote_body}")
+
+    with tool_runtime_scope(
+        _runtime(
+            execution_id,
+            {
+                "prepare_topic_research": {
+                    "timeout_seconds": 1,
+                    "max_output_chars": 1000,
+                    "execution_mode": "cooperative",
+                }
+            },
+            event_writer=writer,
+        )
+    ):
+        result = execute_tool_call(request, fail)
+
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+
+    exposed = " ".join(
+        [
+            str(result.content),
+            audit.error,
+            *(str(payload) for _event, payload in writer.events),
+        ]
+    )
+    assert secret not in exposed
+    assert remote_body not in exposed
+    assert "Authorization" not in exposed
+
+
 def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> None:
     execution_id = "execution-tool-idempotent"
     _seed_execution(execution_id)
     request = SimpleNamespace(
         tool_call={"name": "side_effect", "id": "call-once", "args": {"value": 1}}
+    )
+    calls = 0
+    dispatched: list[dict[str, object]] = []
+
+    def execute(_request: object) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"completed": True}
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "side_effect": {
+                "timeout_seconds": 1,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"completed": True},
+            "result_digest": "completed-digest",
+        }
+        if dispatched
+        else None
+    )
+    with tool_runtime_scope(runtime):
+        first = execute_tool_call(request, execute)
+        second = execute_tool_call(request, execute)
+
+    assert isinstance(first, ToolMessage)
+    assert isinstance(second, ToolMessage)
+    assert "completed" in str(first.content)
+    assert "completed" in str(second.content)
+    assert calls == 0
+    assert len(dispatched) == 1
+    with Session(get_engine()) as session:
+        audits = session.exec(select(ToolExecution)).all()
+        assert len(audits) == 1
+        assert audits[0].status == ToolExecutionStatus.completed
+
+
+def test_side_effecting_tool_is_dispatched_without_invoking_local_callback() -> None:
+    execution_id = "execution-side-effect-dispatch"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-dispatch", "args": {"content": "x"}}
+    )
+    calls = 0
+    dispatched: list[dict[str, object]] = []
+
+    def execute(_request: object) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"completed": True}
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"completed": True},
+            "result_digest": "receipt-digest",
+        }
+        if dispatched
+        else None
+    )
+
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, execute)
+
+    assert isinstance(result, ToolMessage)
+    assert "completed" in str(result.content)
+    assert calls == 0
+    assert len(dispatched) == 1
+    assert dispatched[0]["execution_id"] == execution_id
+    assert dispatched[0]["tool_call_id"] == "call-dispatch"
+
+
+def test_non_side_effecting_tool_stays_on_local_execution_path() -> None:
+    execution_id = "execution-local-tool"
+    _seed_execution(execution_id)
+    request = SimpleNamespace(
+        tool_call={"name": "local_tool", "id": "call-local", "args": {}}
     )
     calls = 0
 
@@ -158,23 +464,435 @@ def test_side_effecting_tool_call_is_idempotent_per_execution_and_call_id() -> N
     with tool_runtime_scope(
         _runtime(
             execution_id,
+            {"local_tool": {"timeout_seconds": 1, "max_output_chars": 100}},
+        )
+    ):
+        result = execute_tool_call(request, execute)
+
+    assert result == {"completed": True}
+    assert calls == 1
+
+
+def test_side_effect_retry_rejects_changed_arguments_hash_without_redispatch() -> None:
+    execution_id = "execution-side-effect-mismatch"
+    _seed_execution(execution_id)
+    dispatched: list[dict[str, object]] = []
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"key": "memory-key", "kind": "preference", "tool": "remember"},
+            "result_digest": "receipt-digest",
+        }
+        if dispatched
+        else None
+    )
+
+    first = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-mismatch", "args": {"content": "first"}}
+    )
+    changed = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-mismatch", "args": {"content": "changed"}}
+    )
+    with tool_runtime_scope(runtime):
+        initial = execute_tool_call(first, lambda _request: None)
+        result = execute_tool_call(changed, lambda _request: None)
+
+    assert isinstance(initial, ToolMessage)
+    assert "memory-key" in str(initial.content)
+    assert isinstance(result, ToolMessage)
+    assert "SIDE_EFFECT_IDEMPOTENCY_MISMATCH" in str(result.content)
+    assert len(dispatched) == 1
+
+
+def test_side_effect_timeout_does_not_redispatch_and_retry_reads_late_receipt() -> None:
+    execution_id = "execution-side-effect-late-receipt"
+    _seed_execution(execution_id)
+    dispatched: list[dict[str, object]] = []
+    receipt: dict[str, object] | None = None
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.005,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: receipt
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-late", "args": {"content": "later"}}
+    )
+
+    with tool_runtime_scope(runtime):
+        timed_out = execute_tool_call(request, lambda _request: None)
+        with Session(get_engine()) as session:
+            audit = session.exec(select(ToolExecution)).one()
+            audit.status = ToolExecutionStatus.completed
+            audit.result_digest = "late-digest"
+            audit.finished_at = utcnow()
+            session.add(audit)
+            session.commit()
+        receipt = {
+            "status": "completed",
+            "result": {"key": "late-key", "kind": "semantic", "tool": "remember"},
+            "result_digest": "late-digest",
+        }
+        retried = execute_tool_call(request, lambda _request: None)
+
+    assert isinstance(timed_out, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(timed_out.content)
+    assert isinstance(retried, ToolMessage)
+    assert "late-key" in str(retried.content)
+    assert len(dispatched) == 1
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.completed
+        assert audit.result_digest == "late-digest"
+
+
+def test_side_effect_timeout_does_not_wait_for_worker_row_lock() -> None:
+    execution_id = "execution-side-effect-row-lock-timeout"
+    _seed_execution(execution_id)
+    worker_thread: threading.Thread | None = None
+    lock_acquired = threading.Event()
+
+    def hold_audit_lock() -> None:
+        with Session(get_engine()) as session:
+            session.exec(
+                select(ToolExecution)
+                .where(ToolExecution.execution_id == execution_id)
+                .with_for_update()
+            ).one()
+            lock_acquired.set()
+            time.sleep(0.25)
+
+    def dispatch(_job: dict[str, object]) -> None:
+        nonlocal worker_thread
+        worker_thread = threading.Thread(target=hold_audit_lock)
+        worker_thread.start()
+        assert lock_acquired.wait(timeout=1)
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.005,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatch
+    runtime.side_effect_receipt_poller = lambda *_identity: None
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-row-lock", "args": {"content": "x"}}
+    )
+
+    started_at = time.perf_counter()
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, lambda _request: None)
+    elapsed = time.perf_counter() - started_at
+    assert worker_thread is not None
+    worker_thread.join(timeout=1)
+
+    assert isinstance(result, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(result.content)
+    assert elapsed < 0.1
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.status == ToolExecutionStatus.running
+        assert audit.error == ""
+
+
+def test_side_effect_dispatch_emits_one_start_and_terminal_event() -> None:
+    execution_id = "execution-side-effect-events"
+    _seed_execution(execution_id)
+    writer = RecordingEventWriter()
+    dispatched: list[dict[str, object]] = []
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+        event_writer=writer,
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = lambda *_identity: (
+        {
+            "status": "completed",
+            "result": {"key": "event-key", "kind": "semantic", "tool": "remember"},
+            "result_digest": "event-digest",
+        }
+        if dispatched
+        else None
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-event", "args": {"content": "x"}}
+    )
+
+    with tool_runtime_scope(runtime):
+        execute_tool_call(request, lambda _request: None)
+
+    assert [name for name, _payload in writer.events] == ["tool_start", "tool_end"]
+    assert writer.events[-1][1]["status"] == "completed"
+
+
+def test_side_effect_timeout_bounds_blocking_dispatcher() -> None:
+    execution_id = "execution-side-effect-blocking-dispatch"
+    _seed_execution(execution_id)
+    dispatcher_entered = threading.Event()
+    dispatcher_release = threading.Event()
+    local_calls = 0
+
+    def blocking_dispatcher(_job: dict[str, object]) -> None:
+        dispatcher_entered.set()
+        dispatcher_release.wait(timeout=0.25)
+
+    def local_callback(_request: object) -> None:
+        nonlocal local_calls
+        local_calls += 1
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.01,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = blocking_dispatcher
+    runtime.side_effect_receipt_poller = lambda *_identity: None
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-blocking-dispatch", "args": {}}
+    )
+
+    started_at = time.perf_counter()
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, local_callback)
+    elapsed = time.perf_counter() - started_at
+    dispatcher_release.set()
+
+    assert dispatcher_entered.is_set()
+    assert isinstance(result, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(result.content)
+    assert elapsed < 0.1
+    assert local_calls == 0
+
+
+def test_side_effect_timeout_bounds_blocking_initial_receipt_poll() -> None:
+    execution_id = "execution-side-effect-blocking-poll"
+    _seed_execution(execution_id)
+    poller_entered = threading.Event()
+    poller_release = threading.Event()
+    dispatched: list[dict[str, object]] = []
+    local_calls = 0
+
+    def blocking_poller(_execution_id: str, _tool_call_id: str) -> None:
+        poller_entered.set()
+        poller_release.wait(timeout=0.25)
+        return None
+
+    def local_callback(_request: object) -> None:
+        nonlocal local_calls
+        local_calls += 1
+
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.01,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = dispatched.append
+    runtime.side_effect_receipt_poller = blocking_poller
+    request = SimpleNamespace(
+        tool_call={"name": "remember", "id": "call-blocking-poll", "args": {}}
+    )
+
+    started_at = time.perf_counter()
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, local_callback)
+    elapsed = time.perf_counter() - started_at
+    poller_release.set()
+
+    assert poller_entered.is_set()
+    assert isinstance(result, ToolMessage)
+    assert "TOOL_TIMEOUT" in str(result.content)
+    assert elapsed < 0.1
+    assert dispatched == []
+    assert local_calls == 0
+
+
+def test_terminal_receipt_retry_preserves_original_audit_timestamps() -> None:
+    execution_id = "execution-side-effect-terminal-timestamps"
+    arguments = {"content": "already committed", "kind": "preference"}
+    arguments_hash = stable_json_hash(arguments)
+    _seed_execution(execution_id)
+    original_started_at = utcnow() - timedelta(seconds=10)
+    original_finished_at = utcnow() - timedelta(seconds=5)
+    with Session(get_engine()) as session:
+        session.add(
+            ToolExecution(
+                execution_id=execution_id,
+                tool_name="remember",
+                tool_version="1",
+                tool_call_id="call-terminal-timestamps",
+                arguments_hash=arguments_hash,
+                result_digest="original-digest",
+                status=ToolExecutionStatus.completed,
+                started_at=original_started_at,
+                finished_at=original_finished_at,
+                duration_ms=5000,
+            )
+        )
+        session.commit()
+    runtime = _runtime(
+        execution_id,
+        {
+            "remember": {
+                "version": "1",
+                "timeout_seconds": 0.05,
+                "max_output_chars": 100,
+                "side_effecting": True,
+            }
+        },
+    )
+    runtime.side_effect_dispatcher = lambda _job: (_ for _ in ()).throw(
+        AssertionError("terminal retry must not dispatch")
+    )
+    runtime.side_effect_receipt_poller = lambda *_identity: {
+        "status": "completed",
+        "result": {"key": "committed-key", "kind": "preference", "tool": "remember"},
+        "result_digest": "original-digest",
+    }
+    request = SimpleNamespace(
+        tool_call={
+            "name": "remember",
+            "id": "call-terminal-timestamps",
+            "args": arguments,
+        }
+    )
+
+    with tool_runtime_scope(runtime):
+        result = execute_tool_call(request, lambda _request: None)
+
+    assert isinstance(result, ToolMessage)
+    assert "committed-key" in str(result.content)
+    with Session(get_engine()) as session:
+        audit = session.exec(select(ToolExecution)).one()
+        assert audit.started_at == original_started_at
+        assert audit.finished_at == original_finished_at
+        assert audit.duration_ms == 5000
+        assert audit.result_digest == "original-digest"
+
+
+def test_side_effect_remote_io_capacity_stays_bounded_when_calls_block() -> None:
+    call_count = 10
+    execution_ids = [f"execution-side-effect-capacity-{index}" for index in range(call_count)]
+    for execution_id in execution_ids:
+        _seed_execution(execution_id)
+    release_calls = threading.Event()
+    call_lock = threading.Lock()
+    started_calls = 0
+    active_calls = 0
+    max_active_calls = 0
+    dispatched: list[dict[str, object]] = []
+    local_calls = 0
+
+    def blocking_poller(_execution_id: str, _tool_call_id: str) -> None:
+        nonlocal active_calls, max_active_calls, started_calls
+        with call_lock:
+            started_calls += 1
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        try:
+            release_calls.wait(timeout=1)
+        finally:
+            with call_lock:
+                active_calls -= 1
+        return None
+
+    def invoke(index: int) -> ToolMessage:
+        nonlocal local_calls
+        runtime = _runtime(
+            execution_ids[index],
             {
-                "side_effect": {
-                    "timeout_seconds": 1,
+                "remember": {
+                    "version": "1",
+                    "timeout_seconds": 0.03,
                     "max_output_chars": 100,
                     "side_effecting": True,
                 }
             },
         )
-    ):
-        first = execute_tool_call(request, execute)
-        second = execute_tool_call(request, execute)
+        runtime.side_effect_dispatcher = dispatched.append
+        runtime.side_effect_receipt_poller = blocking_poller
+        request = SimpleNamespace(
+            tool_call={
+                "name": "remember",
+                "id": f"call-capacity-{index}",
+                "args": {},
+            }
+        )
 
-    assert first == {"completed": True}
-    assert isinstance(second, ToolMessage)
-    assert "already completed" in str(second.content)
-    assert calls == 1
-    with Session(get_engine()) as session:
-        audits = session.exec(select(ToolExecution)).all()
-        assert len(audits) == 1
-        assert audits[0].status == ToolExecutionStatus.completed
+        def local_callback(_request: object) -> None:
+            nonlocal local_calls
+            with call_lock:
+                local_calls += 1
+
+        with tool_runtime_scope(runtime):
+            result = execute_tool_call(request, local_callback)
+        assert isinstance(result, ToolMessage)
+        return result
+
+    with ThreadPoolExecutor(max_workers=call_count) as callers:
+        results = list(callers.map(invoke, range(call_count)))
+
+    with call_lock:
+        started_before_release = started_calls
+        max_active_before_release = max_active_calls
+    remote_threads_before_release = sum(
+        thread.name.startswith("side-effect-io") for thread in threading.enumerate()
+    )
+    release_calls.set()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with call_lock:
+            if active_calls == 0:
+                break
+        time.sleep(0.01)
+
+    assert all("TOOL_TIMEOUT" in str(result.content) for result in results)
+    assert started_before_release <= 4
+    assert max_active_before_release <= 4
+    assert remote_threads_before_release <= 4
+    assert dispatched == []
+    assert local_calls == 0

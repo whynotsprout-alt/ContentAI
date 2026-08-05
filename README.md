@@ -6,12 +6,15 @@ ContentAI 是一个面向内容创作者的持续对话 Agent 工作台。内容
 
 ```text
 apps/
-  api/                 FastAPI、LangGraph、工具与单一初始迁移
-  web/                 Vue 3、TypeScript、Vite 与 Nginx 静态站点
+  api/                 FastAPI、LangGraph、工具与业务迁移
+    src/contentai/     统一后端包命名空间，按领域分层
+  web/                 Vue 3、TypeScript、Vite 与 feature/shared 前端分层
 docs/                  产品边界与技术设计的唯一事实源
 infra/                 容器镜像、Nginx 反向代理与部署配置
 tools/                 本地开发、验收与 Ubuntu 发布打包脚本
 ```
+
+完整的目录职责和依赖方向见 [架构说明](docs/ARCHITECTURE.md)。
 
 工程级配置保留在根目录：`pyproject.toml`、`uv.lock`、`alembic.ini`、`.env.example`、`compose.yaml` 与 `compose.dev.yaml`。
 

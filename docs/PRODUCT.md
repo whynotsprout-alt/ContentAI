@@ -36,7 +36,15 @@ ContentAI 是面向内容创作者的持续对话助手。产品以一个自然�
 
 为支持持续对话，系统保存用户/助手的 text/markdown 消息、执行状态、恢复所需 checkpoint、研究资料包，以及不含内容正文的安全审计元数据。执行中间事件只进入有界 Redis Stream，不建立事件业务表。研究资料包只保存经清理和限长的搜索字段、结构化归纳、诊断与渲染文本，不保存网页正文。
 
-系统不创建或写入 `ContentRun`、`ContentSource`、候选选题、稿件版本或审查清单等业务产物。`ResearchPackage` 是唯一的研究中间状态，以 `(execution_id, topic_hash)` 幂等保存，并在会话删除时级联清理。工具审计只保存工具名、参数哈希、结果摘要哈希、状态、耗时、错误和幂等标识。
+系统不创建或写入 `ContentRun`、`ContentSource`、候选选题、稿件版本或审查清单等业务产物。`ResearchPackage` 是唯一的研究中间状态，以 `(execution_id, topic_hash)` 幂等保存；首个成功持久化的资料包不可原地替换，顺序或并发重试都返回同一份证据，内容变化必须使用新的执行或版本身份。资料包在会话删除时级联清理。工具审计只保存工具名、参数哈希、结果摘要哈希、状态、耗时、错误和幂等标识。
+
+## 全局模型配置
+
+- 首个版本只维护一套全局 active 的 OpenAI-compatible 配置：Base URL、API Key、模型名和显式 API 模式（Chat Completions 或 Responses）。首次安装后，管理员必须登录 `/admin/models` 完成配置；系统不会自动导入旧模型环境变量，也不提供数据库配置回退。
+- 管理员可以先 probe 候选配置；probe 与运行时都按所选模式固定使用 `/chat/completions` 或 `/responses`，不会根据模型名自动切换。保存时服务端会再次执行完整 probe，只有成功验证的配置才能成为 active。首次保存必须提供 API Key；后续更新把 API Key 留空表示继续使用当前 active 配置的 Key，旧客户端省略 API 模式时保留已有选择。
+- 新配置只影响新建 execution。已 queued、running、resume 或 retry 的 execution 继续使用创建时固化的历史配置版本；历史版本因此保留用于恢复，首个版本不提供删除、回滚或在线 Fernet 主密钥轮换。
+- 未配置时，消息提交会在创建业务记录之前返回 `503 MODEL_NOT_CONFIGURED`。Traffic Relay 是独立的搜索服务配置，不与模型配置共用 Key。
+- API、日志、审计和异常响应都不得记录 API Key、密文、Authorization 或远端响应正文。
 
 ## Agent 与会话
 

@@ -14,6 +14,10 @@ x-app-environment: &app-environment
   CONTENTAI_ENV: ${CONTENTAI_ENV:-production}
   CONTENTAI_DATABASE__URL: ${CONTENTAI_DATABASE__URL:?Set CONTENTAI_DATABASE__URL in .env}
   CONTENTAI_REDIS__URL: ${CONTENTAI_REDIS__URL:-redis://redis:6379/0}
+  # Every application service must share this key to decrypt durable model credentials.
+  CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY: ${CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY:?Set CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY in .env}
+  CONTENTAI_SERVER__TRUSTED_PROXY_CIDRS: ${CONTENTAI_SERVER__TRUSTED_PROXY_CIDRS:-}
+  CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS: ${CONTENTAI_SERVER__OUTBOX_MAX_AGE_SECONDS:-30}
 
 x-app-service: &app-service
   build: *api-build
@@ -54,7 +58,10 @@ services:
 
   migration:
     <<: *app-service
-    command: ["python", "-m", "services.migrate"]
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: migration
+    command: ["python", "-m", "contentai.services.migrate"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,7 +69,12 @@ services:
 
   api:
     <<: *app-service
-    command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__API_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: api
+    command: ["python", "-m", "uvicorn", "contentai.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,7 +90,12 @@ services:
 
   dispatcher:
     <<: *app-service
-    command: ["python", "-m", "services.dispatcher"]
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__DISPATCHER_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: dispatcher
+    command: ["python", "-m", "contentai.services.dispatcher"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,7 +111,12 @@ services:
 
   agent-worker:
     <<: *app-service
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--hostname=agent@%h"]
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__AGENT_WORKER_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: agent-worker
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-executions", "--concurrency=${CONTENTAI_AGENT__WORKER_CONCURRENCY:-4}", "--hostname=agent@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,14 +126,19 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35m
     healthcheck:
-      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d agent@$$HOSTNAME --timeout=3"]
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d agent@$$HOSTNAME --timeout=3"]
       interval: 15s
       timeout: 5s
       retries: 5
 
   background-worker:
     <<: *app-service
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=2", "--hostname=background@%h"]
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__BACKGROUND_WORKER_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: background-worker
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-background", "--concurrency=${CONTENTAI_DATABASE__BACKGROUND_WORKER_CONCURRENCY:-2}", "--hostname=background@%h"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,14 +148,41 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 10m
     healthcheck:
-      test: ["CMD-SHELL", "python -m celery -A services.celery_app:celery_app inspect ping -d background@$$HOSTNAME --timeout=3"]
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d background@$$HOSTNAME --timeout=3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  side-effect-worker:
+    <<: *app-service
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: side-effect-worker
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=agent-side-effects", "--concurrency=${CONTENTAI_DATABASE__SIDE_EFFECT_WORKER_CONCURRENCY:-1}", "--hostname=side-effects@%h"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    stop_grace_period: 10m
+    healthcheck:
+      test: ["CMD-SHELL", "python -m celery -A contentai.services.celery_app:celery_app inspect ping -d side-effects@$$HOSTNAME --timeout=3"]
       interval: 15s
       timeout: 5s
       retries: 5
 
   beat:
     <<: *app-service
-    command: ["python", "-m", "celery", "-A", "services.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/contentai-celerybeat-schedule"]
+    deploy:
+      replicas: ${CONTENTAI_DATABASE__BEAT_REPLICAS:-1}
+    environment:
+      <<: *app-environment
+      CONTENTAI_DATABASE__RUNTIME_ROLE: beat
+    command: ["python", "-m", "celery", "-A", "contentai.services.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/contentai-celerybeat-schedule"]
     depends_on:
       postgres:
         condition: service_healthy

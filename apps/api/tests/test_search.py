@@ -4,11 +4,11 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-import integrations.search.search as search
+import contentai.integrations.search.search as search
 import pytest
-from agent.tools.registry import build_tool_set, tool_names
-from core.config import Env
-from integrations.search import search_integration
+from contentai.agent.tools.registry import build_tool_set, tool_names
+from contentai.core.config import Env
+from contentai.integrations.search import search_integration
 from pydantic import SecretStr
 
 
@@ -127,6 +127,21 @@ def test_provider_results_are_independent_when_one_has_no_key(monkeypatch):
     assert metaso["ok"] is False
     assert anspire["ok"] is True
     assert len(anspire["items"]) == 1
+
+
+def test_metaso_rejects_non_ascii_api_key_without_request(monkeypatch):
+    monkeypatch.setattr(
+        search,
+        "get_settings",
+        lambda: fake_settings(metaso="invalid·key", anspire="anspire-key"),
+    )
+    monkeypatch.setattr(search.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(search_integration.asearch_metaso_sources("test topic"))
+
+    assert result["ok"] is False
+    assert result["error"] == "METASO_API_KEY must contain only ASCII characters"
+    assert FakeAsyncClient.calls == []
 
 
 def test_search_result_urls_are_never_requested(monkeypatch):

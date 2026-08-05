@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import threading
+from typing import Any
+
+from pydantic import SecretStr
+
+from contentai.agent.context.window import TokenCounter
+from contentai.agent.infrastructure.llm.client import LangChainChatClient
+
+
+class ModelGateway:
+    """Models for one immutable execution-selected provider configuration."""
+
+    def __init__(
+        self,
+        *,
+        model_config_id: str,
+        base_url: str,
+        api_key: SecretStr,
+        model_name: str,
+        temperature: float | None,
+        context_window_tokens: int,
+        chat_max_tokens: int,
+        structured_max_tokens: int,
+        api_mode: str = "chat_completions",
+        client: LangChainChatClient | None = None,
+    ) -> None:
+        self.model_config_id = model_config_id
+        self.base_url = base_url
+        self.model_name = model_name
+        self.api_mode = api_mode
+        self.temperature = temperature
+        self.context_window_tokens = context_window_tokens
+        self.chat_max_tokens = chat_max_tokens
+        self.structured_max_tokens = structured_max_tokens
+        self.client = client or LangChainChatClient(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            api_mode=api_mode,
+        )
+        self._close_lock = threading.Lock()
+        self._token_counter_lock = threading.Lock()
+        self._token_counter_cache: dict[tuple[int, ...], TokenCounter] = {}
+        self._closed = False
+
+    def close(self) -> bool:
+        with self._close_lock:
+            if self._closed:
+                return True
+            completed = self.client.close()
+            if completed is not False:
+                self._closed = True
+            return completed is not False
+
+    async def aclose(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+        close_async = getattr(self.client, "aclose", None)
+        if callable(close_async):
+            await close_async()
+        else:
+            self.client.close()
+        with self._close_lock:
+            self._closed = True
+
+    def build_agent_model(self, *, tools: list[Any] | None = None) -> Any:
+        return self.client.build_chat_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.chat_max_tokens,
+            tools=tools or [],
+            # The graph owns the bounded retry policy for streamed agent turns.
+            max_retries=0,
+        )
+
+    def build_hotspot_filter_model(self) -> Any:
+        from contentai.agent.tools.hotspot_filter import HotspotFilterResult
+
+        return self.client.build_structured_output_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.structured_max_tokens,
+            schema=HotspotFilterResult,
+            max_retries=0,
+        )
+
+    def build_research_final_model(self) -> Any:
+        from contentai.agent.workflows.final_evidence import ResearchFinalSelection
+
+        return self.client.build_structured_output_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.structured_max_tokens,
+            schema=ResearchFinalSelection,
+            # Validation repair is the only retry layer for this final selector.
+            max_retries=0,
+            disable_streaming=True,
+        )
+
+    def build_token_counter(self, *, tools: list[Any] | None = None) -> TokenCounter:
+        bound_tools = list(tools or [])
+        cache_key = tuple(id(tool) for tool in bound_tools)
+        with self._token_counter_lock:
+            cached = self._token_counter_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        model = self.client.build_chat_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=1,
+            timeout_seconds=5.0,
+            max_retries=0,
+        )
+        provider_count = getattr(model, "get_num_tokens_from_messages", None)
+        if not callable(provider_count):
+            counter = TokenCounter(tools=bound_tools)
+        else:
+            counter = TokenCounter(
+                provider_count=lambda messages: provider_count(messages),
+                tools=bound_tools,
+            )
+        with self._token_counter_lock:
+            return self._token_counter_cache.setdefault(cache_key, counter)
+
+    def build_structured_output_model(
+        self,
+        schema: type[Any],
+        *,
+        timeout_seconds: float = 240.0,
+        max_retries: int = 0,
+    ) -> Any:
+        return self.client.build_structured_output_model(
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.structured_max_tokens,
+            schema=schema,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )

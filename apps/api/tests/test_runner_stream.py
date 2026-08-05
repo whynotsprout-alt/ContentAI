@@ -3,7 +3,17 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from agent.runtime.execution_services import AgentExecutionEngine, AgentRuntimeEventService
+from contentai.agent.runtime.errors import classify_runtime_error
+from contentai.agent.runtime.execution_services import (
+    AgentExecutionEngine,
+    AgentRuntimeEventService,
+    _execution_stream_graph_config,
+)
+from contentai.agent.runtime.schemas import (
+    MAX_ASSISTANT_CONTENT_LENGTH,
+    validate_assistant_response,
+)
+from contentai.agent.workflows.deep_research import ContentEvidenceInvalidError
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -57,6 +67,46 @@ def _find_marker(events: list[tuple[str, dict]], marker: str) -> list[dict]:
     ]
 
 
+def test_stream_graph_config_pins_checkpoint_worker_and_attempt_without_mutating_shared() -> None:
+    shared = {
+        "configurable": {
+            "thread_id": "thread-fenced-config",
+            "execution_id": "execution-fenced-config",
+        },
+        "recursion_limit": 24,
+    }
+
+    local = _execution_stream_graph_config(
+        shared,
+        additional_configurable={"tool_context_id": "tool-context-fenced-config"},
+        checkpoint_id="checkpoint-fenced-config",
+        expected_worker_id="worker-fenced-config",
+        expected_attempt_id="attempt-fenced-config",
+    )
+
+    assert local["configurable"] == {
+        "thread_id": "thread-fenced-config",
+        "execution_id": "execution-fenced-config",
+        "tool_context_id": "tool-context-fenced-config",
+        "checkpoint_id": "checkpoint-fenced-config",
+        "__worker_id": "worker-fenced-config",
+        "__attempt_id": "attempt-fenced-config",
+    }
+    assert shared["configurable"] == {
+        "thread_id": "thread-fenced-config",
+        "execution_id": "execution-fenced-config",
+    }
+
+    with pytest.raises(RuntimeError, match="EXECUTION_ATTEMPT_FENCE_INVALID"):
+        _execution_stream_graph_config(
+            shared,
+            additional_configurable={},
+            checkpoint_id=None,
+            expected_worker_id="worker-fenced-config",
+            expected_attempt_id=None,
+        )
+
+
 def test_execution_failed_event_carries_retryable_marker():
     writer = _EventWriter()
     execution = SimpleNamespace(id="exe-retryable", current_attempt_id="att-retryable")
@@ -78,6 +128,14 @@ def test_execution_failed_event_carries_retryable_marker():
             "retryable": True,
         },
     )
+
+
+def test_content_evidence_error_keeps_public_terminal_code():
+    detail = classify_runtime_error(ContentEvidenceInvalidError())
+
+    assert detail.code == "CONTENT_EVIDENCE_INVALID"
+    assert detail.message == "Research evidence could not be validated."
+    assert detail.retryable is False
 
 
 def test_build_graph_input_keeps_system_prompt_for_fresh_thread():
@@ -230,3 +288,138 @@ def test_stream_graph_dedups_cumulative_ai_message_chunks():
         if event_name == "assistant_message_delta"
     ]
     assert delta_payloads == ["This is a ", "test", " response"]
+
+
+def test_stream_graph_preserves_identical_consecutive_delta_chunks():
+    class _RepeatedDeltaStreamingGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            yield ("messages", (AIMessageChunk(content="ha"), {"langgraph_node": "agent"}))
+            yield ("messages", (AIMessageChunk(content="ha"), {"langgraph_node": "agent"}))
+            yield (
+                "messages",
+                (AIMessageChunk(content="haha"), {"langgraph_node": "agent"}),
+            )
+            yield ("updates", {"agent": {"messages": [AIMessage(content="hahahaha")]}})
+
+    writer = _EventWriter()
+    messages, streamed_text, interrupt = _run_stream_graph(
+        graph=_RepeatedDeltaStreamingGraph(),
+        execution_id="exe-repeated-delta",
+        event_writer=writer,
+    )
+
+    assert interrupt is None
+    assert streamed_text == "hahahaha"
+    assert messages[-1].content == "hahahaha"  # type: ignore[union-attr]
+    assert [
+        payload["chunk"]
+        for event_name, payload in writer.events
+        if event_name == "assistant_message_delta"
+    ] == ["ha", "ha", "haha"]
+
+
+def test_stream_graph_dedups_replayed_cumulative_snapshots():
+    class _ReplayedSnapshotStreamingGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            yield ("messages", (AIMessageChunk(content="This"), {"langgraph_node": "agent"}))
+            yield (
+                "messages",
+                (AIMessageChunk(content="This is"), {"langgraph_node": "agent"}),
+            )
+            yield (
+                "messages",
+                (AIMessageChunk(content="This is"), {"langgraph_node": "agent"}),
+            )
+            yield ("messages", (AIMessageChunk(content="This"), {"langgraph_node": "agent"}))
+            yield ("updates", {"agent": {"messages": [AIMessage(content="This is")]}})
+
+    writer = _EventWriter()
+    _messages, streamed_text, interrupt = _run_stream_graph(
+        graph=_ReplayedSnapshotStreamingGraph(),
+        execution_id="exe-replayed-snapshot",
+        event_writer=writer,
+    )
+
+    assert interrupt is None
+    assert streamed_text == "This is"
+    assert [
+        payload["chunk"]
+        for event_name, payload in writer.events
+        if event_name == "assistant_message_delta"
+    ] == ["This", " is"]
+
+
+def test_assistant_content_limit_fails_closed_before_streaming_or_validation_truncation():
+    accepted = "x" * MAX_ASSISTANT_CONTENT_LENGTH
+    assert validate_assistant_response(content=accepted).content == accepted
+
+    oversized = accepted + "x"
+    with pytest.raises(ValueError, match="at most 240000 characters"):
+        validate_assistant_response(content=oversized)
+
+    class _OversizedStreamingGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            yield (
+                "messages",
+                (AIMessageChunk(content=oversized), {"langgraph_node": "agent"}),
+            )
+
+    writer = _EventWriter()
+    with pytest.raises(ValueError, match="maximum supported length of 240000 characters"):
+        _run_stream_graph(
+            graph=_OversizedStreamingGraph(),
+            execution_id="exe-oversized-assistant",
+            event_writer=writer,
+        )
+    assert all(event_name != "assistant_message_delta" for event_name, _ in writer.events)
+
+
+def test_stream_graph_polls_cancellation_at_most_once_per_second():
+    class _BusyGraph:
+        def stream(self, *_args: object, **_kwargs: object):
+            for index in range(20):
+                yield ("updates", {"tools": {"messages": [AIMessage(content=str(index))]}})
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.current = 0.0
+
+        def __call__(self) -> float:
+            self.current += 0.2
+            return self.current
+
+    class _StateManager:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+            self.polls: list[float] = []
+
+        def ensure_execution_not_cancelled(self, *_args, **_kwargs) -> None:
+            self.polls.append(self.clock.current)
+
+    clock = _Clock()
+    state_manager = _StateManager(clock)
+    engine = _make_engine()
+    engine._status_clock = clock
+    engine.state_manager = state_manager
+
+    engine._stream_graph(
+        graph=_BusyGraph(),
+        db_session=object(),
+        execution=SimpleNamespace(id="execution-poll"),
+        execution_id="execution-poll",
+        graph_input=[],
+        state={},
+        config={},
+        event_writer=_EventWriter(),
+        event_service=AgentRuntimeEventService(),
+    )
+
+    assert 1 < len(state_manager.polls) < 20
+    assert all(
+        current - previous >= 1.0
+        for previous, current in zip(
+            state_manager.polls,
+            state_manager.polls[1:],
+            strict=False,
+        )
+    )

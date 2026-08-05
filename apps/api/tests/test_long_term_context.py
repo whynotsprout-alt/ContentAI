@@ -1,5 +1,5 @@
-from agent.context.assembler import _select_memories_for_prompt
-from memory.types import MemoryEntry
+from contentai.agent.context.assembler import _select_memories_for_prompt
+from contentai.memory.types import MemoryEntry
 
 
 def _memory(key: str, content: str) -> MemoryEntry:

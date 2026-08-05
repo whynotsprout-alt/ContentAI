@@ -5,9 +5,11 @@
 - Python 3.12
 - Node.js 22（与 Web 容器一致）
 - Docker Desktop（推荐，用于 PostgreSQL、Redis 和完整环境）
-- 从 `.env.example` 复制出本地 `.env`，并填入实际的模型与搜索服务密钥
+- 从 `.env.example` 复制出本地 `.env`，填入实际的数据库、搜索服务密钥和 Fernet 主密钥
 
-`.env` 是本地密钥文件，不应提交。生产环境还必须配置 HTTPS `CONTENTAI_AUTH__PUBLIC_BASE_URL`、SMTP、管理员邮箱、前端来源和搜索中继密钥；配置校验会拒绝不完整的生产配置。
+`.env` 是本地密钥文件，不应提交。必须为 `CONTENTAI_MODEL_CONFIG__ENCRYPTION_KEY` 生成一个新的 Fernet key，例如 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`；将其保存到本地密钥管理中并安全备份。开发和生产环境在该值缺失或格式错误时都会拒绝启动，所有应用进程必须使用同一个值。不要把生成结果粘贴到终端记录、文档或版本库，也不要尝试在线轮换该主密钥。
+
+生产环境还必须配置默认管理员邮箱和初始密码、前端来源及实际启用的搜索服务密钥。Traffic Relay 的 Key 仅服务于搜索，不是模型配置 Key。首次启动后使用管理员账号访问 `/admin/models` 创建唯一的 active OpenAI-compatible Base URL、API Key、模型名和显式 API 模式（Chat Completions 或 Responses）；系统不会读取旧模型环境变量或提供数据库配置回退。服务在启动时仅当该邮箱不存在才创建已激活的管理员；后续重启绝不会覆盖其密码、角色或状态。邮箱验证和邮件密码重置功能当前均已停用，不需要配置邮件服务。
 
 ## 初始化
 
@@ -66,8 +68,8 @@ Pop-Location
 
 ## 代码组织约定
 
-- Python import 根为 `apps/api/src`；应用入口是 `api.app:app`。
+- Python import 根为 `apps/api/src`；应用入口是 `contentai.api.app:app`。
 - Web 源码、构建配置和测试都位于 `apps/web`；不要把生成的 `dist/` 或 `node_modules/` 加入版本控制。
-- 当前只保留 `apps/api/src/contentai_migrations/versions/202607150001_initial_schema.py` 单一初始迁移；LangGraph checkpoint/store 不进入 Alembic 自动生成结果。
+- 当前 Alembic 迁移链从 `202607210001_v050_initial_schema.py` 延伸到显式 API 模式、用量 token/成本一致性、ChatMessage lineage、Memory 数值约束、current-attempt lineage、Agent catalog keyset 分页索引、checkpoint revision fence 与事件流 DB 水位；当前 head 为 `202608040009`。LangGraph checkpoint/store 不进入 Alembic 自动生成结果，新数据库必须升级到 head。
 - 面向用户的内容只能通过 Assistant 消息交付，不新增研究包、稿件或工作流阶段模型。
 - 文件修改后优先运行与改动范围相符的检查；涉及构建、路径或容器时运行 `tools/review.ps1` 与 `docker compose config --quiet`。

@@ -1,15 +1,34 @@
-param([string]$Version = "0.4.1")
+param([string]$Version)
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$commit = (& git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+  throw "Unable to resolve the release commit."
+}
+$projectText = ((& git -C $root show "${commit}:pyproject.toml") -join [Environment]::NewLine)
+if ($LASTEXITCODE -ne 0) { throw "Unable to read pyproject.toml from the release commit." }
+$projectBlock = [regex]::Match($projectText, '(?ms)^\[project\]\s*(?<body>.*?)(?=^\[|\z)')
+$versionMatch = [regex]::Match($projectBlock.Groups['body'].Value, '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$')
+if (-not $versionMatch.Success) { throw "Canonical project version is missing from pyproject.toml" }
+$canonicalVersion = $versionMatch.Groups['version'].Value
+if ([string]::IsNullOrWhiteSpace($Version)) {
+  $Version = $canonicalVersion
+} elseif ($Version -ne $canonicalVersion) {
+  throw "Package version '$Version' does not match canonical version '$canonicalVersion'."
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+  throw "Package version is invalid: $Version"
+}
 $name = "contentai-$Version-ubuntu"
-$stage = Join-Path $root "dist/$name"
+$dist = Join-Path $root "dist"
 $archive = Join-Path $root "dist/$name.tar.gz"
+$checksum = "$archive.sha256"
 
 $requiredPaths = @(
   "apps/api/src", "apps/web/src", "apps/web/index.html",
-  "apps/api/src/contentai_migrations/env.py",
-  "apps/api/src/contentai_migrations/versions/202607150001_initial_schema.py",
+  "apps/api/src/contentai/migrations/env.py",
+  "apps/api/src/contentai/migrations/versions/202607210001_v050_initial_schema.py",
   "apps/web/package.json", "apps/web/package-lock.json", "apps/web/tsconfig.json",
   "apps/web/tsconfig.node.json", "apps/web/vite.config.ts",
   "docs", "infra", "infra/ubuntu/deploy.sh", "infra/ubuntu/health.sh",
@@ -20,27 +39,42 @@ $requiredPaths = @(
 )
 
 foreach ($relative in $requiredPaths) {
-  if (-not (Test-Path -LiteralPath (Join-Path $root $relative))) {
-    throw "Required archive input is missing: $relative"
+  & git -C $root cat-file -e "${commit}:$relative"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Required archive input is missing from the release commit: $relative"
   }
 }
 
-if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-New-Item -ItemType Directory -Path $stage -Force | Out-Null
+if (Test-Path -LiteralPath $checksum) { Remove-Item -LiteralPath $checksum -Force }
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-foreach ($relative in $requiredPaths) {
-  $source = Join-Path $root $relative
-  $target = Join-Path $stage $relative
-  New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
-  Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
+$manifest = [ordered]@{ version = $Version; commit = $commit } | ConvertTo-Json -Compress
+$manifestDirectory = Join-Path ([IO.Path]::GetTempPath()) ("contentai-package-" + [Guid]::NewGuid().ToString("N"))
+$manifestFile = Join-Path $manifestDirectory "release-manifest.json"
+
+try {
+  New-Item -ItemType Directory -Path $manifestDirectory -Force | Out-Null
+  $encoding = New-Object Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($manifestFile, $manifest, $encoding)
+  $archiveArguments = @(
+    "archive",
+    "--format=tar.gz",
+    "--prefix=$name/",
+    "--output=$archive",
+    "--add-file=$manifestFile",
+    $commit,
+    "--"
+  ) + $requiredPaths
+  & git -C $root @archiveArguments
+  if ($LASTEXITCODE -ne 0) { throw "Unable to create the release archive." }
 }
-
-Get-ChildItem -Path $stage -Recurse -Directory | Where-Object {
-  $_.Name -in @("node_modules", "dist", "__pycache__", ".pytest_cache", ".ruff_cache")
-} | Sort-Object FullName -Descending | Remove-Item -Recurse -Force
-
-tar -C (Split-Path $stage -Parent) -czf $archive $name
-if ($LASTEXITCODE -ne 0) { throw "tar 打包失败" }
+finally {
+  if (Test-Path -LiteralPath $manifestFile) { Remove-Item -LiteralPath $manifestFile -Force }
+  if (Test-Path -LiteralPath $manifestDirectory) { Remove-Item -LiteralPath $manifestDirectory -Force }
+}
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+"$hash  $name.tar.gz" | Set-Content -LiteralPath $checksum -Encoding ASCII -NoNewline
 Write-Output $archive
-Get-FileHash -Algorithm SHA256 -LiteralPath $archive | Select-Object -ExpandProperty Hash
+Write-Output $checksum
+Write-Output $hash

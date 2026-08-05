@@ -1,5 +1,5 @@
-from agent.context.assembler import _render_versioned_system_prompt
-from models.agent import AgentVersion
+from contentai.agent.context.assembler import _render_versioned_system_prompt
+from contentai.models.agent import AgentVersion
 
 
 def test_topic_scoring_prompt_is_not_exposed_to_primary_agent_context():

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from db.session import get_engine
-from memory.repository import MemoryRepository
-from memory.short_term import ShortTermMemory
-from models.chat import ChatMessage, ChatSession
-from models.enums import MessageRole
+from contentai.db.session import get_engine
+from contentai.memory.repository import MemoryRepository
+from contentai.memory.short_term import ShortTermMemory
+from contentai.models.chat import ChatMessage, ChatSession
+from contentai.models.enums import MessageRole
 from sqlmodel import Session
 
 
@@ -60,3 +60,34 @@ def test_short_term_summary_accumulates_from_cursor_without_losing_early_constra
     assert "Recent decision" in cumulative
     assert entry is not None
     assert entry.payload["cursor_message_id"] == second_id
+
+
+def test_short_term_memory_load_messages_limits_history_in_sql_and_keeps_order() -> None:
+    with Session(get_engine()) as session:
+        chat = ChatSession(
+            id="session-short-term-window",
+            agent_id="default-agent",
+            agent_version_id="default-agent-v1",
+            user_id="local-user",
+        )
+        session.add(chat)
+        session.flush()
+        for index in range(45):
+            session.add(
+                ChatMessage(
+                    id=f"message-window-{index:03d}",
+                    session_id=chat.id,
+                    role=MessageRole.user,
+                    content=f"message {index}",
+                )
+            )
+        session.commit()
+
+        messages = ShortTermMemory(MemoryRepository(session)).load_messages(
+            session,
+            session_id=chat.id,
+        )
+
+    assert len(messages) == 40
+    assert messages[0].content == "message 5"
+    assert messages[-1].content == "message 44"

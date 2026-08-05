@@ -19,4 +19,4 @@ RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels content
     && rm -rf /wheels
 USER contentai
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "contentai.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,4 +1,5 @@
 ﻿.venv/
+.worktrees/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -20,6 +21,7 @@ apps/web/vite.config.d.ts
 apps/web/vite.config.js
 output/
 dist/
+backups/
 node_modules/
 celerybeat-schedule*
 apps/api/src/celerybeat-schedule*
